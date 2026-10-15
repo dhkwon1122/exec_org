@@ -15,6 +15,7 @@ import dash
 import dash_bootstrap_components as dbc
 import flask
 from dash import dcc, html
+from flask.sessions import SecureCookieSessionInterface
 
 import components.todo_ui  # noqa: F401  할 일 체크/삭제 공용 콜백 등록
 from services import auth, store, users
@@ -64,6 +65,19 @@ if _TRUSTED_PROXY_COUNT > 0:
     server.wsgi_app = ProxyFix(server.wsgi_app, x_for=_TRUSTED_PROXY_COUNT, x_proto=_TRUSTED_PROXY_COUNT,
                                x_host=_TRUSTED_PROXY_COUNT)
 server.secret_key = _secret_key()
+
+
+class _RequestAwareSession(SecureCookieSessionInterface):
+    """세션 쿠키의 Secure 속성을 실제 접속 방식으로 정한다 — https 면 Secure, http 면 일반 쿠키.
+    SESSION_COOKIE_SECURE=true 고정값은 http 로 접속하면 브라우저가 쿠키를 버려 로그인이 아예 안 된다
+    (People in SAIT 의 .env 를 복사하면 이 값이 딸려 오기 쉽다). 그래서 설정값 대신 요청을 본다.
+    리버스 프록시 뒤라면 TRUSTED_PROXY_COUNT 로 X-Forwarded-Proto 를 반영한다."""
+
+    def get_cookie_secure(self, app):
+        return flask.has_request_context() and flask.request.is_secure
+
+
+server.session_interface = _RequestAwareSession()
 server.config.update(
     PERMANENT_SESSION_LIFETIME=timedelta(hours=int(os.environ.get('SESSION_LIFETIME_HOURS', '8'))),
     # 같은 서버의 People in SAIT(8501)도 Flask 기본 쿠키 이름 'session' 을 쓴다. 브라우저 쿠키는 포트를
@@ -72,8 +86,6 @@ server.config.update(
     SESSION_COOKIE_NAME=os.environ.get('SESSION_COOKIE_NAME', 'exec_org_session'),
     SESSION_COOKIE_HTTPONLY=True,
     SESSION_COOKIE_SAMESITE='Lax',
-    # HTTPS(리버스 프록시)로 운영할 때 true
-    SESSION_COOKIE_SECURE=os.environ.get('SESSION_COOKIE_SECURE', 'false').lower() in ('1', 'true', 'yes'),
     MAX_CONTENT_LENGTH=int(os.environ.get('MAX_CONTENT_LENGTH', str(80 * 1024 * 1024))),
 )
 
@@ -153,10 +165,6 @@ def login():
     expected = flask.session.pop('csrf', None)
     if not expected:
         # 로그인 화면을 열 때 준 세션 쿠키가 돌아오지 않았다
-        if server.config['SESSION_COOKIE_SECURE'] and not flask.request.is_secure:
-            return _login_page('HTTPS 전용 쿠키(SESSION_COOKIE_SECURE=true)인데 http:// 로 접속했습니다. '
-                               'https:// 주소로 접속하거나 .env 에서 SESSION_COOKIE_SECURE=false 로 바꾸세요.',
-                               status=400)
         return _login_page('로그인 화면이 만료되었습니다. 다시 로그인하세요. 계속되면 브라우저 쿠키 차단 설정을 확인하세요.',
                            status=400)
     if not secrets.compare_digest(expected, form.get('csrf', '')):

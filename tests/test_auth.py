@@ -77,6 +77,17 @@ def test_login_survives_people_in_sait_cookie_on_same_host(client):
     assert client.get_cookie('exec_org_session') is not None
 
 
+def test_session_cookie_secure_follows_request_scheme(client, monkeypatch):
+    """http 로 접속하면 Secure 없이(로그인 가능), https 면 Secure. .env 의 SESSION_COOKIE_SECURE 와 무관."""
+    monkeypatch.setenv('SESSION_COOKIE_SECURE', 'true')
+    users.create_local_user('kim', 'password123', '김철수', role='executive_org')
+    http_cookie = client.get('/login').headers['Set-Cookie']
+    assert 'exec_org_session=' in http_cookie and 'Secure' not in http_cookie
+    assert _login(client, 'kim', 'password123').status_code == 302
+    https_cookie = client.get('/login', base_url='https://localhost').headers['Set-Cookie']
+    assert 'Secure' in https_cookie
+
+
 def test_csrf_and_logout(client):
     users.create_local_user('kim', 'password123', '김철수', role='executive_org')
     client.get('/login')
