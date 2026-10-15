@@ -45,23 +45,27 @@ def _locked(key: str) -> bool:
 
 
 def login(user_id: str, password: str, client: str = '') -> tuple[dict | None, str]:
-    """성공하면 (사용자, ''), 실패하면 (None, 안내 문구). 세션에 저장까지 한다."""
+    """성공하면 (사용자, ''), 실패하면 (None, 사유 코드). 세션에 저장까지 한다.
+    사유 코드: invalid / locked / must_change_password / role / userdb (app.py 의 _LOGIN_ERRORS)"""
     user_id = (user_id or '').strip()
     key = f'{client}|{user_id.lower()}'
     if _locked(key):
-        return None, '로그인 실패가 반복되어 잠시 막혔습니다. 10분 뒤 다시 시도하세요.'
+        return None, 'locked'
     try:
         user = users.verify(user_id, password)
     except users.UserDBError as e:
-        return None, str(e)
+        print(f'[login] 사용자 DB 오류: {e}', flush=True)
+        return None, 'userdb'
     if user is None:
         _failures.setdefault(key, []).append(time.time())
-        return None, '아이디 또는 비밀번호가 올바르지 않습니다.'
+        return None, 'invalid'
     _failures.pop(key, None)
     if user['must_change_password']:
-        return None, '임시 비밀번호 상태입니다. People in SAIT 에서 비밀번호를 먼저 바꾼 뒤 로그인하세요.'
+        return None, 'must_change_password'
     if not is_allowed(user):
-        return None, '임원조직 담당자만 사용할 수 있는 시스템입니다.'
+        print(f"[login] 역할 불일치 user_id={user_id!r} role={user['role']!r} 허용={sorted(allowed_roles())}",
+              flush=True)
+        return None, 'role'
     flask.session.clear()
     flask.session.permanent = True
     flask.session['user'] = {'user_id': user['user_id'], 'name': user['name']}

@@ -34,7 +34,7 @@ Researcher-board(People in SAIT)와 같은 구성이다 — 사내 pip 저장소
 `.env` 값을 `docker-compose.yml` 이 주입하며, 컨테이너는 비root(uid 10001)로 gunicorn 을 띄운다.
 
 ```bash
-cp .env.example .env                  # USER_DATABASE_URL 필수 (People in SAIT 의 PostgreSQL)
+cp .env.example .env                  # DATABASE_URL = tea-meeting-agenda 의 .env 와 같은 값 (People in SAIT 사용자 DB)
 sudo scripts/fix_data_ownership.sh    # 처음 한 번: ./data 를 컨테이너 사용자 소유로 + 다른 사용자 접근 차단
 docker compose up -d --build          # http://<서버>:8502
 ```
@@ -48,7 +48,7 @@ docker compose up -d --build          # http://<서버>:8502
   `TRUSTED_PROXY_COUNT=1` 을 넣은 뒤 `docker compose --profile proxy up -d` → `https://<서버>:8443`
 - People in SAIT 가 같은 서버에서 postgres 컨테이너(bundled-db)를 쓰면 그 네트워크에 붙인다:
   `docker compose -f docker-compose.yml -f docker-compose.people-net.yml up -d --build`
-  (이때 `USER_DATABASE_URL`의 호스트는 `db`)
+  (이때 `DATABASE_URL`의 호스트는 `db`)
 - 업무 기록·업로드 파일·세션 키는 모두 `./data`에 쌓인다 → **이 디렉터리를 백업**한다.
 - 상태 확인: `curl http://localhost:8502/healthz`, 로그: `docker compose logs -f app`
 
@@ -62,12 +62,12 @@ python app.py                # http://localhost:8050
 - 설정은 `.env.example` 참고. LLM 은 OpenAI 호환 `chat/completions` 엔드포인트(사내 vLLM 등)를 쓰며,
   `LLM_API_URL`(없으면 Researcher-board 의 `LLM2_API_URL`)이 비어 있으면 AI 기능만 꺼지고 나머지는 그대로 동작한다.
 - 기본 저장소는 `data/exec_org.db`(SQLite), 업로드 파일은 `data/uploads/`. `data/`는 형상관리에서 제외된다.
-- `DATABASE_URL` 환경변수(또는 `.env`)를 지정하면 PostgreSQL 등 다른 DB를 사용한다. 테이블은 시작 시 자동 생성되고,
+- 업무 기록을 PostgreSQL 에 두려면 `EXEC_ORG_DATABASE_URL`을 지정한다 (`DATABASE_URL`은 사용자 DB). 테이블은 시작 시 자동 생성되고,
   이전 버전 DB 에 없는 컬럼은 자동으로 추가된다.
 
 ## 로그인과 접근 권한
 
-- **계정**: `USER_DATABASE_URL`에 People in SAIT(Researcher-board)의 PostgreSQL 을 지정하면 그 `app_users` 계정·비밀번호로
+- **계정**: `DATABASE_URL`(tea-meeting-agenda 와 같은 이름·값, 또는 `USER_DATABASE_URL`)에 People in SAIT 의 PostgreSQL 을 지정하면 그 `app_users` 계정·비밀번호로
   로그인한다. 이 테이블은 다른 시스템도 함께 쓰므로 **읽기만** 하고(쓰기·스키마 변경 없음), 계정 생성·비밀번호 변경은
   People in SAIT 에서 한다. 임시 비밀번호 상태(`must_change_password`)인 계정은 로그인을 막는다.
 - **접속 권한**: `app_users.role` 이 `executive_org`(임원조직 담당자)인 계정만 로그인된다. 그 외 역할은 계정이 있어도
@@ -75,8 +75,11 @@ python app.py                # http://localhost:8050
 - 역할은 매 요청마다 사용자 DB 에서 다시 확인하므로, People in SAIT 에서 역할이 바뀌면 이미 로그인한 사람도
   다음 클릭부터 막힌다.
 - 모든 화면·Dash 콜백·첨부파일 다운로드가 로그인 뒤에만 열린다. 로그인 5회 실패 시 10분 잠금, 세션 8시간,
-  HttpOnly·SameSite 쿠키, 로그인 폼 CSRF 토큰, 응답 캐시 금지(no-store).
-- 단독 실행/개발: `USER_DATABASE_URL`을 비우면 로컬 `app_users`를 쓴다 → `python scripts/create_user.py <아이디> <이름>`
+  HttpOnly·SameSite 쿠키(이름 `exec_org_session`), 로그인 요청 출처(Origin) 확인, 응답 캐시 금지(no-store).
+  로그인 전에는 쿠키를 쓰지 않고 성공했을 때만 세션 쿠키를 준다 (tea-meeting-agenda 와 같은 흐름).
+- **로그인이 안 될 때**: `docker compose exec app python scripts/auth_check.py <아이디> <비밀번호>` 로 사용자 DB 연결 →
+  계정 → 비밀번호 → 역할 → 세션 키를 단계별로 확인하고, `docker compose logs app | grep login` 으로 실패 사유를 본다.
+- 단독 실행/개발: `DATABASE_URL`·`USER_DATABASE_URL`을 비우면 로컬 `app_users`를 쓴다 → `python scripts/create_user.py <아이디> <이름>`
 
 ## 구조
 
@@ -97,7 +100,7 @@ pages/todos.py          할 일
 pages/calendar.py       캘린더
 pages/task_detail.py    업무 상세 (이력 / 할 일 / 참고자료 / 연결 업무 탭, 하위 업무)
 pages/references.py     전체 참고자료 검색
-scripts/                create_user.py(로컬 계정), fix_data_ownership.sh, gen_self_signed_cert.sh
+scripts/                auth_check.py(로그인 진단), create_user.py(로컬 계정), fix_data_ownership.sh, gen_self_signed_cert.sh
 Dockerfile, docker-compose*.yml, deploy/nginx.conf, certs/   Docker 실행 구성
 tests/                  저장·검색·LLM 파싱 테스트 (pip install -r requirements-dev.txt; pytest)
 ```
