@@ -66,6 +66,10 @@ if _TRUSTED_PROXY_COUNT > 0:
 server.secret_key = _secret_key()
 server.config.update(
     PERMANENT_SESSION_LIFETIME=timedelta(hours=int(os.environ.get('SESSION_LIFETIME_HOURS', '8'))),
+    # 같은 서버의 People in SAIT(8501)도 Flask 기본 쿠키 이름 'session' 을 쓴다. 브라우저 쿠키는 포트를
+    # 구분하지 않아 이름이 같으면 서로 덮어써 로그인 토큰이 사라진다("페이지가 만료되었습니다") —
+    # 이 앱만의 이름을 쓴다.
+    SESSION_COOKIE_NAME=os.environ.get('SESSION_COOKIE_NAME', 'exec_org_session'),
     SESSION_COOKIE_HTTPONLY=True,
     SESSION_COOKIE_SAMESITE='Lax',
     # HTTPS(리버스 프록시)로 운영할 때 true
@@ -147,7 +151,15 @@ def login():
         return _login_page()
     form = flask.request.form
     expected = flask.session.pop('csrf', None)
-    if not expected or not secrets.compare_digest(expected, form.get('csrf', '')):
+    if not expected:
+        # 로그인 화면을 열 때 준 세션 쿠키가 돌아오지 않았다
+        if server.config['SESSION_COOKIE_SECURE'] and not flask.request.is_secure:
+            return _login_page('HTTPS 전용 쿠키(SESSION_COOKIE_SECURE=true)인데 http:// 로 접속했습니다. '
+                               'https:// 주소로 접속하거나 .env 에서 SESSION_COOKIE_SECURE=false 로 바꾸세요.',
+                               status=400)
+        return _login_page('로그인 화면이 만료되었습니다. 다시 로그인하세요. 계속되면 브라우저 쿠키 차단 설정을 확인하세요.',
+                           status=400)
+    if not secrets.compare_digest(expected, form.get('csrf', '')):
         return _login_page('페이지가 만료되었습니다. 다시 시도하세요.', status=400)
     user, error = auth.login(form.get('user_id', ''), form.get('password', ''),
                              client=flask.request.remote_addr or '')
