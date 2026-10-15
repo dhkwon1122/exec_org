@@ -65,6 +65,18 @@ def test_only_executive_org_role_can_log_in(client, monkeypatch):
     assert _login(client, 'park', 'password123').status_code == 302
 
 
+def test_login_survives_people_in_sait_cookie_on_same_host(client):
+    """같은 서버(포트만 다름)의 People in SAIT 가 'session' 쿠키를 써도 로그인 토큰이 덮이지 않는다."""
+    users.create_local_user('kim', 'password123', '김철수', role='executive_org')
+    page = client.get('/login').get_data(as_text=True)
+    csrf = re.search(r'name="csrf" value="([^"]+)"', page).group(1)
+    client.set_cookie('session', 'people-in-sait-session-value')  # 다른 탭에서 People in SAIT 사용
+    r = client.post('/login', data={'user_id': 'kim', 'password': 'password123', 'csrf': csrf})
+    assert r.status_code == 302
+    assert client.get_cookie('session').value == 'people-in-sait-session-value'  # 그쪽 로그인도 그대로
+    assert client.get_cookie('exec_org_session') is not None
+
+
 def test_csrf_and_logout(client):
     users.create_local_user('kim', 'password123', '김철수', role='executive_org')
     client.get('/login')
