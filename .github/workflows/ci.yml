@@ -1,0 +1,47 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main, master]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"   # Dockerfile 과 같은 버전
+          cache: pip
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt -r requirements-dev.txt
+      - name: Static checks
+        run: python -m compileall -q -x '/\.venv/' .
+      - name: Unit tests
+        run: pytest -q
+
+  docker:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build image (공용 PyPI — 사내 빌드 인자 비움)
+        run: |
+          docker build -t exec-org:ci \
+            --build-arg PIP_INDEX_URL= --build-arg PIP_TRUSTED_HOST= \
+            --build-arg HTTP_PROXY= --build-arg HTTPS_PROXY= .
+      - name: Smoke test (/healthz, 로그인 화면, 미로그인 차단)
+        run: |
+          docker run -d --name app -p 8502:8502 exec-org:ci
+          for i in $(seq 1 30); do curl -fsS http://127.0.0.1:8502/healthz && break; sleep 1; done
+          curl -fsS http://127.0.0.1:8502/login | grep -q '업무 기록'
+          test "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8502/)" = "302"
+          test "$(curl -s -o /dev/null -w '%{http_code}' -X POST http://127.0.0.1:8502/_dash-update-component)" = "401"
+          docker logs app
