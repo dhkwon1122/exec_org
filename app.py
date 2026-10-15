@@ -10,6 +10,7 @@ import secrets
 import time
 from datetime import timedelta
 from html import escape
+from urllib.parse import urlencode, urlparse
 
 import dash
 import dash_bootstrap_components as dbc
@@ -23,9 +24,9 @@ from services.db import DATA_DIR
 
 
 def _secret_key() -> str:
-    """세션 서명 키. FLASK_SECRET_KEY 가 없으면 data/.flask_secret_key 에 한 번 만들어 재사용한다
+    """세션 서명 키. SESSION_SECRET(tea-meeting-agenda 와 같은 이름) 또는 FLASK_SECRET_KEY 가 없으면 data/.flask_secret_key 에 한 번 만들어 재사용한다
     (gunicorn 워커가 여럿이어도 같은 키를 쓰도록 파일에 고정, O_EXCL 로 한 워커만 생성)."""
-    env = os.environ.get('FLASK_SECRET_KEY', '').strip()
+    env = (os.environ.get('SESSION_SECRET') or os.environ.get('FLASK_SECRET_KEY') or '').strip()
     if env:
         return env
     os.makedirs(DATA_DIR, exist_ok=True)
@@ -135,7 +136,6 @@ _LOGIN_HTML = '''<!doctype html><html lang="ko"><head><meta charset="utf-8">
 <h4 class="mb-1">업무 기록</h4><p class="text-muted small mb-4">{hint}</p>
 {error}
 <form method="post" action="/login" autocomplete="on">
-<input type="hidden" name="csrf" value="{csrf}">
 <div class="mb-3"><label class="form-label">아이디</label>
 <input class="form-control" name="user_id" value="{user_id}" autofocus required></div>
 <div class="mb-3"><label class="form-label">비밀번호</label>
@@ -143,16 +143,39 @@ _LOGIN_HTML = '''<!doctype html><html lang="ko"><head><meta charset="utf-8">
 <button class="btn btn-primary w-100" type="submit">로그인</button>
 </form></div></div></div></body></html>'''
 
+# 로그인 실패 사유 코드 → 화면 문구. POST 결과를 /login?error=코드 로 리다이렉트해서 보여준다
+# (tea-meeting-agenda 와 같은 방식 — 새로고침해도 폼이 다시 전송되지 않는다).
+_LOGIN_ERRORS = {
+    'invalid': '아이디 또는 비밀번호가 올바르지 않습니다.',
+    'locked': '로그인 실패가 반복되어 잠시 막혔습니다. 10분 뒤 다시 시도하세요.',
+    'must_change_password': '임시 비밀번호 상태입니다. People in SAIT 에서 비밀번호를 먼저 바꾼 뒤 로그인하세요.',
+    'role': '임원조직 담당자만 사용할 수 있는 시스템입니다.',
+    'userdb': '사용자 DB 에 연결할 수 없습니다. 관리자에게 문의하세요 (scripts/auth_check.py 로 진단).',
+    'origin': '다른 사이트에서 보낸 로그인 요청이라 거부했습니다. 주소창에 이 시스템 주소를 직접 입력해 접속하세요.',
+    'cookie': ('로그인은 성공했지만 브라우저가 로그인 쿠키를 저장하지 않았습니다. '
+               '브라우저의 쿠키 차단 설정이나 사내 프록시 설정을 확인하세요.'),
+}
 
-def _login_page(error: str = '', user_id: str = '', status: int = 200):
-    csrf = secrets.token_urlsafe(24)
-    flask.session['csrf'] = csrf
+
+def _login_page(error_code: str = '', user_id: str = ''):
     hint = ('People in SAIT 계정으로 로그인하세요 (임원조직 담당자 전용).' if users.is_shared()
             else '계정으로 로그인하세요 (임원조직 담당자 전용).')
+    error = _LOGIN_ERRORS.get(error_code, '')
     body = _LOGIN_HTML.format(
-        css=dbc.themes.BOOTSTRAP, hint=hint, csrf=csrf, user_id=escape(user_id),
+        css=dbc.themes.BOOTSTRAP, hint=hint, user_id=escape(user_id),
         error=f'<div class="alert alert-danger py-2 small">{escape(error)}</div>' if error else '')
-    return flask.Response(body, status=status, mimetype='text/html')
+    return flask.Response(body, mimetype='text/html')
+
+
+def _cross_site_post() -> bool:
+    """다른 사이트가 사용자 브라우저로 로그인 폼을 몰래 보내는 것(login CSRF) 차단.
+    로그인 전에는 쿠키에 아무것도 저장하지 않으므로(쿠키가 사라져 '만료'되는 일이 없도록),
+    토큰 대신 브라우저가 붙이는 Origin/Referer 의 호스트가 이 서버와 같은지만 본다.
+    둘 다 없으면(일부 브라우저·도구) 막지 않는다."""
+    src = flask.request.headers.get('Origin') or flask.request.headers.get('Referer') or ''
+    if not src or src == 'null':
+        return False
+    return urlparse(src).netloc.lower() != flask.request.host.lower()
 
 
 @server.route('/login', methods=['GET', 'POST'])
@@ -160,20 +183,28 @@ def login():
     if flask.request.method == 'GET':
         if auth.current_user():
             return flask.redirect('/')
-        return _login_page()
+        return _login_page(flask.request.args.get('error', ''), flask.request.args.get('user_id', ''))
     form = flask.request.form
-    expected = flask.session.pop('csrf', None)
-    if not expected:
-        # 로그인 화면을 열 때 준 세션 쿠키가 돌아오지 않았다
-        return _login_page('로그인 화면이 만료되었습니다. 다시 로그인하세요. 계속되면 브라우저 쿠키 차단 설정을 확인하세요.',
-                           status=400)
-    if not secrets.compare_digest(expected, form.get('csrf', '')):
-        return _login_page('페이지가 만료되었습니다. 다시 시도하세요.', status=400)
-    user, error = auth.login(form.get('user_id', ''), form.get('password', ''),
-                             client=flask.request.remote_addr or '')
+    user_id = form.get('user_id', '').strip()
+    if _cross_site_post():
+        print(f"[login] 거부(출처 불일치): Origin={flask.request.headers.get('Origin')!r} "
+              f"Referer={flask.request.headers.get('Referer')!r} Host={flask.request.host!r}", flush=True)
+        return flask.redirect('/login?' + urlencode({'error': 'origin'}))
+    user, code = auth.login(user_id, form.get('password', ''), client=flask.request.remote_addr or '')
     if user is None:
-        return _login_page(error, form.get('user_id', ''), status=401)
-    return flask.redirect('/')
+        print(f'[login] 실패 user_id={user_id!r} 사유={code} client={flask.request.remote_addr}', flush=True)
+        return flask.redirect('/login?' + urlencode({'error': code, 'user_id': user_id}))
+    print(f'[login] 성공 user_id={user_id!r}', flush=True)
+    # 세션 쿠키가 브라우저에 실제로 저장됐는지 한 번 확인하고 들어간다
+    return flask.redirect('/login/check')
+
+
+@server.route('/login/check')
+def login_check():
+    if auth.current_user():
+        return flask.redirect('/')
+    print('[login] 로그인 직후인데 세션 쿠키가 돌아오지 않음 — 브라우저/프록시가 쿠키를 버림', flush=True)
+    return flask.redirect('/login?' + urlencode({'error': 'cookie'}))
 
 
 @server.route('/logout')

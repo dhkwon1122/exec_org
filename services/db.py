@@ -1,7 +1,8 @@
 """DB 연결과 테이블 정의.
 
-기본은 프로젝트 안의 SQLite 파일(data/exec_org.db)이고, DATABASE_URL 환경변수가
-있으면 그 DB(PostgreSQL 등)를 쓴다. 테이블은 앱 시작 시 없으면 자동 생성한다.
+기본은 프로젝트 안의 SQLite 파일(data/exec_org.db)이고, EXEC_ORG_DATABASE_URL 환경변수가
+있으면 그 DB(PostgreSQL 등)를 쓴다. (DATABASE_URL 은 tea-meeting-agenda 처럼 People in SAIT
+사용자 DB 를 가리키므로 업무 기록 DB 로는 쓰지 않는다 — services/users.py) 테이블은 앱 시작 시 없으면 자동 생성한다.
 
 테이블 구성
 - tasks          : 업무 (상위 업무 parent_id 로 계층 구성 가능)
@@ -123,7 +124,7 @@ class Todo(Base):
 
 
 def make_engine(url: str | None = None):
-    url = url or os.environ.get('DATABASE_URL', '').strip()
+    url = url or os.environ.get('EXEC_ORG_DATABASE_URL', '').strip()
     if not url:
         os.makedirs(DATA_DIR, exist_ok=True)
         url = 'sqlite:///' + os.path.join(DATA_DIR, 'exec_org.db')

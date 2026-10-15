@@ -1,11 +1,13 @@
 """사용자 DB — 계정(아이디·비밀번호 해시·이름·역할) 조회.
 
-운영: USER_DATABASE_URL 에 People in SAIT(Researcher-board)가 쓰는 PostgreSQL 을
+운영: DATABASE_URL(또는 USER_DATABASE_URL)에 People in SAIT(Researcher-board)가 쓰는 PostgreSQL 을
 지정하면 그 DB 의 app_users 테이블을 **읽기 전용**으로 사용한다. 같은 계정·비밀번호로
 로그인하며, 계정 생성·비밀번호 변경은 People in SAIT 에서 한다. 이 테이블은 다른
 시스템도 함께 쓰므로 여기서는 절대 스키마를 만들거나 바꾸거나 쓰지 않는다.
 
-개발/단독 실행: USER_DATABASE_URL 이 없으면 이 앱 DB 안에 같은 모양의 app_users 를
+tea-meeting-agenda 와 같은 이름(DATABASE_URL)이라 그쪽 .env 값을 그대로 쓰면 된다.
+
+개발/단독 실행: 둘 다 없으면 이 앱 DB 안에 같은 모양의 app_users 를
 만들어 쓴다 (scripts/create_user.py 로 계정 생성).
 
 비밀번호 해시는 Researcher-board 와 같은 werkzeug(generate/check_password_hash).
@@ -44,14 +46,18 @@ class UserDBError(RuntimeError):
     """사용자 DB 연결/조회 실패."""
 
 
+def user_db_url() -> str:
+    return (os.environ.get('USER_DATABASE_URL') or os.environ.get('DATABASE_URL') or '').strip()
+
+
 def is_shared() -> bool:
-    return bool(os.environ.get('USER_DATABASE_URL', '').strip())
+    return bool(user_db_url())
 
 
 def _get():
     global _engine, _table
     if _engine is None:
-        url = os.environ.get('USER_DATABASE_URL', '').strip()
+        url = user_db_url()
         if url:
             connect_args = {'connect_timeout': 5} if url.startswith('postgresql') else {}
             _engine = create_engine(url, future=True, pool_pre_ping=True, connect_args=connect_args)
