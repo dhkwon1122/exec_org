@@ -36,7 +36,9 @@ def search(q, kind):
             ], className='d-flex align-items-center'),
             ui.ref_target(r),
             html.Div(r['note'][:200], className='small mt-1', style={'whiteSpace': 'pre-wrap'}) if r['note'] else None,
-            html.Div(['업무: ', dcc.Link(f"#{r['task_id']} {r['task_title']}", href=f"/task/{r['task_id']}")],
+            html.Div(['업무: ', dcc.Link(f"#{r['task_id']} {r['task_title']}", href=f"/task/{r['task_id']}"),
+                      html.Span([html.I(className='bi bi-clock-history ms-2 me-1'), '이력에 첨부'])
+                      if r['history_id'] else None],
                      className='small text-muted mt-1'),
         ]) for r in refs
     ])

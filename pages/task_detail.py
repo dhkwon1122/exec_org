@@ -6,7 +6,8 @@ import dash_bootstrap_components as dbc
 from dash import ALL, Input, Output, State, callback, ctx, dcc, html, no_update
 
 from components import todo_ui, ui
-from components.history_form import decode_text_upload, history_form
+from components.history_form import (decode_text_upload, history_form, parse_uploads, register_form_callbacks,
+                                     save_history)
 from services import auth, enrich, llm, store
 
 dash.register_page(__name__, path_template='/task/<task_id>', name='업무 상세', title='업무 기록 · 상세')
@@ -57,7 +58,17 @@ def _history_edit_modal():
             dbc.Label('제목'), dbc.Input(id='he-title', className='mb-2'),
             dbc.Label('요약'), dbc.Textarea(id='he-summary', rows=3, className='mb-2'),
             dbc.Label('키워드 (쉼표 구분)'), dbc.Input(id='he-keywords', className='mb-2'),
-            dbc.Label('원문'), dbc.Textarea(id='he-content', rows=8),
+            dbc.Label('원문'), dbc.Textarea(id='he-content', rows=8, className='mb-3'),
+            dbc.Label('관련 자료'),
+            html.Div(id='he-refs', className='mb-2'),
+            dbc.Textarea(id='he-links', rows=2, className='mb-1 small',
+                         placeholder='추가할 링크 — 한 줄에 하나, 앞뒤 글자는 제목'),
+            html.Div([
+                dcc.Upload(dbc.Button([html.I(className='bi bi-paperclip me-1'), '파일 첨부'], color='secondary',
+                                      outline=True, size='sm'), id='he-attach', multiple=True,
+                           max_size=50 * 1024 * 1024),
+                html.Span(id='he-attach-names', className='small text-muted ms-2'),
+            ], className='d-flex align-items-center'),
             dbc.Alert(id='he-error', color='danger', is_open=False, className='mt-3 mb-0'),
         ]),
         dbc.ModalFooter([
@@ -194,6 +205,7 @@ def render(_, _t, tid):
     pending = sorted(h['id'] for h in hist if h['ai_status'] == 'pending')
 
     refs = store.list_references(task_id=tid)
+    hist_titles = {h['id']: f"{h['occurred_at'][:10]} {h['title'] or h['content'][:30]}" for h in hist}
     ref_view = dbc.ListGroup([
         dbc.ListGroupItem([
             html.Div([
@@ -205,6 +217,9 @@ def render(_, _t, tid):
             ], className='d-flex align-items-center'),
             ui.ref_target(r),
             html.Div(r['note'], className='small mt-1', style={'whiteSpace': 'pre-wrap'}) if r['note'] else None,
+            html.Div([html.I(className='bi bi-clock-history me-1'), '이력에 첨부: ',
+                      hist_titles.get(r['history_id'], f"#{r['history_id']}")],
+                     className='small text-muted mt-1') if r['history_id'] else None,
         ]) for r in refs
     ]) if refs else html.Div('참고자료가 없습니다.', className='text-muted small')
 
@@ -329,52 +344,85 @@ def load_text_file(contents, current):
     return f'{current.rstrip()}\n\n{text}' if (current or '').strip() else text
 
 
+register_form_callbacks('h')
+register_form_callbacks('he', template=False)
+
+
 @callback(Output('td-refresh', 'data', allow_duplicate=True), Output('h-content', 'value'),
-          Output('h-when', 'value'), Output('h-error', 'children'), Output('h-error', 'is_open'),
+          Output('h-when', 'value'), Output('h-links', 'value'), Output('h-attach', 'contents'),
+          Output('h-attach', 'filename'), Output('h-attach-names', 'children', allow_duplicate=True),
+          Output('h-error', 'children'), Output('h-error', 'is_open'),
           Input('h-add', 'n_clicks'), State('td-id', 'data'), State('h-type', 'value'),
           State('h-content', 'value'), State('h-when', 'value'), State('h-ai', 'value'),
+          State('h-links', 'value'), State('h-attach', 'contents'), State('h-attach', 'filename'),
           State('td-refresh', 'data'), prevent_initial_call=True)
-def add_history(_, tid, etype, content, when, use_ai, n):
-    author = auth.current_name()
+def add_history(_, tid, etype, content, when, use_ai, links, att, att_names, n):
     try:
-        h = store.add_history(tid, content, etype, author or '', when or None)
+        save_history(tid, etype, content, when, use_ai, links, att, att_names, auth.current_name())
     except ValueError as e:
-        return no_update, no_update, no_update, str(e), True
-    if use_ai:
-        enrich.submit(h['id'])
-    return (n or 0) + 1, '', None, '', False
+        return (no_update,) * 6 + (no_update, str(e), True)
+    return (n or 0) + 1, '', None, '', None, None, '', '', False
 
 
 @callback(Output('he-modal', 'is_open'), Output('he-id', 'data'), Output('he-type', 'value'),
           Output('he-when', 'value'), Output('he-title', 'value'), Output('he-summary', 'value'),
           Output('he-keywords', 'value'), Output('he-content', 'value'), Output('he-error', 'children'),
           Output('he-error', 'is_open'), Output('td-refresh', 'data', allow_duplicate=True),
+          Output('he-refs', 'children'), Output('he-links', 'value'), Output('he-attach', 'contents'),
+          Output('he-attach', 'filename'), Output('he-attach-names', 'children', allow_duplicate=True),
           Input({'type': 'h-edit', 'id': ALL}, 'n_clicks'), Input('he-cancel', 'n_clicks'),
           Input('he-save', 'n_clicks'), Input('he-regen', 'n_clicks'),
+          Input({'type': 'he-ref-del', 'id': ALL}, 'n_clicks'),
           State('he-id', 'data'), State('he-type', 'value'), State('he-when', 'value'), State('he-title', 'value'),
           State('he-summary', 'value'), State('he-keywords', 'value'), State('he-content', 'value'),
-          State('td-refresh', 'data'), prevent_initial_call=True)
-def edit_history(_e, _c, _s, _r, eid, etype, when, title, summary, keywords, content, n):
+          State('he-links', 'value'), State('he-attach', 'contents'), State('he-attach', 'filename'),
+          State('td-id', 'data'), State('td-refresh', 'data'), prevent_initial_call=True)
+def edit_history(_e, _c, _s, _r, _d, eid, etype, when, title, summary, keywords, content, links, att, att_names,
+                 tid, n):
     nu = no_update
+    clear_new = (None, None, '')  # 첨부 입력칸 비우기
     trig = ctx.triggered_id
+    if isinstance(trig, dict) and trig['type'] == 'he-ref-del':
+        if not ctx.triggered[0]['value']:
+            return (nu,) * 16
+        store.delete_reference(trig['id'])
+        return (nu,) * 10 + ((n or 0) + 1, _modal_refs(eid)) + (nu,) * 4
     if isinstance(trig, dict):
         if not ctx.triggered[0]['value']:  # 목록이 다시 그려질 때의 빈 트리거
-            return (nu,) * 11
+            return (nu,) * 16
         h = store.get_history(trig['id'])
         if h is None:
-            return (nu,) * 11
+            return (nu,) * 16
         return (True, h['id'], h['entry_type'], h['occurred_at'].replace(' ', 'T'), h['title'], h['summary'],
-                ', '.join(h['keywords']), h['content'], '', False, nu)
+                ', '.join(h['keywords']), h['content'], '', False, nu, _modal_refs(h['id']), '') + clear_new
     if trig == 'he-cancel':
-        return (False,) + (nu,) * 7 + ('', False, nu)
+        return (False,) + (nu,) * 7 + ('', False, nu, nu, '') + clear_new
     try:
         store.update_history(eid, entry_type=etype, occurred_at=when or None, title=title or '',
                              summary=summary or '', keywords=keywords or '', content=content or '')
+        author = auth.current_name()
+        store.attach_links(tid, eid, store.parse_links(links or ''), author=author)
+        for name, data in parse_uploads(att, att_names):
+            store.add_reference(tid, 'file', title=name, file_name=name, file_bytes=data, author=author,
+                                history_id=eid)
     except ValueError as e:
-        return (True,) + (nu,) * 7 + (str(e), True, nu)
+        return (True,) + (nu,) * 7 + (str(e), True, nu, nu, nu, nu, nu, nu)
     if trig == 'he-regen':
         enrich.submit(eid)
-    return (False,) + (nu,) * 7 + ('', False, (n or 0) + 1)
+    return (False,) + (nu,) * 7 + ('', False, (n or 0) + 1, nu, '') + clear_new
+
+
+def _modal_refs(entry_id: int):
+    h = store.get_history(entry_id)
+    if not h or not h['refs']:
+        return html.Div('붙은 자료가 없습니다.', className='small text-muted')
+    return dbc.ListGroup([
+        dbc.ListGroupItem(html.Div([
+            html.Div(ui.history_refs([r]), className='flex-grow-1 text-truncate'),
+            dbc.Button(html.I(className='bi bi-trash'), id={'type': 'he-ref-del', 'id': r['id']}, color='link',
+                       size='sm', className='text-danger p-0 ms-2', title='이 자료 삭제'),
+        ], className='d-flex align-items-center'), className='py-1')
+        for r in h['refs']], className='small')
 
 
 @callback(Output('td-refresh', 'data', allow_duplicate=True), Input({'type': 'h-regen', 'id': ALL}, 'n_clicks'),

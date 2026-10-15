@@ -6,8 +6,8 @@ from dash import Input, Output, State, callback, ctx, dcc, html, no_update
 from datetime import date, timedelta
 
 from components import todo_ui, ui
-from components.history_form import decode_text_upload, history_form
-from services import auth, enrich, store
+from components.history_form import decode_text_upload, history_form, register_form_callbacks, save_history
+from services import auth, store
 
 dash.register_page(__name__, path='/', name='업무', title='업무 기록 · 업무')
 
@@ -138,27 +138,32 @@ def quick_load_file(contents, current):
     return f'{current.rstrip()}\n\n{text}' if (current or '').strip() else text
 
 
+register_form_callbacks('qr')
+
+
 @callback(Output('home-refresh', 'data'), Output('qr-content', 'value'), Output('qr-when', 'value'),
+          Output('qr-links', 'value'), Output('qr-attach', 'contents'), Output('qr-attach', 'filename'),
+          Output('qr-attach-names', 'children', allow_duplicate=True),
           Output('qr-error', 'children'), Output('qr-error', 'is_open'),
           Output('qr-ok', 'children'), Output('qr-ok', 'is_open'),
           Input('qr-add', 'n_clicks'), State('qr-task', 'value'), State('qr-type', 'value'),
           State('qr-content', 'value'), State('qr-when', 'value'), State('qr-ai', 'value'),
+          State('qr-links', 'value'), State('qr-attach', 'contents'), State('qr-attach', 'filename'),
           State('home-refresh', 'data'), prevent_initial_call=True)
-def quick_record(_, task_id, etype, content, when, use_ai, n):
-    author = auth.current_name()
+def quick_record(_, task_id, etype, content, when, use_ai, links, att, att_names, n):
     nu = no_update
     if not task_id:
-        return nu, nu, nu, '기록할 업무를 선택하세요.', True, nu, False
+        return (nu,) * 7 + ('기록할 업무를 선택하세요.', True, nu, False)
     try:
-        h = store.add_history(int(task_id), content, etype, author or '', when or None)
+        h = save_history(int(task_id), etype, content, when, use_ai, links, att, att_names, auth.current_name())
     except ValueError as e:
-        return nu, nu, nu, str(e), True, nu, False
-    if use_ai:
-        enrich.submit(h['id'])
-    msg = [f'#{task_id} 업무에 기록했습니다. ', dcc.Link('열기', href=f'/task/{task_id}')]
+        return (nu,) * 7 + (str(e), True, nu, False)
+    n_refs = len(store.get_history(h['id'])['refs'])
+    msg = [f'#{task_id} 업무에 기록했습니다' + (f' (관련 자료 {n_refs}건)' if n_refs else '') + '. ',
+           dcc.Link('열기', href=f'/task/{task_id}')]
     if use_ai:
         msg.insert(1, 'AI 요약·키워드는 잠시 후 채워집니다. ')
-    return (n or 0) + 1, '', None, '', False, msg, True
+    return (n or 0) + 1, '', None, '', None, None, '', '', False, msg, True
 
 
 @callback(Output('new-modal', 'is_open'), Output('new-parent', 'options'), Output('new-error', 'children'),

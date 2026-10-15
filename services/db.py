@@ -9,7 +9,7 @@
 - history        : 업무별 이력 (메모/회의/결정/피드백/상태변경/연결 등 시간순 기록).
                    content 는 사용자가 올린 원문 그대로, title/summary/keywords 는
                    LLM 이 만든(또는 사용자가 고친) 검색용 정리본
-- references_    : 업무별 참고자료 (링크/파일/메모)
+- references_    : 업무별 참고자료 (링크/파일/메모). history_id 가 있으면 그 이력에 붙은 관련 자료
 - task_links     : 업무 ↔ 업무 연결 (관련/선행/후속/파생)
 - todos          : 할 일 (업무에 속하거나 단독). 이력 원문에서 AI 가 뽑은 제안을 추가할 수 있음
 """
@@ -84,6 +84,8 @@ class Reference(Base):
 
     id = Column(Integer, primary_key=True)
     task_id = Column(Integer, ForeignKey('tasks.id', ondelete='CASCADE'), nullable=False, index=True)
+    # 특정 이력에 붙은 자료면 그 이력 id (이력을 지워도 자료는 업무 참고자료로 남는다)
+    history_id = Column(Integer, ForeignKey('history.id', ondelete='SET NULL'), nullable=True, index=True)
     kind = Column(String(10), nullable=False)  # link / file / note
     title = Column(String(300), nullable=False)
     url = Column(Text, default='')

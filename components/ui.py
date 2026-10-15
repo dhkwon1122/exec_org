@@ -34,6 +34,9 @@ def multiline(text: str):
 
 def ref_target(ref: dict):
     """참고자료의 실제 내용(링크/다운로드/메모 본문)."""
+    if ref['kind'] == 'link' and ref['url'].startswith('\\\\'):
+        # 공유 폴더 경로는 웹 링크로 열리지 않으므로 복사해서 탐색기에 붙여넣게 한다
+        return unc_path(ref['url'])
     if ref['kind'] == 'link':
         return html.A(ref['url'], href=ref['url'], target='_blank', rel='noopener noreferrer',
                       className='small text-break')
@@ -44,6 +47,33 @@ def ref_target(ref: dict):
 
 
 AUTO_TYPES = ('상태변경', '연결', '자료', '할일')
+
+
+def unc_path(path: str):
+    return html.Span([
+        html.Code(path, className='small text-break me-1'),
+        dcc.Clipboard(content=path, title='경로 복사 (탐색기 주소창에 붙여넣기)',
+                      style={'display': 'inline-block', 'cursor': 'pointer', 'fontSize': '0.85em'}),
+    ])
+
+
+def history_refs(refs: list[dict], terms: list[str] | None = None):
+    """이력에 붙은 관련 자료 — 링크는 새 탭, 파일은 다운로드, 공유 폴더 경로는 복사."""
+    items = []
+    for r in refs:
+        icon = html.I(className=f"bi {REF_ICON.get(r['kind'], 'bi-link-45deg')} me-1 text-muted")
+        if r['kind'] == 'link' and r['url'].startswith('\\\\'):
+            label = [highlight(r['title'], terms), ' '] if r['title'] != r['url'] else []
+            items.append(html.Div([icon, *label, unc_path(r['url'])]))
+        elif r['kind'] == 'link':
+            items.append(html.Div([icon, html.A(highlight(r['title'], terms), href=r['url'], target='_blank',
+                                                rel='noopener noreferrer', title=r['url'], className='text-break')]))
+        elif r['kind'] == 'file':
+            items.append(html.Div([icon, html.A(highlight(r['file_name'] or r['title'], terms),
+                                                href=f"/files/{r['id']}")]))
+        else:
+            items.append(html.Div([icon, highlight(r['title'], terms)]))
+    return html.Div(items, className='small mt-1 ps-2 border-start border-2')
 
 
 def highlight(text: str, terms: list[str] | None, multiline_text: bool = False):
@@ -137,5 +167,8 @@ def history_card(h: dict, terms: list[str] | None = None, show_task: bool = Fals
         ], open=only_in_raw, className='mt-1'))
     else:
         body.append(html.Div(highlight(h['content'], terms, True)))
+
+    if h.get('refs'):  # 관련 자료는 항상 내용 뒤에
+        body.append(history_refs(h['refs'], terms))
 
     return dbc.ListGroupItem([html.Div(header, className='d-flex align-items-center flex-wrap mb-1'), *body])

@@ -76,7 +76,7 @@ def _join_keywords(v) -> str:
 
 def _ref_dict(r: Reference) -> dict:
     return {
-        'id': r.id, 'task_id': r.task_id, 'kind': r.kind, 'title': r.title, 'url': r.url or '',
+        'id': r.id, 'task_id': r.task_id, 'history_id': r.history_id, 'kind': r.kind, 'title': r.title, 'url': r.url or '',
         'file_name': r.file_name or '', 'file_path': r.file_path or '', 'note': r.note or '',
         'created_at': _dt(r.created_at),
     }
@@ -229,7 +229,7 @@ def add_history(task_id: int, content: str, entry_type: str = '메모', author: 
 def get_history(entry_id: int) -> dict | None:
     with db.SessionLocal() as s:
         h = s.get(HistoryEntry, entry_id)
-        return _history_dict(h) if h else None
+        return _with_refs(s, [_history_dict(h)])[0] if h else None
 
 
 def update_history(entry_id: int, **fields) -> dict:
@@ -277,17 +277,33 @@ def set_history_ai(entry_id: int, status: str, title: str | None = None, summary
         s.commit()
 
 
+def _with_refs(s, entries: list[dict]) -> list[dict]:
+    """이력 dict 들에 'refs'(그 이력에 붙은 관련 자료 목록)를 채운다."""
+    ids = [e['id'] for e in entries]
+    by_entry: dict[int, list[dict]] = {i: [] for i in ids}
+    if ids:
+        for r in s.scalars(select(Reference).where(Reference.history_id.in_(ids)).order_by(Reference.id)):
+            by_entry[r.history_id].append(_ref_dict(r))
+    for e in entries:
+        e['refs'] = by_entry.get(e['id'], [])
+    return entries
+
+
 def list_history(task_id: int) -> list[dict]:
     with db.SessionLocal() as s:
         rows = s.scalars(select(HistoryEntry).where(HistoryEntry.task_id == task_id)
                          .order_by(HistoryEntry.occurred_at.desc(), HistoryEntry.id.desc()))
-        return [_history_dict(h) for h in rows]
+        return _with_refs(s, [_history_dict(h) for h in rows])
 
 
 def delete_history(entry_id: int) -> None:
+    """이력을 지워도 거기 붙은 자료는 업무 참고자료로 남긴다."""
     with db.SessionLocal() as s:
         h = s.get(HistoryEntry, entry_id)
         if h:
+            # 예전 DB 에 ALTER 로 추가된 컬럼엔 외래키(ON DELETE SET NULL)가 없을 수 있어 직접 끊는다
+            for r in s.scalars(select(Reference).where(Reference.history_id == entry_id)):
+                r.history_id = None
             s.delete(h)
             s.commit()
 
@@ -302,9 +318,13 @@ def search_history(query: str = '', entry_types: list[str] | None = None, author
         stmt = select(HistoryEntry, Task.title).join(Task, Task.id == HistoryEntry.task_id)
         for term in search_terms(query):
             like = f'%{term}%'
+            ref_hist = select(Reference.history_id).where(Reference.history_id.is_not(None), or_(
+                Reference.title.like(like), Reference.url.like(like), Reference.file_name.like(like),
+                Reference.note.like(like)))
             stmt = stmt.where(or_(HistoryEntry.content.like(like), HistoryEntry.title.like(like),
                                   HistoryEntry.summary.like(like), HistoryEntry.keywords.like(like),
-                                  HistoryEntry.author.like(like), Task.title.like(like)))
+                                  HistoryEntry.author.like(like), Task.title.like(like),
+                                  HistoryEntry.id.in_(ref_hist)))
         if entry_types:
             stmt = stmt.where(HistoryEntry.entry_type.in_(entry_types))
         elif not include_auto:
@@ -318,7 +338,7 @@ def search_history(query: str = '', entry_types: list[str] | None = None, author
         if date_to:  # 그날 하루 전체 포함
             stmt = stmt.where(HistoryEntry.occurred_at < datetime.fromisoformat(date_to) + timedelta(days=1))
         rows = s.execute(stmt.order_by(HistoryEntry.occurred_at.desc(), HistoryEntry.id.desc()).limit(limit))
-        return [{**_history_dict(h), 'task_title': title} for h, title in rows]
+        return _with_refs(s, [{**_history_dict(h), 'task_title': title} for h, title in rows])
 
 
 def keyword_stats(limit: int = 40, task_id: int | None = None) -> list[tuple[str, int]]:
@@ -379,7 +399,9 @@ def upload_abspath(rel_path: str) -> str | None:
 
 
 def add_reference(task_id: int, kind: str, title: str = '', url: str = '', note: str = '',
-                  file_name: str = '', file_bytes: bytes | None = None, author: str = '') -> dict:
+                  file_name: str = '', file_bytes: bytes | None = None, author: str = '',
+                  history_id: int | None = None) -> dict:
+    """history_id 를 주면 그 이력의 관련 자료로 붙는다 (이력 자체가 기록이므로 '자료' 자동 이력은 남기지 않음)."""
     if kind not in ('link', 'file', 'note'):
         raise ValueError(f'알 수 없는 자료 유형: {kind}')
     title = (title or '').strip()
@@ -387,7 +409,7 @@ def add_reference(task_id: int, kind: str, title: str = '', url: str = '', note:
     if kind == 'link':
         if not url:
             raise ValueError('링크 URL 을 입력하세요.')
-        if not re.match(r'^[a-zA-Z][a-zA-Z0-9+.-]*://', url):
+        if not re.match(r'^[a-zA-Z][a-zA-Z0-9+.-]*://', url) and not is_unc_path(url):
             url = 'https://' + url
         title = title or url
     elif kind == 'file':
@@ -403,8 +425,12 @@ def add_reference(task_id: int, kind: str, title: str = '', url: str = '', note:
         t = s.get(Task, task_id)
         if t is None:
             raise ValueError('업무를 찾을 수 없습니다.')
+        if history_id is not None:
+            h = s.get(HistoryEntry, history_id)
+            if h is None or h.task_id != task_id:
+                raise ValueError('이력을 찾을 수 없습니다.')
         r = Reference(task_id=task_id, kind=kind, title=title, url=url if kind == 'link' else '',
-                      note=note or '')
+                      note=note or '', history_id=history_id)
         if kind == 'file':
             rel = os.path.join(str(task_id), f'{uuid.uuid4().hex[:8]}_{_safe_name(file_name)}')
             dest = os.path.join(db.UPLOAD_DIR, rel)
@@ -413,8 +439,9 @@ def add_reference(task_id: int, kind: str, title: str = '', url: str = '', note:
                 f.write(file_bytes)
             r.file_name, r.file_path = file_name, rel
         s.add(r)
-        label = {'link': '링크', 'file': '파일', 'note': '메모'}[kind]
-        _log(s, task_id, '자료', f'참고자료 추가 ({label}): {title}', author)
+        if history_id is None:
+            label = {'link': '링크', 'file': '파일', 'note': '메모'}[kind]
+            _log(s, task_id, '자료', f'참고자료 추가 ({label}): {title}', author)
         t.updated_at = datetime.now().replace(microsecond=0)
         s.commit()
         return _ref_dict(r)
@@ -452,6 +479,58 @@ def delete_reference(ref_id: int) -> None:
         s.commit()
     if path:
         _remove_upload(path)
+
+
+# ── 이력의 관련 자료 링크 ─────────────────────────────────────────────
+
+_URL_IN_TEXT = re.compile(r'https?://[^\s<>"\'\]\)]+')
+_LINK_TOKEN = re.compile(r'(https?://\S+|www\.\S+|\\\\\S+|[\w.-]+\.(?:com|net|kr|io|org|co\.kr)(?:/\S*)?)')
+
+
+def is_unc_path(v: str) -> bool:
+    """사내 공유 폴더 경로(\\\\서버\\폴더\\파일). 브라우저 링크로는 안 열리므로 복사용으로 보여준다."""
+    return (v or '').startswith('\\\\')
+
+
+def urls_in_text(text: str) -> list[str]:
+    """원문에 들어 있는 http(s) 링크 (문장 끝 마침표·쉼표는 뗀다, 중복 제거)."""
+    out = []
+    for u in _URL_IN_TEXT.findall(text or ''):
+        u = u.rstrip('.,;:!?…')
+        if u not in out:
+            out.append(u)
+    return out
+
+
+def parse_links(text: str) -> list[dict]:
+    """'관련 자료' 입력칸 → [{'title', 'url'}]. 한 줄에 하나, 링크 앞뒤 글자는 제목으로 쓴다.
+    예) '회의록 https://conf.../123'  'https://a.b/c'  '\\\\fs01\\팀\\보고서.pptx 최종본'"""
+    out = []
+    for line in (text or '').splitlines():
+        line = line.strip()
+        m = _LINK_TOKEN.search(line)
+        if not m:
+            continue
+        url = m.group(1).rstrip('.,;')
+        title = (line[:m.start()] + ' ' + line[m.end():]).strip(' -:|·\t')
+        out.append({'title': title or url, 'url': url})
+    return out
+
+
+def attach_links(task_id: int, history_id: int, links: list[dict], author: str = '') -> int:
+    """이력에 링크들을 붙인다. 이미 붙은 같은 URL 은 건너뛴다. 붙인 개수를 돌려준다."""
+    with db.SessionLocal() as s:
+        existing = set(s.scalars(select(Reference.url).where(Reference.history_id == history_id)))
+    n = 0
+    for link in links:
+        url = link['url']
+        if url in existing or ('https://' + url) in existing:
+            continue
+        add_reference(task_id, 'link', title=link.get('title') or url, url=url, author=author,
+                      history_id=history_id)
+        existing.add(url)
+        n += 1
+    return n
 
 
 # ── 업무 연결 ─────────────────────────────────────────────────────────
