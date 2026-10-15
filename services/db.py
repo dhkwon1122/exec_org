@@ -11,7 +11,6 @@
 - references_    : 업무별 참고자료 (링크/파일/메모)
 - task_links     : 업무 ↔ 업무 연결 (관련/선행/후속/파생)
 - todos          : 할 일 (업무에 속하거나 단독). 이력 원문에서 AI 가 뽑은 제안을 추가할 수 있음
-- exec_members   : 이 시스템을 쓸 수 있는 사용자(접근 허용 목록). 계정 자체는 사용자 DB(app_users)에 있다
 """
 import os
 from datetime import datetime
@@ -119,15 +118,6 @@ class Todo(Base):
     assignee_name = Column(String(100), default='')
     created_by = Column(String(100), default='')
     source_history_id = Column(Integer, ForeignKey('history.id', ondelete='SET NULL'), nullable=True)
-    created_at = Column(DateTime, default=_now)
-
-
-class ExecMember(Base):
-    __tablename__ = 'exec_members'
-
-    user_id = Column(String(100), primary_key=True)
-    role = Column(String(10), nullable=False, default='member')  # admin / member
-    granted_by = Column(String(100), default='')
     created_at = Column(DateTime, default=_now)
 
 

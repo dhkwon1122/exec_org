@@ -3,7 +3,7 @@
 업무마다 **무슨 일이 언제 있었는지(이력)**와 **어떤 자료를 참고했는지(참고자료)**를 남기고,
 **업무끼리의 관계(선행/후속/관련/파생)**를 연결해 흐름을 추적하는 Dash 웹앱.
 
-민감한 업무 기록을 다루므로 **로그인 + 접근 허용 목록**에 있는 사람만 쓸 수 있다.
+민감한 업무 기록을 다루므로 **임원조직 담당자**만 로그인해서 쓸 수 있다.
 
 핵심은 **이력 기록과 검색**이다. 받아 적은 피드백·회의 메모를 다듬지 않고 그대로 붙여넣으면,
 원문은 그대로 보존되고 LLM 이 검색용 **제목·요약·키워드(동의어 포함)**를 만들어 붙인다.
@@ -46,14 +46,13 @@ gunicorn app:server -b 0.0.0.0:8050 --workers 2
 - **계정**: `USER_DATABASE_URL`에 People in SAIT(Researcher-board)의 PostgreSQL 을 지정하면 그 `app_users` 계정·비밀번호로
   로그인한다. 이 테이블은 다른 시스템도 함께 쓰므로 **읽기만** 하고(쓰기·스키마 변경 없음), 계정 생성·비밀번호 변경은
   People in SAIT 에서 한다. 임시 비밀번호 상태(`must_change_password`)인 계정은 로그인을 막는다.
-- **접근 허용 목록**: 계정이 있다고 들어올 수 있는 것은 아니다. 이 앱 DB 의 `exec_members`에 등록된 사람만 로그인된다.
-  - 관리자: 업무 기록 전체 + '접근 권한' 화면에서 사용자 추가/회수
-  - 사용자: 업무 기록 전체
-  - 첫 관리자는 `EXEC_ORG_ADMINS=아이디` 환경변수로 지정하거나 `python scripts/grant_access.py <아이디> admin`
-- 권한은 매 요청마다 다시 확인하므로, 회수하면 이미 로그인한 사람도 다음 클릭부터 막힌다.
+- **접속 권한**: `app_users.role` 이 `executive_org`(임원조직 담당자)인 계정만 로그인된다. 그 외 역할은 계정이 있어도
+  막힌다. 허용 역할은 `EXEC_ORG_ROLES`로 바꿀 수 있다(쉼표 구분).
+- 역할은 매 요청마다 사용자 DB 에서 다시 확인하므로, People in SAIT 에서 역할이 바뀌면 이미 로그인한 사람도
+  다음 클릭부터 막힌다.
 - 모든 화면·Dash 콜백·첨부파일 다운로드가 로그인 뒤에만 열린다. 로그인 5회 실패 시 10분 잠금, 세션 8시간,
   HttpOnly·SameSite 쿠키, 로그인 폼 CSRF 토큰, 응답 캐시 금지(no-store).
-- 단독 실행/개발: `USER_DATABASE_URL`을 비우면 로컬 `app_users`를 쓴다 → `python scripts/create_user.py <아이디> <이름> --admin`
+- 단독 실행/개발: `USER_DATABASE_URL`을 비우면 로컬 `app_users`를 쓴다 → `python scripts/create_user.py <아이디> <이름>`
 
 ## 구조
 
@@ -64,7 +63,7 @@ services/store.py       CRUD + 자동 이력 기록 + 이력 검색 (화면은 �
 services/llm.py         OpenAI 호환 LLM 호출, 원문 → 제목·요약·키워드
 services/enrich.py      AI 정리 백그라운드 처리 (스레드풀)
 services/users.py       사용자 DB(app_users) 조회·비밀번호 확인 — 공유 DB 는 읽기 전용
-services/auth.py        접근 허용 목록, 로그인 세션, 로그인 시도 제한
+services/auth.py        역할 기반 접속 제한, 로그인 세션, 로그인 시도 제한
 components/ui.py        배지·아이콘·이력 카드·검색어 강조 등 공용 표시 조각
 components/history_form.py  이력 입력 폼 (업무 상세·빠른 기록 공용)
 components/todo_ui.py   할 일 목록·추가 폼, 체크/삭제 공용 콜백
@@ -72,8 +71,7 @@ pages/home.py           업무 목록·검색·새 업무·빠른 기록·최근
 pages/search.py         이력 검색
 pages/todos.py          할 일
 pages/calendar.py       캘린더
-pages/admin.py          접근 권한 관리 (관리자)
-scripts/                create_user.py(로컬 계정), grant_access.py(접근 권한 부여)
+scripts/create_user.py  로컬 계정 생성 (단독 실행/개발용)
 pages/task_detail.py    업무 상세 (이력 / 참고자료 / 연결 업무 탭, 하위 업무)
 pages/references.py     전체 참고자료 검색
 tests/                  저장·검색·LLM 파싱 테스트 (pip install -r requirements-dev.txt; pytest)

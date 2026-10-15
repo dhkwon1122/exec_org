@@ -11,7 +11,7 @@ from services import auth, db, users
 def fresh_db(tmp_path, monkeypatch):
     monkeypatch.setattr(db, 'UPLOAD_DIR', str(tmp_path / 'uploads'))
     monkeypatch.delenv('USER_DATABASE_URL', raising=False)
-    monkeypatch.delenv('EXEC_ORG_ADMINS', raising=False)
+    monkeypatch.delenv('EXEC_ORG_ROLES', raising=False)
     db.configure('sqlite:///' + str(tmp_path / 'test.db'))
     users.reset()
     auth._failures.clear()
@@ -41,26 +41,32 @@ def test_everything_requires_login(client):
     assert client.get('/login').status_code == 200
 
 
-def test_login_requires_membership_and_revoke_takes_effect(client):
-    users.create_local_user('kim', 'password123', '김철수')
-    r = _login(client, 'kim', 'password123')
-    assert r.status_code == 401 and '권한이 없습니다' in r.get_data(as_text=True)
+def test_only_executive_org_role_can_log_in(client, monkeypatch):
+    users.create_local_user('kim', 'password123', '김철수', role='executive_org')
+    users.create_local_user('park', 'password123', '박영수', role='recruit')
+    r = _login(client, 'park', 'password123')
+    assert r.status_code == 401 and '임원조직 담당자만' in r.get_data(as_text=True)
 
-    auth.grant('kim', 'member', granted_by='test')
     assert _login(client, 'kim', 'wrong-password').status_code == 401
     r = _login(client, 'kim', 'password123')
     assert r.status_code == 302 and r.headers['Location'] == '/'
     page = client.get('/')
     assert page.status_code == 200 and page.headers['Cache-Control'] == 'no-store'
     assert client.get('/_dash-layout').status_code == 200
+    assert [m['user_id'] for m in auth.list_members()] == ['kim']
 
-    auth.revoke('kim', by='admin')
-    assert client.get('/').status_code == 302  # 이미 로그인한 세션도 바로 막힌다
+    # 사용자 DB 에서 역할이 바뀌면 이미 로그인한 세션도 바로 막힌다
+    with db.engine.begin() as c:
+        c.execute(text("UPDATE app_users SET role = 'recruit' WHERE user_id = 'kim'"))
+    assert client.get('/').status_code == 302
+
+    # 허용 역할은 환경변수로 바꿀 수 있다
+    monkeypatch.setenv('EXEC_ORG_ROLES', 'executive_org, recruit')
+    assert _login(client, 'park', 'password123').status_code == 302
 
 
 def test_csrf_and_logout(client):
-    users.create_local_user('kim', 'password123', '김철수')
-    auth.grant('kim', 'member', granted_by='test')
+    users.create_local_user('kim', 'password123', '김철수', role='executive_org')
     client.get('/login')
     r = client.post('/login', data={'user_id': 'kim', 'password': 'password123', 'csrf': 'forged'})
     assert r.status_code == 400
@@ -70,28 +76,11 @@ def test_csrf_and_logout(client):
 
 
 def test_throttle_locks_after_repeated_failures(client):
-    users.create_local_user('kim', 'password123', '김철수')
-    auth.grant('kim', 'member', granted_by='test')
+    users.create_local_user('kim', 'password123', '김철수', role='executive_org')
     for _ in range(5):
         _login(client, 'kim', 'nope-nope')
     r = _login(client, 'kim', 'password123')
     assert r.status_code == 401 and '잠시 막혔습니다' in r.get_data(as_text=True)
-
-
-def test_bootstrap_admin_and_revoke_rules(monkeypatch):
-    users.create_local_user('boss', 'password123', '대표')
-    users.create_local_user('kim', 'password123', '김철수')
-    monkeypatch.setenv('EXEC_ORG_ADMINS', 'boss')
-    assert auth.get_role('boss') == 'admin'
-    assert auth.get_role('kim') is None
-    with pytest.raises(ValueError):
-        auth.grant('ghost', 'member', granted_by='boss')  # 사용자 DB 에 없는 계정
-    auth.grant('kim', 'admin', granted_by='boss')
-    with pytest.raises(ValueError):
-        auth.revoke('kim', by='kim')
-    with pytest.raises(ValueError):
-        auth.revoke('boss', by='kim')
-    assert {m['user_id'] for m in auth.list_members()} == {'kim', 'boss'}
 
 
 def test_shared_user_db_is_read_only(tmp_path, monkeypatch, client):
@@ -104,7 +93,7 @@ def test_shared_user_db_is_read_only(tmp_path, monkeypatch, client):
                        ' must_change_password BOOLEAN NOT NULL DEFAULT 0, is_admin BOOLEAN NOT NULL DEFAULT 0,'
                        ' perm_view_evaluation BOOLEAN, created_at DATETIME NOT NULL)'))
         c.execute(text("INSERT INTO app_users VALUES ('lee', :h, '이영희', 'executive_org', 'lee@x', 0, 0, NULL,"
-                       " '2026-01-01'), ('temp', :h, '임시', 'recruit', NULL, 1, 0, NULL, '2026-01-01')"),
+                       " '2026-01-01'), ('temp', :h, '임시', 'executive_org', NULL, 1, 0, NULL, '2026-01-01')"),
                   {'h': generate_password_hash('secret-pass')})
     monkeypatch.setenv('USER_DATABASE_URL', f'sqlite:///{path}')
     users.reset()
@@ -113,8 +102,6 @@ def test_shared_user_db_is_read_only(tmp_path, monkeypatch, client):
     with pytest.raises(users.UserDBError):
         users.create_local_user('x', 'password123', 'x')
 
-    auth.grant('lee', 'member', granted_by='test')
-    auth.grant('temp', 'member', granted_by='test')
     assert _login(client, 'lee', 'secret-pass').status_code == 302
     client.get('/logout')
     r = _login(client, 'temp', 'secret-pass')

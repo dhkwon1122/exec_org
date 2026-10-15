@@ -1,88 +1,38 @@
 """로그인 세션과 접근 권한.
 
-계정은 사용자 DB(services/users.py)에 있지만, 그 계정이 있다고 이 시스템을 쓸 수
-있는 것은 아니다. 민감한 업무 기록이 있으므로 **exec_members 에 등록된 사람만** 들어올 수
-있다 (허용 목록 방식).
+민감한 업무 기록이 있으므로 사용자 DB(app_users)의 역할(role)이 **임원조직 담당자
+(executive_org)** 인 계정만 들어올 수 있다. 허용할 역할은 EXEC_ORG_ROLES 환경변수(쉼표
+구분)로 바꿀 수 있다.
 
-  admin  : 업무 기록 전체 + 사용자 접근 권한 관리
-  member : 업무 기록 전체
-
-EXEC_ORG_ADMINS 환경변수(쉼표 구분 user_id)에 적힌 사람은 항상 admin 이다 — 처음
-설치할 때 첫 관리자를 정하는 용도. 권한은 매 요청마다 다시 확인하므로, 접근을 회수하면
+역할은 매 요청마다 사용자 DB 에서 다시 확인하므로, People in SAIT 에서 역할이 바뀌면
 이미 로그인해 있던 사람도 다음 클릭부터 바로 막힌다.
 """
 import os
 import time
 
 import flask
-from sqlalchemy import select
 
-from services import db, users
-from services.db import ExecMember
-
-ROLES = {'admin': '관리자', 'member': '사용자'}
+from services import users
 
 # ── 로그인 시도 제한 (워커 프로세스별 메모리) ──
 _FAIL_LIMIT, _FAIL_WINDOW, _LOCK_SECONDS = 5, 600, 600
 _failures: dict[str, list[float]] = {}
 
 
-def _bootstrap_admins() -> set[str]:
-    return {u.strip() for u in os.environ.get('EXEC_ORG_ADMINS', '').split(',') if u.strip()}
+def allowed_roles() -> set[str]:
+    return {r.strip() for r in os.environ.get('EXEC_ORG_ROLES', 'executive_org').split(',') if r.strip()}
 
 
-def get_role(user_id: str) -> str | None:
-    if not user_id:
-        return None
-    if user_id in _bootstrap_admins():
-        return 'admin'
-    with db.SessionLocal() as s:
-        m = s.get(ExecMember, user_id)
-        return m.role if m else None
+def is_allowed(user: dict | None) -> bool:
+    return bool(user) and user['role'] in allowed_roles()
 
 
 def list_members() -> list[dict]:
-    with db.SessionLocal() as s:
-        rows = list(s.scalars(select(ExecMember).order_by(ExecMember.created_at)))
+    """접속 가능한 사용자(허용 역할) 목록 — 할 일 담당자 선택 등에 쓴다."""
     try:
-        names = {u['user_id']: u for u in users.list_users()}
+        return [u for u in users.list_users() if is_allowed(u)]
     except users.UserDBError:
-        names = {}
-    out = [{'user_id': m.user_id, 'role': m.role, 'granted_by': m.granted_by,
-            'created_at': m.created_at.strftime('%Y-%m-%d') if m.created_at else '',
-            'name': names.get(m.user_id, {}).get('name', m.user_id), 'bootstrap': False,
-            'in_user_db': m.user_id in names} for m in rows]
-    listed = {m['user_id'] for m in out}
-    for uid in sorted(_bootstrap_admins() - listed):
-        out.append({'user_id': uid, 'role': 'admin', 'granted_by': 'EXEC_ORG_ADMINS', 'created_at': '',
-                    'name': names.get(uid, {}).get('name', uid), 'bootstrap': True, 'in_user_db': uid in names})
-    return out
-
-
-def grant(user_id: str, role: str, granted_by: str) -> None:
-    if role not in ROLES:
-        raise ValueError(f'알 수 없는 권한: {role}')
-    if users.get_user(user_id) is None:
-        raise ValueError('사용자 DB 에 없는 아이디입니다.')
-    with db.SessionLocal() as s:
-        m = s.get(ExecMember, user_id)
-        if m:
-            m.role = role
-        else:
-            s.add(ExecMember(user_id=user_id, role=role, granted_by=granted_by))
-        s.commit()
-
-
-def revoke(user_id: str, by: str) -> None:
-    if user_id == by:
-        raise ValueError('자기 자신의 권한은 회수할 수 없습니다.')
-    if user_id in _bootstrap_admins():
-        raise ValueError('EXEC_ORG_ADMINS 로 지정된 관리자는 환경변수에서 빼야 합니다.')
-    with db.SessionLocal() as s:
-        m = s.get(ExecMember, user_id)
-        if m:
-            s.delete(m)
-            s.commit()
+        return []
 
 
 # ── 로그인 ──
@@ -110,13 +60,12 @@ def login(user_id: str, password: str, client: str = '') -> tuple[dict | None, s
     _failures.pop(key, None)
     if user['must_change_password']:
         return None, '임시 비밀번호 상태입니다. People in SAIT 에서 비밀번호를 먼저 바꾼 뒤 로그인하세요.'
-    role = get_role(user['user_id'])
-    if role is None:
-        return None, '이 시스템을 사용할 권한이 없습니다. 관리자에게 접근 권한을 요청하세요.'
+    if not is_allowed(user):
+        return None, '임원조직 담당자만 사용할 수 있는 시스템입니다.'
     flask.session.clear()
     flask.session.permanent = True
     flask.session['user'] = {'user_id': user['user_id'], 'name': user['name']}
-    return {**user, 'access': role}, ''
+    return user, ''
 
 
 def logout() -> None:
@@ -124,24 +73,22 @@ def logout() -> None:
 
 
 def current_user() -> dict | None:
-    """로그인했고 지금도 권한이 있는 사용자. 요청 안에서만 호출."""
+    """로그인했고 지금도 허용 역할인 사용자. 요청 안에서만 호출."""
     if not flask.has_request_context():
         return None
     u = flask.session.get('user')
     if not u:
         return None
-    if 'access' not in flask.g:
-        flask.g.access = get_role(u['user_id'])
-    if flask.g.access is None:
+    if 'db_user' not in flask.g:  # 요청당 한 번만 사용자 DB 조회
+        try:
+            flask.g.db_user = users.get_user(u['user_id'])
+        except users.UserDBError:
+            flask.g.db_user = None
+    if not is_allowed(flask.g.db_user):
         return None
-    return {**u, 'access': flask.g.access}
+    return {**u, 'name': flask.g.db_user['name']}
 
 
 def current_name() -> str:
     u = current_user()
     return u['name'] if u else ''
-
-
-def is_admin() -> bool:
-    u = current_user()
-    return bool(u and u['access'] == 'admin')

@@ -3,7 +3,7 @@
 실행:  python app.py   → http://localhost:8050
 운영:  gunicorn app:server -b 0.0.0.0:8050 --workers 2
 
-모든 화면·데이터·파일은 로그인 + 접근 권한(services/auth.py)이 있어야 열린다.
+모든 화면·데이터·파일은 임원조직 담당자로 로그인해야 열린다(services/auth.py).
 """
 import os
 import secrets
@@ -78,7 +78,7 @@ def _require_login():
     if path.startswith(_PUBLIC_PREFIXES):
         return None
     if auth.current_user() is None:
-        flask.session.pop('user', None)  # 권한이 회수된 경우 세션도 정리
+        flask.session.pop('user', None)  # 역할이 바뀐 경우 세션도 정리
         if path.startswith('/_dash-') or flask.request.method != 'GET':
             return flask.Response('로그인이 필요합니다.', status=401)
         return flask.redirect('/login')
@@ -115,7 +115,8 @@ _LOGIN_HTML = '''<!doctype html><html lang="ko"><head><meta charset="utf-8">
 def _login_page(error: str = '', user_id: str = '', status: int = 200):
     csrf = secrets.token_urlsafe(24)
     flask.session['csrf'] = csrf
-    hint = 'People in SAIT 계정으로 로그인하세요.' if users.is_shared() else '계정으로 로그인하세요.'
+    hint = ('People in SAIT 계정으로 로그인하세요 (임원조직 담당자 전용).' if users.is_shared()
+            else '계정으로 로그인하세요 (임원조직 담당자 전용).')
     body = _LOGIN_HTML.format(
         css=dbc.themes.BOOTSTRAP, hint=hint, csrf=csrf, user_id=escape(user_id),
         error=f'<div class="alert alert-danger py-2 small">{escape(error)}</div>' if error else '')
@@ -163,8 +164,6 @@ def _navbar():
         dbc.NavItem(dbc.NavLink('이력 검색', href='/search', active='exact')),
         dbc.NavItem(dbc.NavLink('참고자료', href='/references', active='exact')),
     ]
-    if user.get('access') == 'admin':
-        links.append(dbc.NavItem(dbc.NavLink('접근 권한', href='/admin', active='exact')))
     return dbc.Navbar(
         dbc.Container([
             dbc.NavbarBrand([html.I(className='bi bi-journal-text me-2'), '업무 기록'], href='/'),
