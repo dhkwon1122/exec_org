@@ -5,7 +5,9 @@
 
 테이블 구성
 - tasks          : 업무 (상위 업무 parent_id 로 계층 구성 가능)
-- history        : 업무별 이력 (메모/회의/결정/진행/이슈/상태변경/연결 등 시간순 기록)
+- history        : 업무별 이력 (메모/회의/결정/피드백/상태변경/연결 등 시간순 기록).
+                   content 는 사용자가 올린 원문 그대로, title/summary/keywords 는
+                   LLM 이 만든(또는 사용자가 고친) 검색용 정리본
 - references_    : 업무별 참고자료 (링크/파일/메모)
 - task_links     : 업무 ↔ 업무 연결 (관련/선행/후속/파생)
 """
@@ -14,7 +16,7 @@ from datetime import datetime
 
 from dotenv import load_dotenv
 from sqlalchemy import (
-    Column, DateTime, ForeignKey, Integer, String, Text, UniqueConstraint, create_engine, event,
+    Column, DateTime, ForeignKey, Integer, String, Text, UniqueConstraint, create_engine, event, inspect, text,
 )
 from sqlalchemy.orm import declarative_base, relationship, sessionmaker
 
@@ -58,10 +60,16 @@ class HistoryEntry(Base):
     id = Column(Integer, primary_key=True)
     task_id = Column(Integer, ForeignKey('tasks.id', ondelete='CASCADE'), nullable=False, index=True)
     entry_type = Column(String(20), nullable=False, default='메모')
-    content = Column(Text, nullable=False)
+    content = Column(Text, nullable=False)  # 원문 (가공하지 않고 그대로 보존)
     author = Column(String(100), default='')
     occurred_at = Column(DateTime, default=_now)  # 실제 일이 있었던 시점(사용자가 지정 가능)
     created_at = Column(DateTime, default=_now)
+    # 검색용 정리본 — LLM 이 채우고 사용자가 고칠 수 있다
+    title = Column(String(300), default='')
+    summary = Column(Text, default='')
+    keywords = Column(String(1000), default='')  # 쉼표 구분
+    ai_status = Column(String(10), default='')  # '' (요청 안 함) / pending / done / failed
+    ai_error = Column(Text, default='')
 
     task = relationship('Task', back_populates='history')
 
@@ -106,7 +114,23 @@ def make_engine(url: str | None = None):
         def _fk_on(dbapi_conn, _):
             dbapi_conn.execute('PRAGMA foreign_keys=ON')
     Base.metadata.create_all(engine)
+    _add_missing_columns(engine)
     return engine
+
+
+def _add_missing_columns(engine):
+    """create_all 은 이미 있는 테이블에 새 컬럼을 추가하지 않는다 — 이전 버전으로
+    만든 DB 에 나중에 추가된 컬럼(예: history.summary)을 ALTER TABLE 로 붙인다."""
+    insp = inspect(engine)
+    with engine.begin() as conn:
+        for table in Base.metadata.sorted_tables:
+            existing = {c['name'] for c in insp.get_columns(table.name)}
+            for col in table.columns:
+                if col.name in existing:
+                    continue
+                coltype = col.type.compile(dialect=engine.dialect)
+                default = " DEFAULT ''" if isinstance(col.type, (String, Text)) else ''
+                conn.execute(text(f'ALTER TABLE {table.name} ADD COLUMN {col.name} {coltype}{default}'))
 
 
 engine = make_engine()

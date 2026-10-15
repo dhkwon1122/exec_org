@@ -4,7 +4,8 @@ import dash_bootstrap_components as dbc
 from dash import Input, Output, State, callback, ctx, dcc, html, no_update
 
 from components import ui
-from services import store
+from components.history_form import decode_text_upload, history_form
+from services import enrich, store
 
 dash.register_page(__name__, path='/', name='업무', title='업무 기록 · 업무')
 
@@ -54,6 +55,15 @@ def layout(**_):
                 html.Div(id='task-list'),
             ], lg=8),
             dbc.Col([
+                dbc.Card([
+                    dbc.CardHeader([html.I(className='bi bi-lightning-charge me-1'), '빠른 기록'], className='small'),
+                    dbc.CardBody([
+                        dcc.Dropdown(id='qr-task', placeholder='어느 업무에 기록할까요?', className='mb-2'),
+                        *history_form('qr', compact=True),
+                        dbc.Alert(id='qr-ok', color='success', is_open=False, duration=5000,
+                                  className='mt-2 mb-0 py-2 small'),
+                    ]),
+                ], className='mb-3'),
                 html.H6('최근 이력', className='text-muted'),
                 html.Div(id='recent-history'),
             ], lg=4),
@@ -87,12 +97,49 @@ def render_list(q, statuses, tag, _):
             html.Div([html.I(className=f"bi {ui.ENTRY_ICON.get(h['entry_type'], 'bi-dot')} me-1"),
                       html.Span(h['entry_type'], className='fw-semibold me-2'),
                       dcc.Link(h['task_title'], href=f"/task/{h['task_id']}", className='small')]),
-            html.Div(h['content'][:120], className='small', style={'whiteSpace': 'pre-wrap'}),
+            html.Div(h['title'] or h['content'][:120], className='small', style={'whiteSpace': 'pre-wrap'}),
             html.Div(f"{h['occurred_at']} {h['author']}", className='small text-muted'),
         ], className='py-2') for h in recent
     ], flush=True) if recent else html.Div('아직 이력이 없습니다.', className='small text-muted')
 
     return task_view, history_view, store.all_tags()
+
+
+@callback(Output('qr-task', 'options'), Input('home-refresh', 'data'))
+def quick_task_options(_):
+    return [{'label': f"#{t['id']} {t['title']}", 'value': t['id']}
+            for t in store.list_tasks(status=['예정', '진행중', '보류'])]
+
+
+@callback(Output('qr-content', 'value', allow_duplicate=True), Input('qr-file', 'contents'),
+          State('qr-content', 'value'), prevent_initial_call=True)
+def quick_load_file(contents, current):
+    if not contents:
+        return no_update
+    text = decode_text_upload(contents)
+    return f'{current.rstrip()}\n\n{text}' if (current or '').strip() else text
+
+
+@callback(Output('home-refresh', 'data'), Output('qr-content', 'value'), Output('qr-when', 'value'),
+          Output('qr-error', 'children'), Output('qr-error', 'is_open'),
+          Output('qr-ok', 'children'), Output('qr-ok', 'is_open'),
+          Input('qr-add', 'n_clicks'), State('qr-task', 'value'), State('qr-type', 'value'),
+          State('qr-content', 'value'), State('qr-when', 'value'), State('qr-ai', 'value'),
+          State('author-store', 'data'), State('home-refresh', 'data'), prevent_initial_call=True)
+def quick_record(_, task_id, etype, content, when, use_ai, author, n):
+    nu = no_update
+    if not task_id:
+        return nu, nu, nu, '기록할 업무를 선택하세요.', True, nu, False
+    try:
+        h = store.add_history(int(task_id), content, etype, author or '', when or None)
+    except ValueError as e:
+        return nu, nu, nu, str(e), True, nu, False
+    if use_ai:
+        enrich.submit(h['id'])
+    msg = [f'#{task_id} 업무에 기록했습니다. ', dcc.Link('열기', href=f'/task/{task_id}')]
+    if use_ai:
+        msg.insert(1, 'AI 요약·키워드는 잠시 후 채워집니다. ')
+    return (n or 0) + 1, '', None, '', False, msg, True
 
 
 @callback(Output('new-modal', 'is_open'), Output('new-parent', 'options'), Output('new-error', 'children'),

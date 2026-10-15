@@ -7,7 +7,7 @@
 import os
 import re
 import uuid
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from sqlalchemy import or_, select
 
@@ -15,7 +15,7 @@ from services import db
 from services.db import HistoryEntry, Reference, Task, TaskLink
 
 STATUSES = ['예정', '진행중', '보류', '완료']
-ENTRY_TYPES = ['메모', '회의', '결정', '진행', '이슈', '요청']
+ENTRY_TYPES = ['메모', '피드백', '회의', '결정', '진행', '이슈', '요청']
 AUTO_ENTRY_TYPES = ['상태변경', '연결', '자료']  # 시스템이 자동으로 남기는 유형
 RELATIONS = ['관련', '선행', '후속', '파생']
 # A→B 를 "선행"으로 연결하면 B 쪽에서 A 는 "후속" 관계로 보인다
@@ -43,7 +43,25 @@ def _history_dict(h: HistoryEntry) -> dict:
     return {
         'id': h.id, 'task_id': h.task_id, 'entry_type': h.entry_type, 'content': h.content,
         'author': h.author or '', 'occurred_at': _dt(h.occurred_at), 'created_at': _dt(h.created_at),
+        'title': h.title or '', 'summary': h.summary or '', 'keywords': _tags(h.keywords),
+        'ai_status': h.ai_status or '', 'ai_error': h.ai_error or '',
     }
+
+
+def search_terms(query: str) -> list[str]:
+    """공백으로 나눈 검색어. "따옴표 묶음"은 한 덩어리로 취급한다."""
+    return [a or b for a, b in re.findall(r'"([^"]+)"|(\S+)', query or '') if (a or b).strip()]
+
+
+def _join_keywords(v) -> str:
+    items = v if isinstance(v, list) else re.split(r'[,\n]', v or '')
+    seen, out = set(), []
+    for k in items:
+        k = str(k).strip().lstrip('#').strip()
+        if k and k.lower() not in seen:
+            seen.add(k.lower())
+            out.append(k)
+    return ', '.join(out)
 
 
 def _ref_dict(r: Reference) -> dict:
@@ -137,9 +155,11 @@ def list_tasks(query: str = '', status: str | list[str] | None = None, tag: str 
             stmt = stmt.where(Task.owner == owner)
         if tag:
             stmt = stmt.where(Task.tags.like(f'%{tag}%'))
-        if query:
-            like = f'%{query.strip()}%'
-            hist_ids = select(HistoryEntry.task_id).where(HistoryEntry.content.like(like))
+        for term in search_terms(query):  # 검색어가 여러 개면 모두 포함(AND)
+            like = f'%{term}%'
+            hist_ids = select(HistoryEntry.task_id).where(or_(
+                HistoryEntry.content.like(like), HistoryEntry.title.like(like),
+                HistoryEntry.summary.like(like), HistoryEntry.keywords.like(like)))
             ref_ids = select(Reference.task_id).where(
                 or_(Reference.title.like(like), Reference.note.like(like), Reference.url.like(like)))
             stmt = stmt.where(or_(Task.title.like(like), Task.description.like(like), Task.tags.like(like),
@@ -171,7 +191,9 @@ def child_tasks(task_id: int) -> list[dict]:
 # ── 이력 ─────────────────────────────────────────────────────────────
 
 def add_history(task_id: int, content: str, entry_type: str = '메모', author: str = '',
-                occurred_at: str | datetime | None = None) -> dict:
+                occurred_at: str | datetime | None = None, title: str = '', summary: str = '',
+                keywords: list[str] | str = '') -> dict:
+    """원문(content)을 그대로 저장한다. AI 요약·키워드는 services.enrich.submit() 으로 따로 요청."""
     content = (content or '').strip()
     if not content:
         raise ValueError('이력 내용을 입력하세요.')
@@ -183,13 +205,64 @@ def add_history(task_id: int, content: str, entry_type: str = '메모', author: 
         t = s.get(Task, task_id)
         if t is None:
             raise ValueError('업무를 찾을 수 없습니다.')
-        h = HistoryEntry(task_id=task_id, entry_type=entry_type, content=content, author=author or '')
+        h = HistoryEntry(task_id=task_id, entry_type=entry_type, content=content, author=author or '',
+                         title=(title or '').strip(), summary=(summary or '').strip(),
+                         keywords=_join_keywords(keywords))
         if occurred_at:
             h.occurred_at = occurred_at
         s.add(h)
         t.updated_at = datetime.now().replace(microsecond=0)
         s.commit()
         return _history_dict(h)
+
+
+def get_history(entry_id: int) -> dict | None:
+    with db.SessionLocal() as s:
+        h = s.get(HistoryEntry, entry_id)
+        return _history_dict(h) if h else None
+
+
+def update_history(entry_id: int, **fields) -> dict:
+    """사용자가 이력(원문·유형·일시·제목·요약·키워드)을 고칠 때."""
+    with db.SessionLocal() as s:
+        h = s.get(HistoryEntry, entry_id)
+        if h is None:
+            raise ValueError('이력을 찾을 수 없습니다.')
+        if 'content' in fields:
+            if not (fields['content'] or '').strip():
+                raise ValueError('이력 내용을 입력하세요.')
+            h.content = fields['content'].strip()
+        if 'entry_type' in fields:
+            if fields['entry_type'] not in ENTRY_TYPES + AUTO_ENTRY_TYPES:
+                raise ValueError(f"알 수 없는 이력 유형: {fields['entry_type']}")
+            h.entry_type = fields['entry_type']
+        if fields.get('occurred_at'):
+            v = fields['occurred_at']
+            h.occurred_at = datetime.fromisoformat(v) if isinstance(v, str) else v
+        for k in ('title', 'summary'):
+            if k in fields:
+                setattr(h, k, (fields[k] or '').strip())
+        if 'keywords' in fields:
+            h.keywords = _join_keywords(fields['keywords'])
+        s.commit()
+        return _history_dict(h)
+
+
+def set_history_ai(entry_id: int, status: str, title: str | None = None, summary: str | None = None,
+                   keywords: list[str] | None = None, error: str = '') -> None:
+    """AI 정리 상태/결과 저장. None 인 필드는 기존 값을 유지한다(재생성 중에도 이전 결과가 보이도록)."""
+    with db.SessionLocal() as s:
+        h = s.get(HistoryEntry, entry_id)
+        if h is None:
+            return
+        h.ai_status, h.ai_error = status, error or ''
+        if title is not None:
+            h.title = title
+        if summary is not None:
+            h.summary = summary
+        if keywords is not None:
+            h.keywords = _join_keywords(keywords)
+        s.commit()
 
 
 def list_history(task_id: int) -> list[dict]:
@@ -205,6 +278,64 @@ def delete_history(entry_id: int) -> None:
         if h:
             s.delete(h)
             s.commit()
+
+
+def search_history(query: str = '', entry_types: list[str] | None = None, author: str = '',
+                   date_from: str = '', date_to: str = '', task_id: int | None = None,
+                   include_auto: bool = False, limit: int = 200) -> list[dict]:
+    """이력 검색. 검색어가 여러 개면 모두 포함(AND)해야 하며, 각 검색어는
+    원문·AI 제목·요약·키워드·작성자·업무명 중 어디에든 있으면 된다.
+    include_auto=False 면 상태변경/연결/자료 같은 자동 이력은 뺀다."""
+    with db.SessionLocal() as s:
+        stmt = select(HistoryEntry, Task.title).join(Task, Task.id == HistoryEntry.task_id)
+        for term in search_terms(query):
+            like = f'%{term}%'
+            stmt = stmt.where(or_(HistoryEntry.content.like(like), HistoryEntry.title.like(like),
+                                  HistoryEntry.summary.like(like), HistoryEntry.keywords.like(like),
+                                  HistoryEntry.author.like(like), Task.title.like(like)))
+        if entry_types:
+            stmt = stmt.where(HistoryEntry.entry_type.in_(entry_types))
+        elif not include_auto:
+            stmt = stmt.where(HistoryEntry.entry_type.notin_(AUTO_ENTRY_TYPES))
+        if author:
+            stmt = stmt.where(HistoryEntry.author == author)
+        if task_id is not None:
+            stmt = stmt.where(HistoryEntry.task_id == task_id)
+        if date_from:
+            stmt = stmt.where(HistoryEntry.occurred_at >= datetime.fromisoformat(date_from))
+        if date_to:  # 그날 하루 전체 포함
+            stmt = stmt.where(HistoryEntry.occurred_at < datetime.fromisoformat(date_to) + timedelta(days=1))
+        rows = s.execute(stmt.order_by(HistoryEntry.occurred_at.desc(), HistoryEntry.id.desc()).limit(limit))
+        return [{**_history_dict(h), 'task_title': title} for h, title in rows]
+
+
+def keyword_stats(limit: int = 40, task_id: int | None = None) -> list[tuple[str, int]]:
+    """이력 키워드 빈도 (많이 나온 순)."""
+    counts: dict[str, int] = {}
+    display: dict[str, str] = {}
+    with db.SessionLocal() as s:
+        stmt = select(HistoryEntry.keywords).where(HistoryEntry.keywords != '')
+        if task_id is not None:
+            stmt = stmt.where(HistoryEntry.task_id == task_id)
+        for (kws,) in s.execute(stmt):
+            for k in _tags(kws):
+                counts[k.lower()] = counts.get(k.lower(), 0) + 1
+                display.setdefault(k.lower(), k)
+    ranked = sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))[:limit]
+    return [(display[k], n) for k, n in ranked]
+
+
+def history_authors() -> list[str]:
+    with db.SessionLocal() as s:
+        return sorted({a for (a,) in s.execute(select(HistoryEntry.author).distinct()) if a})
+
+
+def pending_ai_ids(task_id: int | None = None) -> list[int]:
+    with db.SessionLocal() as s:
+        stmt = select(HistoryEntry.id).where(HistoryEntry.ai_status == 'pending')
+        if task_id is not None:
+            stmt = stmt.where(HistoryEntry.task_id == task_id)
+        return list(s.scalars(stmt))
 
 
 def recent_history(limit: int = 20) -> list[dict]:

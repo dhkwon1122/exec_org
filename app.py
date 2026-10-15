@@ -36,6 +36,7 @@ navbar = dbc.Navbar(
         dbc.NavbarBrand([html.I(className='bi bi-journal-text me-2'), '업무 기록'], href='/'),
         dbc.Nav([
             dbc.NavItem(dbc.NavLink('업무', href='/', active='exact')),
+            dbc.NavItem(dbc.NavLink('이력 검색', href='/search', active='exact')),
             dbc.NavItem(dbc.NavLink('참고자료', href='/references', active='exact')),
         ], navbar=True, className='me-auto'),
         dbc.InputGroup([
