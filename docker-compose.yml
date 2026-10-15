@@ -48,7 +48,6 @@ services:
       FLASK_SECRET_KEY: ${FLASK_SECRET_KEY:-}        # 비우면 ./data/.flask_secret_key 자동 생성
       SESSION_LIFETIME_HOURS: ${SESSION_LIFETIME_HOURS:-8}
       SESSION_COOKIE_NAME: ${SESSION_COOKIE_NAME:-exec_org_session}   # People in SAIT(session)와 분리
-      SESSION_COOKIE_SECURE: ${SESSION_COOKIE_SECURE:-false}   # --profile proxy(HTTPS)면 true
       TRUSTED_PROXY_COUNT: ${TRUSTED_PROXY_COUNT:-0}           # --profile proxy 면 1
       MAX_CONTENT_LENGTH: ${MAX_CONTENT_LENGTH:-83886080}
 
@@ -74,7 +73,7 @@ services:
       - ./data:/app/data
 
   # app 앞단 TLS 리버스 프록시 (선택). certs/server.crt·server.key 필요.
-  # 켤 때는 .env 에 SESSION_COOKIE_SECURE=true, TRUSTED_PROXY_COUNT=1 로 맞춘다.
+  # 켤 때는 .env 에 TRUSTED_PROXY_COUNT=1 로 맞춘다. 기본 운영은 HTTP(8502)이며 이 프록시는 필요 없다.
   # 같은 서버의 People in SAIT 프록시(80/443)와 겹치지 않게 기본 포트를 8080/8443 으로 둔다.
   reverse-proxy:
     image: nginx:1.27-alpine
