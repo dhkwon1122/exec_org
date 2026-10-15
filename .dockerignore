@@ -1,0 +1,27 @@
+# 빌드 컨텍스트에서 제외 (이미지에 굽지 않음)
+.git
+.gitignore
+.github/
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+.pytest_cache/
+.env
+*.env
+!.env.example
+
+# 데이터·비밀은 볼륨/환경변수로 주입 (이미지에 포함하지 않음) — 업무 기록 DB, 업로드 파일, 세션 키
+data/
+
+# 서버 인증서는 reverse-proxy 컨테이너가 마운트한다 (이미지에 굽지 않음)
+certs/server.crt
+certs/server.key
+
+# 문서·기타
+*.md
+.vscode/
+.idea/
+
+# certs/ 의 사내 CA 는 제외하지 않는다 (Dockerfile 이 복사해야 함)

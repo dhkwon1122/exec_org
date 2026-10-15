@@ -28,11 +28,32 @@
 
 ## 실행
 
+### Docker (운영 권장)
+
+Researcher-board(People in SAIT)와 같은 구성이다 — 사내 pip 저장소·프록시·CA 를 빌드 인자로 받고(`Dockerfile`),
+`.env` 값을 `docker-compose.yml` 이 주입하며, 컨테이너는 비root(uid 10001)로 gunicorn 을 띄운다.
+
+```bash
+cp .env.example .env                  # USER_DATABASE_URL 필수 (People in SAIT 의 PostgreSQL)
+sudo scripts/fix_data_ownership.sh    # 처음 한 번: ./data 를 컨테이너 사용자 소유로 + 다른 사용자 접근 차단
+docker compose up -d --build          # http://<서버>:8502
+```
+
+- 사내 CA 가 필요하면 빌드 전에 `certs/`에 넣는다 (`certs/README.md`). People in SAIT 의 `certs/` 파일을 그대로 써도 된다.
+- 사외에서 빌드할 때는 `docker-compose.yml`의 build args(사내 pip/프록시)를 빈 값으로 바꾼다.
+- HTTPS: `scripts/gen_self_signed_cert.sh <IP>` 로 인증서를 만들고 `.env`에 `SESSION_COOKIE_SECURE=true`,
+  `TRUSTED_PROXY_COUNT=1` 을 넣은 뒤 `docker compose --profile proxy up -d` → `https://<서버>:8443`
+- People in SAIT 가 같은 서버에서 postgres 컨테이너(bundled-db)를 쓰면 그 네트워크에 붙인다:
+  `docker compose -f docker-compose.yml -f docker-compose.people-net.yml up -d --build`
+  (이때 `USER_DATABASE_URL`의 호스트는 `db`)
+- 업무 기록·업로드 파일·세션 키는 모두 `./data`에 쌓인다 → **이 디렉터리를 백업**한다.
+- 상태 확인: `curl http://localhost:8502/healthz`, 로그: `docker compose logs -f app`
+
+### 직접 실행 (개발)
+
 ```bash
 pip install -r requirements.txt
 python app.py                # http://localhost:8050
-# 운영
-gunicorn app:server -b 0.0.0.0:8050 --workers 2
 ```
 
 - 설정은 `.env.example` 참고. LLM 은 OpenAI 호환 `chat/completions` 엔드포인트(사내 vLLM 등)를 쓰며,
@@ -71,9 +92,10 @@ pages/home.py           업무 목록·검색·새 업무·빠른 기록·최근
 pages/search.py         이력 검색
 pages/todos.py          할 일
 pages/calendar.py       캘린더
-scripts/create_user.py  로컬 계정 생성 (단독 실행/개발용)
-pages/task_detail.py    업무 상세 (이력 / 참고자료 / 연결 업무 탭, 하위 업무)
+pages/task_detail.py    업무 상세 (이력 / 할 일 / 참고자료 / 연결 업무 탭, 하위 업무)
 pages/references.py     전체 참고자료 검색
+scripts/                create_user.py(로컬 계정), fix_data_ownership.sh, gen_self_signed_cert.sh
+Dockerfile, docker-compose*.yml, deploy/nginx.conf, certs/   Docker 실행 구성
 tests/                  저장·검색·LLM 파싱 테스트 (pip install -r requirements-dev.txt; pytest)
 ```
 

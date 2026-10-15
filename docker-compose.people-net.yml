@@ -1,0 +1,25 @@
+# People in SAIT(Researcher-board) 도커 네트워크 오버레이 (선택).
+#
+# People in SAIT 가 같은 서버에서 bundled-db 프로필(postgres 컨테이너, 호스트 포트는
+# 127.0.0.1:5433 에만 열림)로 돌고 있으면, 이 앱 컨테이너에서는 그 DB 에 닿을 수 없다.
+# 이 파일로 People in SAIT 의 기본 네트워크에 함께 붙이면 .env 에서
+#   USER_DATABASE_URL=postgresql+psycopg2://postgres:<비밀번호>@db:5432/researcher_board
+# 처럼 호스트를 db 로 쓸 수 있다.
+#
+# 사용:
+#   docker compose -f docker-compose.yml -f docker-compose.people-net.yml up -d --build
+#
+# 네트워크 이름은 People in SAIT 를 띄운 디렉터리 이름(compose 프로젝트명) + "_default" 다.
+# `docker network ls` 로 확인하고 다르면 .env 의 PEOPLE_NETWORK 로 지정한다.
+# People in SAIT 가 외부 PostgreSQL 서버를 쓰면 이 파일은 필요 없다(USER_DATABASE_URL 에 그 주소를 쓰면 됨).
+
+services:
+  app:
+    networks:
+      - default
+      - people
+
+networks:
+  people:
+    external: true
+    name: ${PEOPLE_NETWORK:-researcher-board_default}

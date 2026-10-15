@@ -13,6 +13,7 @@
 - todos          : 할 일 (업무에 속하거나 단독). 이력 원문에서 AI 가 뽑은 제안을 추가할 수 있음
 """
 import os
+import time
 from datetime import datetime
 
 from dotenv import load_dotenv
@@ -126,14 +127,26 @@ def make_engine(url: str | None = None):
     if not url:
         os.makedirs(DATA_DIR, exist_ok=True)
         url = 'sqlite:///' + os.path.join(DATA_DIR, 'exec_org.db')
-    engine = create_engine(url, future=True)
-    if engine.dialect.name == 'sqlite':
-        # SQLite 는 외래키 제약(ON DELETE CASCADE)이 기본 꺼져 있다
+    if url.startswith('sqlite'):
+        # gunicorn 워커 여러 개 + AI 정리 스레드가 같은 파일에 쓰므로 잠금을 기다리게 한다
+        engine = create_engine(url, future=True, connect_args={'timeout': 30})
+
         @event.listens_for(engine, 'connect')
-        def _fk_on(dbapi_conn, _):
-            dbapi_conn.execute('PRAGMA foreign_keys=ON')
-    Base.metadata.create_all(engine)
-    _add_missing_columns(engine)
+        def _sqlite_pragmas(dbapi_conn, _):
+            dbapi_conn.execute('PRAGMA foreign_keys=ON')  # ON DELETE CASCADE 가 기본 꺼져 있다
+            dbapi_conn.execute('PRAGMA journal_mode=WAL')  # 읽기가 쓰기를 막지 않게
+    else:
+        engine = create_engine(url, future=True, pool_pre_ping=True)
+    # 워커들이 동시에 떠서 같은 테이블을 동시에 만들려다 한쪽이 실패할 수 있어 몇 번 재시도한다
+    for attempt in range(5):
+        try:
+            Base.metadata.create_all(engine)
+            _add_missing_columns(engine)
+            break
+        except Exception:  # noqa: BLE001
+            if attempt == 4:
+                raise
+            time.sleep(0.5 * (attempt + 1))
     return engine
 
 

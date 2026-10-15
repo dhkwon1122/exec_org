@@ -54,13 +54,23 @@ app = dash.Dash(
     title='업무 기록',
 )
 server = app.server
+
+# 리버스 프록시(deploy/nginx.conf)가 정확히 N홉 앞에 있을 때만 TRUSTED_PROXY_COUNT=N 으로 켠다 —
+# 로그인 시도 제한이 실제 클라이언트 IP 를 구분하게 된다. 프록시 없이 직접 노출된 환경에서 켜면
+# 클라이언트가 X-Forwarded-For 를 위조할 수 있으므로 기본은 꺼둔다 (Researcher-board 와 같은 방식).
+_TRUSTED_PROXY_COUNT = int(os.environ.get('TRUSTED_PROXY_COUNT', '0'))
+if _TRUSTED_PROXY_COUNT > 0:
+    from werkzeug.middleware.proxy_fix import ProxyFix
+    server.wsgi_app = ProxyFix(server.wsgi_app, x_for=_TRUSTED_PROXY_COUNT, x_proto=_TRUSTED_PROXY_COUNT,
+                               x_host=_TRUSTED_PROXY_COUNT)
 server.secret_key = _secret_key()
 server.config.update(
     PERMANENT_SESSION_LIFETIME=timedelta(hours=int(os.environ.get('SESSION_LIFETIME_HOURS', '8'))),
     SESSION_COOKIE_HTTPONLY=True,
     SESSION_COOKIE_SAMESITE='Lax',
-    SESSION_COOKIE_SECURE=os.environ.get('SESSION_COOKIE_SECURE', '0') == '1',  # HTTPS 운영 시 1
-    MAX_CONTENT_LENGTH=80 * 1024 * 1024,
+    # HTTPS(리버스 프록시)로 운영할 때 true
+    SESSION_COOKIE_SECURE=os.environ.get('SESSION_COOKIE_SECURE', 'false').lower() in ('1', 'true', 'yes'),
+    MAX_CONTENT_LENGTH=int(os.environ.get('MAX_CONTENT_LENGTH', str(80 * 1024 * 1024))),
 )
 
 # 세션이 만료된 상태에서 화면을 조작하면(401) 로그인 화면으로 보낸다
@@ -69,7 +79,13 @@ app.index_string = app.index_string.replace('</head>', '''<script>
 if(r.status===401){window.location.href='/login';}return r;});};})();
 </script></head>''')
 
-_PUBLIC_PREFIXES = ('/login', '/_dash-component-suites/', '/_favicon.ico', '/assets/')
+_PUBLIC_PREFIXES = ('/login', '/healthz', '/_dash-component-suites/', '/_favicon.ico', '/assets/')
+
+
+@server.route('/healthz')
+def healthz():
+    # 컨테이너 헬스체크용 — 내용 없이 상태만
+    return 'ok'
 
 
 @server.before_request
