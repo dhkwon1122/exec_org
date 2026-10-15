@@ -5,9 +5,9 @@ import dash
 import dash_bootstrap_components as dbc
 from dash import ALL, Input, Output, State, callback, ctx, dcc, html, no_update
 
-from components import ui
+from components import todo_ui, ui
 from components.history_form import decode_text_upload, history_form
-from services import enrich, llm, store
+from services import auth, enrich, llm, store
 
 dash.register_page(__name__, path_template='/task/<task_id>', name='업무 상세', title='업무 기록 · 상세')
 
@@ -123,6 +123,8 @@ def layout(task_id=None, **_):
             dbc.Col([
                 dbc.Tabs([
                     dbc.Tab([_history_form(), html.Div(id='td-history')], label='이력', tab_id='history'),
+                    dbc.Tab([dbc.Card(dbc.CardBody(todo_ui.add_form('tt', with_task=False)), className='mb-3'),
+                             html.Div(id='td-todos')], label='할 일', tab_id='todos', id='td-todo-tab'),
                     dbc.Tab([_reference_form(), html.Div(id='td-refs')], label='참고자료', tab_id='refs'),
                     dbc.Tab([_link_form(), html.Div(id='td-links')], label='연결 업무', tab_id='links'),
                 ], id='td-tabs', active_tab='history', className='mb-3'),
@@ -137,11 +139,12 @@ def layout(task_id=None, **_):
 @callback(Output('td-header', 'children'), Output('td-side', 'children'), Output('td-history', 'children'),
           Output('td-refs', 'children'), Output('td-links', 'children'), Output('l-target', 'options'),
           Output('td-pending', 'data'), Output('td-poll', 'disabled'),
-          Input('td-refresh', 'data'), State('td-id', 'data'))
-def render(_, tid):
+          Output('td-todos', 'children'), Output('td-todo-tab', 'label'), Output('tt-assignee', 'options'),
+          Input('td-refresh', 'data'), Input('todo-changed', 'data'), State('td-id', 'data'))
+def render(_, _t, tid):
     t = store.get_task(tid)
     if t is None:
-        return dbc.Alert('삭제된 업무입니다.', color='warning'), None, None, None, None, [], [], True
+        return dbc.Alert('삭제된 업무입니다.', color='warning'), None, None, None, None, [], [], True, None, '할 일', []
     parent = store.get_task(t['parent_id']) if t['parent_id'] else None
 
     header = dbc.Card(dbc.CardBody([
@@ -184,7 +187,9 @@ def render(_, tid):
         ]))
 
     hist = store.list_history(tid)
-    history = dbc.ListGroup([ui.history_card(h) for h in hist]) if hist else \
+    history = dbc.ListGroup([
+        ui.history_card(h, added_todos=store.todo_titles_for_history(h['id']) if h['ai_todos'] else None)
+        for h in hist]) if hist else \
         html.Div('이력이 없습니다.', className='text-muted small')
     pending = sorted(h['id'] for h in hist if h['ai_status'] == 'pending')
 
@@ -220,7 +225,36 @@ def render(_, tid):
     linked_ids = {l['id'] for l in links} | {tid}
     targets = [{'label': f"#{o['id']} {o['title']}", 'value': o['id']}
                for o in store.list_tasks() if o['id'] not in linked_ids]
-    return header, side, history, ref_view, link_view, targets, pending, not pending
+    todos = store.list_todos(task_id=tid)
+    n_open = sum(not x['done'] for x in todos)
+    todo_view = todo_ui.todo_list(todos, show_task=False, empty='이 업무의 할 일이 없습니다.')
+    return (header, side, history, ref_view, link_view, targets, pending, not pending,
+            todo_view, f'할 일 ({n_open})' if n_open else '할 일', todo_ui.member_options())
+
+
+todo_ui.register_add_callback('tt', task_id_store='td-id')
+
+
+@callback(Output('todo-changed', 'data', allow_duplicate=True),
+          Input({'type': 'h-todo', 'hid': ALL, 'idx': ALL}, 'n_clicks'), State('td-id', 'data'),
+          State('todo-changed', 'data'), prevent_initial_call=True)
+def add_suggested_todo(_, tid, n):
+    """AI 가 원문에서 찾은 할 일 제안을 실제 할 일로 추가한다."""
+    trig = ctx.triggered_id
+    if not isinstance(trig, dict) or not ctx.triggered[0]['value']:
+        return no_update
+    h = store.get_history(trig['hid'])
+    if h is None or trig['idx'] >= len(h['ai_todos']):
+        return no_update
+    sug = h['ai_todos'][trig['idx']]
+    if sug['title'] in store.todo_titles_for_history(h['id']):
+        return no_update
+    # 제안의 담당자 이름이 접근 허용 사용자 이름과 같으면 그 사람으로 지정
+    match = next((o for o in todo_ui.member_options() if sug['assignee'] and o['label'] == sug['assignee']), None)
+    store.create_todo(sug['title'], task_id=tid, due_date=sug['due'], assignee_id=match['value'] if match else '',
+                      assignee_name=match['label'] if match else sug['assignee'], created_by=auth.current_name(),
+                      source_history_id=h['id'])
+    return (n or 0) + 1
 
 
 @callback(Output('td-refresh', 'data', allow_duplicate=True), Input('td-poll', 'n_intervals'),
@@ -236,9 +270,10 @@ def poll_ai(_, tid, pending, n):
 # ── 상태 변경 ─────────────────────────────────────────────────────────
 
 @callback(Output('td-refresh', 'data', allow_duplicate=True), Input('td-status', 'value'),
-          State('td-id', 'data'), State('author-store', 'data'), State('td-refresh', 'data'),
+          State('td-id', 'data'), State('td-refresh', 'data'),
           prevent_initial_call=True)
-def change_status(status, tid, author, n):
+def change_status(status, tid, n):
+    author = auth.current_name()
     t = store.get_task(tid)
     if not t or not status or status == t['status']:
         return no_update
@@ -257,9 +292,10 @@ def change_status(status, tid, author, n):
           Input('ed-delete', 'n_clicks'),
           State('td-id', 'data'), State('ed-title', 'value'), State('ed-desc', 'value'),
           State('ed-owner', 'value'), State('ed-tags', 'value'), State('ed-start', 'value'),
-          State('ed-due', 'value'), State('ed-parent', 'value'), State('author-store', 'data'),
+          State('ed-due', 'value'), State('ed-parent', 'value'), 
           State('td-refresh', 'data'), prevent_initial_call=True)
-def edit_task(n_open, _c, _s, _d, tid, title, desc, owner, tags, start, due, parent, author, n):
+def edit_task(n_open, _c, _s, _d, tid, title, desc, owner, tags, start, due, parent, n):
+    author = auth.current_name()
     nu = no_update
     trig = ctx.triggered_id
     if trig == 'ed-open':
@@ -297,8 +333,9 @@ def load_text_file(contents, current):
           Output('h-when', 'value'), Output('h-error', 'children'), Output('h-error', 'is_open'),
           Input('h-add', 'n_clicks'), State('td-id', 'data'), State('h-type', 'value'),
           State('h-content', 'value'), State('h-when', 'value'), State('h-ai', 'value'),
-          State('author-store', 'data'), State('td-refresh', 'data'), prevent_initial_call=True)
-def add_history(_, tid, etype, content, when, use_ai, author, n):
+          State('td-refresh', 'data'), prevent_initial_call=True)
+def add_history(_, tid, etype, content, when, use_ai, n):
+    author = auth.current_name()
     try:
         h = store.add_history(tid, content, etype, author or '', when or None)
     except ValueError as e:
@@ -377,9 +414,10 @@ def toggle_ref_inputs(kind, fname):
           Output('r-error', 'children'), Output('r-error', 'is_open'),
           Input('r-add', 'n_clicks'), State('td-id', 'data'), State('r-kind', 'value'), State('r-title', 'value'),
           State('r-url', 'value'), State('r-note', 'value'), State('r-file', 'contents'),
-          State('r-file', 'filename'), State('author-store', 'data'), State('td-refresh', 'data'),
+          State('r-file', 'filename'), State('td-refresh', 'data'),
           prevent_initial_call=True)
-def add_reference(_, tid, kind, title, url, note, contents, fname, author, n):
+def add_reference(_, tid, kind, title, url, note, contents, fname, n):
+    author = auth.current_name()
     data = None
     if kind == 'file' and contents:
         data = base64.b64decode(contents.split(',', 1)[1])
@@ -395,9 +433,10 @@ def add_reference(_, tid, kind, title, url, note, contents, fname, author, n):
 @callback(Output('td-refresh', 'data', allow_duplicate=True), Output('l-target', 'value'), Output('l-note', 'value'),
           Output('l-error', 'children'), Output('l-error', 'is_open'),
           Input('l-add', 'n_clicks'), State('td-id', 'data'), State('l-target', 'value'), State('l-rel', 'value'),
-          State('l-note', 'value'), State('author-store', 'data'), State('td-refresh', 'data'),
+          State('l-note', 'value'), State('td-refresh', 'data'),
           prevent_initial_call=True)
-def add_link(_, tid, target, rel, note, author, n):
+def add_link(_, tid, target, rel, note, n):
+    author = auth.current_name()
     if not target:
         return no_update, no_update, no_update, '연결할 업무를 선택하세요.', True
     try:

@@ -4,19 +4,21 @@
 상태 변경·업무 연결·참고자료 추가처럼 "기록할 가치가 있는 변화"는 이력에
 자동으로 남겨, 업무의 흐름을 이력 타임라인 하나로 따라갈 수 있게 한다.
 """
+import calendar
+import json
 import os
 import re
 import uuid
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 
 from sqlalchemy import or_, select
 
 from services import db
-from services.db import HistoryEntry, Reference, Task, TaskLink
+from services.db import HistoryEntry, Reference, Task, TaskLink, Todo
 
 STATUSES = ['예정', '진행중', '보류', '완료']
 ENTRY_TYPES = ['메모', '피드백', '회의', '결정', '진행', '이슈', '요청']
-AUTO_ENTRY_TYPES = ['상태변경', '연결', '자료']  # 시스템이 자동으로 남기는 유형
+AUTO_ENTRY_TYPES = ['상태변경', '연결', '자료', '할일']  # 시스템이 자동으로 남기는 유형
 RELATIONS = ['관련', '선행', '후속', '파생']
 # A→B 를 "선행"으로 연결하면 B 쪽에서 A 는 "후속" 관계로 보인다
 _INVERSE = {'관련': '관련', '선행': '후속', '후속': '선행', '파생': '파생 원본'}
@@ -44,8 +46,16 @@ def _history_dict(h: HistoryEntry) -> dict:
         'id': h.id, 'task_id': h.task_id, 'entry_type': h.entry_type, 'content': h.content,
         'author': h.author or '', 'occurred_at': _dt(h.occurred_at), 'created_at': _dt(h.created_at),
         'title': h.title or '', 'summary': h.summary or '', 'keywords': _tags(h.keywords),
-        'ai_status': h.ai_status or '', 'ai_error': h.ai_error or '',
+        'ai_status': h.ai_status or '', 'ai_error': h.ai_error or '', 'ai_todos': _load_json_list(h.ai_todos),
     }
+
+
+def _load_json_list(v: str) -> list:
+    try:
+        out = json.loads(v) if v else []
+    except ValueError:
+        return []
+    return out if isinstance(out, list) else []
 
 
 def search_terms(query: str) -> list[str]:
@@ -249,7 +259,7 @@ def update_history(entry_id: int, **fields) -> dict:
 
 
 def set_history_ai(entry_id: int, status: str, title: str | None = None, summary: str | None = None,
-                   keywords: list[str] | None = None, error: str = '') -> None:
+                   keywords: list[str] | None = None, error: str = '', todos: list[dict] | None = None) -> None:
     """AI 정리 상태/결과 저장. None 인 필드는 기존 값을 유지한다(재생성 중에도 이전 결과가 보이도록)."""
     with db.SessionLocal() as s:
         h = s.get(HistoryEntry, entry_id)
@@ -262,6 +272,8 @@ def set_history_ai(entry_id: int, status: str, title: str | None = None, summary
             h.summary = summary
         if keywords is not None:
             h.keywords = _join_keywords(keywords)
+        if todos is not None:
+            h.ai_todos = json.dumps(todos, ensure_ascii=False)
         s.commit()
 
 
@@ -485,3 +497,153 @@ def linked_tasks(task_id: int) -> list[dict]:
             rel = link.relation if link.src_id == task_id else _INVERSE[link.relation]
             out.append({'link_id': link.id, 'relation': rel, 'note': link.note or '', **_task_dict(other)})
         return out
+
+
+# ── 할 일 ─────────────────────────────────────────────────────────────
+
+_DATE_RE = re.compile(r'^\d{4}-\d{2}-\d{2}$')
+
+
+def _check_date(v: str) -> str:
+    v = (v or '').strip()
+    if v and not _DATE_RE.match(v):
+        raise ValueError(f'날짜 형식이 올바르지 않습니다: {v}')
+    return v
+
+
+def _todo_dict(t: Todo, task_title: str | None = None) -> dict:
+    today = date.today().isoformat()
+    return {
+        'id': t.id, 'task_id': t.task_id, 'task_title': task_title or '', 'title': t.title,
+        'due_date': t.due_date or '', 'done': bool(t.done), 'done_at': _dt(t.done_at),
+        'assignee_id': t.assignee_id or '', 'assignee_name': t.assignee_name or '',
+        'created_by': t.created_by or '', 'source_history_id': t.source_history_id,
+        'created_at': _dt(t.created_at),
+        'overdue': bool(not t.done and t.due_date and t.due_date < today),
+    }
+
+
+def create_todo(title: str, task_id: int | None = None, due_date: str = '', assignee_id: str = '',
+                assignee_name: str = '', created_by: str = '', source_history_id: int | None = None) -> dict:
+    title = (title or '').strip()
+    if not title:
+        raise ValueError('할 일 내용을 입력하세요.')
+    due_date = _check_date(due_date)
+    with db.SessionLocal() as s:
+        task = s.get(Task, task_id) if task_id else None
+        if task_id and task is None:
+            raise ValueError('업무를 찾을 수 없습니다.')
+        t = Todo(title=title, task_id=task_id or None, due_date=due_date, assignee_id=assignee_id or '',
+                 assignee_name=assignee_name or '', created_by=created_by or '', source_history_id=source_history_id)
+        s.add(t)
+        s.commit()
+        return _todo_dict(t, task.title if task else '')
+
+
+def update_todo(todo_id: int, **fields) -> dict:
+    with db.SessionLocal() as s:
+        t = s.get(Todo, todo_id)
+        if t is None:
+            raise ValueError('할 일을 찾을 수 없습니다.')
+        if 'title' in fields:
+            if not (fields['title'] or '').strip():
+                raise ValueError('할 일 내용을 입력하세요.')
+            t.title = fields['title'].strip()
+        if 'due_date' in fields:
+            t.due_date = _check_date(fields['due_date'])
+        if 'task_id' in fields:
+            t.task_id = fields['task_id'] or None
+        if 'assignee_id' in fields:
+            t.assignee_id = fields['assignee_id'] or ''
+            t.assignee_name = fields.get('assignee_name') or ''
+        s.commit()
+        task = s.get(Task, t.task_id) if t.task_id else None
+        return _todo_dict(t, task.title if task else '')
+
+
+def set_todo_done(todo_id: int, done: bool, by: str = '') -> bool:
+    """완료/완료 취소. 업무에 속한 할 일이면 그 업무 이력에도 남긴다. 바뀌었으면 True."""
+    with db.SessionLocal() as s:
+        t = s.get(Todo, todo_id)
+        if t is None or bool(t.done) == bool(done):
+            return False
+        t.done = bool(done)
+        t.done_at = datetime.now().replace(microsecond=0) if done else None
+        if t.task_id:
+            _log(s, t.task_id, '할일', f"{'완료' if done else '완료 취소'}: {t.title}", by)
+        s.commit()
+        return True
+
+
+def delete_todo(todo_id: int) -> None:
+    with db.SessionLocal() as s:
+        t = s.get(Todo, todo_id)
+        if t:
+            s.delete(t)
+            s.commit()
+
+
+def list_todos(task_id: int | None = None, assignee_id: str | None = None, done: bool | None = None,
+               date_from: str = '', date_to: str = '', done_since: str = '') -> list[dict]:
+    """정렬: 미완료 먼저, 마감일 빠른 순(날짜 없는 것은 뒤), 완료는 최근 완료 순."""
+    with db.SessionLocal() as s:
+        stmt = select(Todo, Task.title).outerjoin(Task, Task.id == Todo.task_id)
+        if task_id is not None:
+            stmt = stmt.where(Todo.task_id == task_id)
+        if assignee_id is not None:
+            stmt = stmt.where(Todo.assignee_id == assignee_id)
+        if done is not None:
+            stmt = stmt.where(Todo.done == done)
+        if date_from:
+            stmt = stmt.where(Todo.due_date >= date_from)
+        if date_to:
+            stmt = stmt.where(Todo.due_date <= date_to, Todo.due_date != '')
+        if done_since:
+            stmt = stmt.where(or_(Todo.done.is_(False), Todo.done_at >= datetime.fromisoformat(done_since)))
+        rows = [_todo_dict(t, title) for t, title in s.execute(stmt)]
+    open_ = sorted([r for r in rows if not r['done']], key=lambda r: (r['due_date'] == '', r['due_date'], r['id']))
+    closed = sorted([r for r in rows if r['done']], key=lambda r: r['done_at'], reverse=True)
+    return open_ + closed
+
+
+def todo_titles_for_history(entry_id: int) -> set[str]:
+    with db.SessionLocal() as s:
+        return set(s.scalars(select(Todo.title).where(Todo.source_history_id == entry_id)))
+
+
+# ── 캘린더 ────────────────────────────────────────────────────────────
+
+def month_range(year: int, month: int) -> tuple[str, str]:
+    last = calendar.monthrange(year, month)[1]
+    return f'{year:04d}-{month:02d}-01', f'{year:04d}-{month:02d}-{last:02d}'
+
+
+def calendar_month(year: int, month: int) -> dict[str, dict]:
+    """{'YYYY-MM-DD': {'todos': [...], 'tasks_due': [...], 'tasks_start': [...], 'history': n}}"""
+    first, last = month_range(year, month)
+    days: dict[str, dict] = {}
+
+    def day(d):
+        return days.setdefault(d, {'todos': [], 'tasks_due': [], 'tasks_start': [], 'history': 0})
+
+    for t in list_todos(date_from=first, date_to=last):
+        day(t['due_date'])['todos'].append(t)
+    with db.SessionLocal() as s:
+        for t in s.scalars(select(Task).where(Task.due_date >= first, Task.due_date <= last)):
+            day(t.due_date)['tasks_due'].append(_task_dict(t))
+        for t in s.scalars(select(Task).where(Task.start_date >= first, Task.start_date <= last)):
+            day(t.start_date)['tasks_start'].append(_task_dict(t))
+        start = datetime.fromisoformat(first)
+        end = datetime.fromisoformat(last) + timedelta(days=1)
+        for (occ,) in s.execute(select(HistoryEntry.occurred_at).where(
+                HistoryEntry.occurred_at >= start, HistoryEntry.occurred_at < end,
+                HistoryEntry.entry_type.notin_(AUTO_ENTRY_TYPES))):
+            day(occ.date().isoformat())['history'] += 1
+    return days
+
+
+def tasks_due_between(date_from: str, date_to: str) -> list[dict]:
+    with db.SessionLocal() as s:
+        rows = s.scalars(select(Task).where(Task.due_date >= date_from, Task.due_date <= date_to,
+                                            Task.status != '완료').order_by(Task.due_date))
+        return [_task_dict(t) for t in rows]

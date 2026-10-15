@@ -3,9 +3,11 @@ import dash
 import dash_bootstrap_components as dbc
 from dash import Input, Output, State, callback, ctx, dcc, html, no_update
 
-from components import ui
+from datetime import date, timedelta
+
+from components import todo_ui, ui
 from components.history_form import decode_text_upload, history_form
-from services import enrich, store
+from services import auth, enrich, store
 
 dash.register_page(__name__, path='/', name='업무', title='업무 기록 · 업무')
 
@@ -56,6 +58,12 @@ def layout(**_):
             ], lg=8),
             dbc.Col([
                 dbc.Card([
+                    dbc.CardHeader(html.Div([html.I(className='bi bi-list-check me-1'), '내 할 일 (7일 이내·지난 마감)',
+                                             dcc.Link('전체', href='/todos', className='ms-auto small')],
+                                            className='d-flex'), className='small'),
+                    html.Div(id='home-todos'),
+                ], className='mb-3'),
+                dbc.Card([
                     dbc.CardHeader([html.I(className='bi bi-lightning-charge me-1'), '빠른 기록'], className='small'),
                     dbc.CardBody([
                         dcc.Dropdown(id='qr-task', placeholder='어느 업무에 기록할까요?', className='mb-2'),
@@ -105,6 +113,16 @@ def render_list(q, statuses, tag, _):
     return task_view, history_view, store.all_tags()
 
 
+@callback(Output('home-todos', 'children'), Input('todo-changed', 'data'), Input('home-refresh', 'data'))
+def render_my_todos(_, _r):
+    me = (auth.current_user() or {}).get('user_id', '')
+    soon = (date.today() + timedelta(days=7)).isoformat()
+    todos = [t for t in store.list_todos(assignee_id=me, done=False) if t['due_date'] and t['due_date'] <= soon]
+    if not todos:
+        return html.Div('급한 할 일이 없습니다.', className='small text-muted p-3')
+    return dbc.ListGroup([todo_ui.todo_row(t) for t in todos[:8]], flush=True)
+
+
 @callback(Output('qr-task', 'options'), Input('home-refresh', 'data'))
 def quick_task_options(_):
     return [{'label': f"#{t['id']} {t['title']}", 'value': t['id']}
@@ -125,8 +143,9 @@ def quick_load_file(contents, current):
           Output('qr-ok', 'children'), Output('qr-ok', 'is_open'),
           Input('qr-add', 'n_clicks'), State('qr-task', 'value'), State('qr-type', 'value'),
           State('qr-content', 'value'), State('qr-when', 'value'), State('qr-ai', 'value'),
-          State('author-store', 'data'), State('home-refresh', 'data'), prevent_initial_call=True)
-def quick_record(_, task_id, etype, content, when, use_ai, author, n):
+          State('home-refresh', 'data'), prevent_initial_call=True)
+def quick_record(_, task_id, etype, content, when, use_ai, n):
+    author = auth.current_name()
     nu = no_update
     if not task_id:
         return nu, nu, nu, '기록할 업무를 선택하세요.', True, nu, False
@@ -147,9 +166,10 @@ def quick_record(_, task_id, etype, content, when, use_ai, author, n):
           Input('new-open', 'n_clicks'), Input('new-cancel', 'n_clicks'), Input('new-save', 'n_clicks'),
           State('new-title', 'value'), State('new-desc', 'value'), State('new-status', 'value'),
           State('new-owner', 'value'), State('new-start', 'value'), State('new-due', 'value'),
-          State('new-tags', 'value'), State('new-parent', 'value'), State('author-store', 'data'),
+          State('new-tags', 'value'), State('new-parent', 'value'), 
           prevent_initial_call=True)
-def new_task(_o, _c, _s, title, desc, status, owner, start, due, tags, parent, author):
+def new_task(_o, _c, _s, title, desc, status, owner, start, due, tags, parent):
+    author = auth.current_name()
     if ctx.triggered_id == 'new-open':
         opts = [{'label': f"#{t['id']} {t['title']}", 'value': t['id']} for t in store.list_tasks()]
         return True, opts, '', False, no_update

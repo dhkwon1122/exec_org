@@ -12,6 +12,7 @@ Researcher-board 와 같은 .env 를 그대로 쓸 수 있도록 LLM_* 가 없�
 import json
 import os
 import re
+from datetime import date
 
 import requests
 
@@ -81,7 +82,8 @@ ANALYZE_SYSTEM = """너는 업무 기록을 정리하는 비서다. 사용자가
 - 받아쓰기 오타·구어체는 의미를 살려 정리한다.
 - 반드시 JSON 객체 하나만 출력한다. 다른 설명은 쓰지 않는다."""
 
-ANALYZE_USER = """업무: {task}
+ANALYZE_USER = """오늘 날짜: {today} ({weekday})
+업무: {task}
 기록 유형: {entry_type}
 
 원문:
@@ -93,18 +95,22 @@ ANALYZE_USER = """업무: {task}
 {{
   "title": "이 기록의 주제를 한 줄로 (30자 내외)",
   "summary": "핵심 내용 2~4문장 요약. 결정 사항·요청 사항·후속 조치(누가/언제까지)가 있으면 반드시 포함",
-  "keywords": ["검색용 키워드 5~10개"]
+  "keywords": ["검색용 키워드 5~10개"],
+  "todos": [{{"title": "해야 할 일 (동사로 끝나는 한 문장)", "due": "YYYY-MM-DD 또는 빈 문자열", "assignee": "담당자 이름 또는 빈 문자열"}}]
 }}
-keywords 에는 (1) 사람·조직·제품·과제·문서 같은 고유명사, (2) 핵심 주제어, (3) 원문에 그 단어가 없더라도 나중에 검색할 때 쓸 법한 동의어·상위 개념을 섞어 넣는다. 각 키워드는 짧은 명사구로."""
+keywords 에는 (1) 사람·조직·제품·과제·문서 같은 고유명사, (2) 핵심 주제어, (3) 원문에 그 단어가 없더라도 나중에 검색할 때 쓸 법한 동의어·상위 개념을 섞어 넣는다. 각 키워드는 짧은 명사구로.
+todos 에는 원문에 나온 요청·지시·약속·후속 조치만 넣는다(없으면 빈 배열). "다음주까지", "금요일까지"처럼 상대적인 기한은 오늘 날짜를 기준으로 실제 날짜로 바꾸고, 기한이 없으면 due 는 빈 문자열."""
 
 
 def analyze_record(text: str, task_title: str = '', entry_type: str = '') -> dict:
-    """원문 → {'title', 'summary', 'keywords': [..]}"""
+    """원문 → {'title', 'summary', 'keywords': [..], 'todos': [{'title', 'due', 'assignee'}]}"""
     text = (text or '').strip()
     if len(text) > MAX_INPUT_CHARS:
         text = text[:MAX_INPUT_CHARS] + '\n…(이하 생략)'
-    data = _extract_json(chat(ANALYZE_SYSTEM, ANALYZE_USER.format(task=task_title or '-',
-                                                                  entry_type=entry_type or '-', text=text)))
+    today = date.today()
+    data = _extract_json(chat(ANALYZE_SYSTEM, ANALYZE_USER.format(
+        today=today.isoformat(), weekday='월화수목금토일'[today.weekday()] + '요일',
+        task=task_title or '-', entry_type=entry_type or '-', text=text)))
     kws = data.get('keywords') or []
     if isinstance(kws, str):
         kws = re.split(r'[,\n]', kws)
@@ -118,4 +124,19 @@ def analyze_record(text: str, task_title: str = '', entry_type: str = '') -> dic
         'title': str(data.get('title') or '').strip()[:200],
         'summary': str(data.get('summary') or '').strip(),
         'keywords': keywords[:12],
+        'todos': _clean_todos(data.get('todos')),
     }
+
+
+def _clean_todos(raw) -> list[dict]:
+    out = []
+    for t in raw if isinstance(raw, list) else []:
+        if isinstance(t, str):
+            t = {'title': t}
+        if not isinstance(t, dict) or not str(t.get('title') or '').strip():
+            continue
+        due = str(t.get('due') or '').strip()
+        out.append({'title': str(t['title']).strip()[:300],
+                    'due': due if re.match(r'^\d{4}-\d{2}-\d{2}$', due) else '',
+                    'assignee': str(t.get('assignee') or '').strip()[:50]})
+    return out[:10]

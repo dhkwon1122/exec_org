@@ -38,11 +38,17 @@ def _fake_llm(monkeypatch, content, calls=None):
 def test_analyze_record_parses_thinking_and_codefence(monkeypatch):
     calls = []
     _fake_llm(monkeypatch, '<think>음…</think>```json\n{"title": "장비 예산 피드백", "summary": "예산 20% 감액 요청.",'
-                           ' "keywords": ["#예산", "장비", "예산", "감액", "비용 절감"]}\n```', calls)
+                           ' "keywords": ["#예산", "장비", "예산", "감액", "비용 절감"],'
+                           ' "todos": [{"title": "예산안 수정", "due": "2026-10-24", "assignee": "권대현"},'
+                           ' {"title": "B사 견적 요청", "due": "다음주"}, "회의록 공유", {"due": "x"}]}\n```', calls)
     out = llm.analyze_record('팀장님: 장비 예산 좀 줄여봐 20%정도', '장비 도입', '피드백')
     assert out == {'title': '장비 예산 피드백', 'summary': '예산 20% 감액 요청.',
-                   'keywords': ['예산', '장비', '감액', '비용 절감']}
-    assert '장비 도입' in calls[0]['messages'][1]['content']
+                   'keywords': ['예산', '장비', '감액', '비용 절감'],
+                   'todos': [{'title': '예산안 수정', 'due': '2026-10-24', 'assignee': '권대현'},
+                             {'title': 'B사 견적 요청', 'due': '', 'assignee': ''},
+                             {'title': '회의록 공유', 'due': '', 'assignee': ''}]}
+    prompt = calls[0]['messages'][1]['content']
+    assert '장비 도입' in prompt and '오늘 날짜:' in prompt
 
 
 def test_llm2_env_fallback(monkeypatch):

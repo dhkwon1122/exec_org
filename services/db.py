@@ -10,13 +10,16 @@
                    LLM 이 만든(또는 사용자가 고친) 검색용 정리본
 - references_    : 업무별 참고자료 (링크/파일/메모)
 - task_links     : 업무 ↔ 업무 연결 (관련/선행/후속/파생)
+- todos          : 할 일 (업무에 속하거나 단독). 이력 원문에서 AI 가 뽑은 제안을 추가할 수 있음
+- exec_members   : 이 시스템을 쓸 수 있는 사용자(접근 허용 목록). 계정 자체는 사용자 DB(app_users)에 있다
 """
 import os
 from datetime import datetime
 
 from dotenv import load_dotenv
 from sqlalchemy import (
-    Column, DateTime, ForeignKey, Integer, String, Text, UniqueConstraint, create_engine, event, inspect, text,
+    Boolean, Column, DateTime, ForeignKey, Integer, String, Text, UniqueConstraint, create_engine, event, inspect,
+    text,
 )
 from sqlalchemy.orm import declarative_base, relationship, sessionmaker
 
@@ -70,6 +73,7 @@ class HistoryEntry(Base):
     keywords = Column(String(1000), default='')  # 쉼표 구분
     ai_status = Column(String(10), default='')  # '' (요청 안 함) / pending / done / failed
     ai_error = Column(Text, default='')
+    ai_todos = Column(Text, default='')  # AI 가 원문에서 뽑은 할 일 제안 (JSON 배열)
 
     task = relationship('Task', back_populates='history')
 
@@ -102,6 +106,31 @@ class TaskLink(Base):
     created_at = Column(DateTime, default=_now)
 
 
+class Todo(Base):
+    __tablename__ = 'todos'
+
+    id = Column(Integer, primary_key=True)
+    task_id = Column(Integer, ForeignKey('tasks.id', ondelete='CASCADE'), nullable=True, index=True)
+    title = Column(String(500), nullable=False)
+    due_date = Column(String(10), default='')  # YYYY-MM-DD, 비우면 날짜 없음
+    done = Column(Boolean, nullable=False, default=False)
+    done_at = Column(DateTime, nullable=True)
+    assignee_id = Column(String(100), default='')  # 사용자 DB 의 user_id
+    assignee_name = Column(String(100), default='')
+    created_by = Column(String(100), default='')
+    source_history_id = Column(Integer, ForeignKey('history.id', ondelete='SET NULL'), nullable=True)
+    created_at = Column(DateTime, default=_now)
+
+
+class ExecMember(Base):
+    __tablename__ = 'exec_members'
+
+    user_id = Column(String(100), primary_key=True)
+    role = Column(String(10), nullable=False, default='member')  # admin / member
+    granted_by = Column(String(100), default='')
+    created_at = Column(DateTime, default=_now)
+
+
 def make_engine(url: str | None = None):
     url = url or os.environ.get('DATABASE_URL', '').strip()
     if not url:
@@ -129,7 +158,12 @@ def _add_missing_columns(engine):
                 if col.name in existing:
                     continue
                 coltype = col.type.compile(dialect=engine.dialect)
-                default = " DEFAULT ''" if isinstance(col.type, (String, Text)) else ''
+                if isinstance(col.type, (String, Text)):
+                    default = " DEFAULT ''"
+                elif isinstance(col.type, Boolean):
+                    default = ' DEFAULT FALSE'
+                else:
+                    default = ''
                 conn.execute(text(f'ALTER TABLE {table.name} ADD COLUMN {col.name} {coltype}{default}'))
 
 
