@@ -6,8 +6,8 @@ import dash_bootstrap_components as dbc
 from dash import ALL, Input, Output, State, callback, ctx, dcc, html, no_update
 
 from components import todo_ui, ui
-from components.history_form import decode_text_upload, history_form
-from services import auth, enrich, llm, store
+from components.history_form import decode_text_upload, history_form, register_form_callbacks, save_history
+from services import auth, store
 
 dash.register_page(__name__, path_template='/task/<task_id>', name='업무 상세', title='업무 기록 · 상세')
 
@@ -43,31 +43,6 @@ def _edit_modal():
 
 def _history_form():
     return dbc.Card(dbc.CardBody(history_form('h')), className='mb-3')
-
-
-def _history_edit_modal():
-    return dbc.Modal([
-        dbc.ModalHeader(dbc.ModalTitle('이력 수정')),
-        dbc.ModalBody([
-            dcc.Store(id='he-id'),
-            dbc.Row([
-                dbc.Col([dbc.Label('유형'), dbc.Select(id='he-type', options=_opts(store.ENTRY_TYPES))]),
-                dbc.Col([dbc.Label('일시'), dbc.Input(id='he-when', type='datetime-local')]),
-            ], className='mb-2'),
-            dbc.Label('제목'), dbc.Input(id='he-title', className='mb-2'),
-            dbc.Label('요약'), dbc.Textarea(id='he-summary', rows=3, className='mb-2'),
-            dbc.Label('키워드 (쉼표 구분)'), dbc.Input(id='he-keywords', className='mb-2'),
-            dbc.Label('원문'), dbc.Textarea(id='he-content', rows=8),
-            dbc.Alert(id='he-error', color='danger', is_open=False, className='mt-3 mb-0'),
-        ]),
-        dbc.ModalFooter([
-            dbc.Button([html.I(className='bi bi-stars me-1'), 'AI로 다시 생성'], id='he-regen', color='info',
-                       outline=True, className='me-auto', disabled=not llm.is_configured(),
-                       title='원문을 저장한 뒤 제목·요약·키워드를 다시 만듭니다'),
-            dbc.Button('취소', id='he-cancel', color='secondary', outline=True),
-            dbc.Button('저장', id='he-save', color='primary'),
-        ]),
-    ], id='he-modal', is_open=False, size='lg')
 
 
 def _reference_form():
@@ -117,7 +92,6 @@ def layout(task_id=None, **_):
         dcc.Interval(id='td-poll', interval=3000, disabled=True),
         dcc.Location(id='td-redirect', refresh='callback-nav'),
         _edit_modal(),
-        _history_edit_modal(),
         html.Div(id='td-header', className='mb-3'),
         dbc.Row([
             dbc.Col([
@@ -140,8 +114,9 @@ def layout(task_id=None, **_):
           Output('td-refs', 'children'), Output('td-links', 'children'), Output('l-target', 'options'),
           Output('td-pending', 'data'), Output('td-poll', 'disabled'),
           Output('td-todos', 'children'), Output('td-todo-tab', 'label'), Output('tt-assignee', 'options'),
-          Input('td-refresh', 'data'), Input('todo-changed', 'data'), State('td-id', 'data'))
-def render(_, _t, tid):
+          Input('td-refresh', 'data'), Input('todo-changed', 'data'), Input('history-changed', 'data'),
+          State('td-id', 'data'))
+def render(_, _t, _h, tid):
     t = store.get_task(tid)
     if t is None:
         return dbc.Alert('삭제된 업무입니다.', color='warning'), None, None, None, None, [], [], True, None, '할 일', []
@@ -194,6 +169,7 @@ def render(_, _t, tid):
     pending = sorted(h['id'] for h in hist if h['ai_status'] == 'pending')
 
     refs = store.list_references(task_id=tid)
+    hist_titles = {h['id']: f"{h['occurred_at'][:10]} {h['title'] or h['content'][:30]}" for h in hist}
     ref_view = dbc.ListGroup([
         dbc.ListGroupItem([
             html.Div([
@@ -205,6 +181,9 @@ def render(_, _t, tid):
             ], className='d-flex align-items-center'),
             ui.ref_target(r),
             html.Div(r['note'], className='small mt-1', style={'whiteSpace': 'pre-wrap'}) if r['note'] else None,
+            html.Div([html.I(className='bi bi-clock-history me-1'), '이력에 첨부: ',
+                      hist_titles.get(r['history_id'], f"#{r['history_id']}")],
+                     className='small text-muted mt-1') if r['history_id'] else None,
         ]) for r in refs
     ]) if refs else html.Div('참고자료가 없습니다.', className='text-muted small')
 
@@ -233,28 +212,6 @@ def render(_, _t, tid):
 
 
 todo_ui.register_add_callback('tt', task_id_store='td-id')
-
-
-@callback(Output('todo-changed', 'data', allow_duplicate=True),
-          Input({'type': 'h-todo', 'hid': ALL, 'idx': ALL}, 'n_clicks'), State('td-id', 'data'),
-          State('todo-changed', 'data'), prevent_initial_call=True)
-def add_suggested_todo(_, tid, n):
-    """AI 가 원문에서 찾은 할 일 제안을 실제 할 일로 추가한다."""
-    trig = ctx.triggered_id
-    if not isinstance(trig, dict) or not ctx.triggered[0]['value']:
-        return no_update
-    h = store.get_history(trig['hid'])
-    if h is None or trig['idx'] >= len(h['ai_todos']):
-        return no_update
-    sug = h['ai_todos'][trig['idx']]
-    if sug['title'] in store.todo_titles_for_history(h['id']):
-        return no_update
-    # 제안의 담당자 이름이 접근 허용 사용자 이름과 같으면 그 사람으로 지정
-    match = next((o for o in todo_ui.member_options() if sug['assignee'] and o['label'] == sug['assignee']), None)
-    store.create_todo(sug['title'], task_id=tid, due_date=sug['due'], assignee_id=match['value'] if match else '',
-                      assignee_name=match['label'] if match else sug['assignee'], created_by=auth.current_name(),
-                      source_history_id=h['id'])
-    return (n or 0) + 1
 
 
 @callback(Output('td-refresh', 'data', allow_duplicate=True), Input('td-poll', 'n_intervals'),
@@ -298,6 +255,8 @@ def edit_task(n_open, _c, _s, _d, tid, title, desc, owner, tags, start, due, par
     author = auth.current_name()
     nu = no_update
     trig = ctx.triggered_id
+    if trig not in ('ed-open', 'ed-cancel', 'ed-save', 'ed-delete'):
+        return (nu,) * 13
     if trig == 'ed-open':
         if not n_open:  # 헤더가 다시 그려지며 버튼이 새로 생길 때의 빈 트리거
             return (nu,) * 13
@@ -329,72 +288,34 @@ def load_text_file(contents, current):
     return f'{current.rstrip()}\n\n{text}' if (current or '').strip() else text
 
 
+register_form_callbacks('h')
+
+
 @callback(Output('td-refresh', 'data', allow_duplicate=True), Output('h-content', 'value'),
-          Output('h-when', 'value'), Output('h-error', 'children'), Output('h-error', 'is_open'),
+          Output('h-when', 'value'), Output('h-links', 'value'), Output('h-attach', 'contents'),
+          Output('h-attach', 'filename'), Output('h-attach-names', 'children', allow_duplicate=True),
+          Output('h-error', 'children'), Output('h-error', 'is_open'), Output('h-people', 'value'),
           Input('h-add', 'n_clicks'), State('td-id', 'data'), State('h-type', 'value'),
           State('h-content', 'value'), State('h-when', 'value'), State('h-ai', 'value'),
-          State('td-refresh', 'data'), prevent_initial_call=True)
-def add_history(_, tid, etype, content, when, use_ai, n):
-    author = auth.current_name()
+          State('h-links', 'value'), State('h-attach', 'contents'), State('h-attach', 'filename'),
+          State('h-people', 'value'), State('td-refresh', 'data'), prevent_initial_call=True)
+def add_history(_, tid, etype, content, when, use_ai, links, att, att_names, people, n):
     try:
-        h = store.add_history(tid, content, etype, author or '', when or None)
+        save_history(tid, etype, content, when, use_ai, links, att, att_names, auth.current_name(), people)
     except ValueError as e:
-        return no_update, no_update, no_update, str(e), True
-    if use_ai:
-        enrich.submit(h['id'])
-    return (n or 0) + 1, '', None, '', False
+        return (no_update,) * 7 + (str(e), True, no_update)
+    return (n or 0) + 1, '', None, '', None, None, '', '', False, []
 
 
-@callback(Output('he-modal', 'is_open'), Output('he-id', 'data'), Output('he-type', 'value'),
-          Output('he-when', 'value'), Output('he-title', 'value'), Output('he-summary', 'value'),
-          Output('he-keywords', 'value'), Output('he-content', 'value'), Output('he-error', 'children'),
-          Output('he-error', 'is_open'), Output('td-refresh', 'data', allow_duplicate=True),
-          Input({'type': 'h-edit', 'id': ALL}, 'n_clicks'), Input('he-cancel', 'n_clicks'),
-          Input('he-save', 'n_clicks'), Input('he-regen', 'n_clicks'),
-          State('he-id', 'data'), State('he-type', 'value'), State('he-when', 'value'), State('he-title', 'value'),
-          State('he-summary', 'value'), State('he-keywords', 'value'), State('he-content', 'value'),
-          State('td-refresh', 'data'), prevent_initial_call=True)
-def edit_history(_e, _c, _s, _r, eid, etype, when, title, summary, keywords, content, n):
-    nu = no_update
-    trig = ctx.triggered_id
-    if isinstance(trig, dict):
-        if not ctx.triggered[0]['value']:  # 목록이 다시 그려질 때의 빈 트리거
-            return (nu,) * 11
-        h = store.get_history(trig['id'])
-        if h is None:
-            return (nu,) * 11
-        return (True, h['id'], h['entry_type'], h['occurred_at'].replace(' ', 'T'), h['title'], h['summary'],
-                ', '.join(h['keywords']), h['content'], '', False, nu)
-    if trig == 'he-cancel':
-        return (False,) + (nu,) * 7 + ('', False, nu)
-    try:
-        store.update_history(eid, entry_type=etype, occurred_at=when or None, title=title or '',
-                             summary=summary or '', keywords=keywords or '', content=content or '')
-    except ValueError as e:
-        return (True,) + (nu,) * 7 + (str(e), True, nu)
-    if trig == 'he-regen':
-        enrich.submit(eid)
-    return (False,) + (nu,) * 7 + ('', False, (n or 0) + 1)
-
-
-@callback(Output('td-refresh', 'data', allow_duplicate=True), Input({'type': 'h-regen', 'id': ALL}, 'n_clicks'),
-          State('td-refresh', 'data'), prevent_initial_call=True)
-def regen_history(_, n):
-    if not ctx.triggered_id or not ctx.triggered[0]['value']:
-        return no_update
-    enrich.submit(ctx.triggered_id['id'])
-    return (n or 0) + 1
-
-
-@callback(Output('td-refresh', 'data', allow_duplicate=True), Input({'type': 'h-del', 'id': ALL}, 'n_clicks'),
+@callback(Output('td-refresh', 'data', allow_duplicate=True),
           Input({'type': 'r-del', 'id': ALL}, 'n_clicks'), Input({'type': 'l-del', 'id': ALL}, 'n_clicks'),
           State('td-refresh', 'data'), prevent_initial_call=True)
-def delete_item(_h, _r, _l, n):
+def delete_item(_r, _l, n):
+    """참고자료 삭제·업무 연결 해제 (이력 삭제는 components/history_actions.py)"""
     trig = ctx.triggered_id
     if not trig or not ctx.triggered[0]['value']:  # 목록이 새로 그려질 때(n_clicks=None) 무시
         return no_update
-    {'h-del': store.delete_history, 'r-del': store.delete_reference,
-     'l-del': store.unlink_tasks}[trig['type']](trig['id'])
+    {'r-del': store.delete_reference, 'l-del': store.unlink_tasks}[trig['type']](trig['id'])
     return (n or 0) + 1
 
 

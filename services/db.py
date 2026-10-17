@@ -9,8 +9,10 @@
 - history        : 업무별 이력 (메모/회의/결정/피드백/상태변경/연결 등 시간순 기록).
                    content 는 사용자가 올린 원문 그대로, title/summary/keywords 는
                    LLM 이 만든(또는 사용자가 고친) 검색용 정리본
-- references_    : 업무별 참고자료 (링크/파일/메모)
+- references_    : 업무별 참고자료 (링크/파일/메모). history_id 가 있으면 그 이력에 붙은 관련 자료
 - task_links     : 업무 ↔ 업무 연결 (관련/선행/후속/파생)
+- people         : 임원 (이름·직위·소속·별칭). 동향 기록의 대상
+- history_people : 이력 ↔ 임원 연결 (한 이력에 여러 임원). 업무 없이 임원에만 연결된 이력(동향)도 있다
 - todos          : 할 일 (업무에 속하거나 단독). 이력 원문에서 AI 가 뽑은 제안을 추가할 수 있음
 """
 import os
@@ -22,6 +24,7 @@ from sqlalchemy import (
     Boolean, Column, DateTime, ForeignKey, Integer, String, Text, UniqueConstraint, create_engine, event, inspect,
     text,
 )
+from sqlalchemy import MetaData
 from sqlalchemy.orm import declarative_base, relationship, sessionmaker
 
 load_dotenv()
@@ -62,7 +65,8 @@ class HistoryEntry(Base):
     __tablename__ = 'history'
 
     id = Column(Integer, primary_key=True)
-    task_id = Column(Integer, ForeignKey('tasks.id', ondelete='CASCADE'), nullable=False, index=True)
+    # 업무에 속한 이력이면 업무 id. 임원 동향처럼 업무 없이 임원에만 연결된 이력은 None
+    task_id = Column(Integer, ForeignKey('tasks.id', ondelete='CASCADE'), nullable=True, index=True)
     entry_type = Column(String(20), nullable=False, default='메모')
     content = Column(Text, nullable=False)  # 원문 (가공하지 않고 그대로 보존)
     author = Column(String(100), default='')
@@ -83,7 +87,10 @@ class Reference(Base):
     __tablename__ = 'references_'
 
     id = Column(Integer, primary_key=True)
-    task_id = Column(Integer, ForeignKey('tasks.id', ondelete='CASCADE'), nullable=False, index=True)
+    # 업무 없는 이력(임원 동향)에 붙은 자료는 None
+    task_id = Column(Integer, ForeignKey('tasks.id', ondelete='CASCADE'), nullable=True, index=True)
+    # 특정 이력에 붙은 자료면 그 이력 id (이력을 지워도 자료는 업무 참고자료로 남는다)
+    history_id = Column(Integer, ForeignKey('history.id', ondelete='SET NULL'), nullable=True, index=True)
     kind = Column(String(10), nullable=False)  # link / file / note
     title = Column(String(300), nullable=False)
     url = Column(Text, default='')
@@ -105,6 +112,29 @@ class TaskLink(Base):
     relation = Column(String(20), nullable=False, default='관련')
     note = Column(Text, default='')
     created_at = Column(DateTime, default=_now)
+
+
+class Person(Base):
+    """임원. aliases 는 원문에서 이 사람을 부르는 다른 이름들(쉼표 구분, 예: '김부사장, 김 부사장, CTO').
+    이름이나 별칭이 원문에 나오면 그 이력이 이 사람에게 자동으로 연결된다."""
+    __tablename__ = 'people'
+
+    id = Column(Integer, primary_key=True)
+    name = Column(String(100), nullable=False)
+    position = Column(String(100), default='')  # 직위
+    org = Column(String(200), default='')  # 소속
+    aliases = Column(String(500), default='')
+    note = Column(Text, default='')
+    active = Column(Boolean, nullable=False, default=True)  # 퇴임 등으로 더 이상 추적하지 않으면 False
+    created_at = Column(DateTime, default=_now)
+    updated_at = Column(DateTime, default=_now, onupdate=_now)
+
+
+class HistoryPerson(Base):
+    __tablename__ = 'history_people'
+
+    history_id = Column(Integer, ForeignKey('history.id', ondelete='CASCADE'), primary_key=True)
+    person_id = Column(Integer, ForeignKey('people.id', ondelete='CASCADE'), primary_key=True, index=True)
 
 
 class Todo(Base):
@@ -143,6 +173,7 @@ def make_engine(url: str | None = None):
         try:
             Base.metadata.create_all(engine)
             _add_missing_columns(engine)
+            _relax_not_null(engine)
             break
         except Exception:  # noqa: BLE001
             if attempt == 4:
@@ -169,6 +200,55 @@ def _add_missing_columns(engine):
                 else:
                     default = ''
                 conn.execute(text(f'ALTER TABLE {table.name} ADD COLUMN {col.name} {coltype}{default}'))
+
+
+
+# 예전 버전에서 NOT NULL 이던 컬럼 중 지금은 비워둘 수 있게 된 것 (임원 동향은 업무가 없다)
+_NULLABLE_NOW = [('history', 'task_id'), ('references_', 'task_id')]
+
+
+def _relax_not_null(engine):
+    """예전 DB 의 NOT NULL 제약을 푼다. PostgreSQL 은 ALTER 한 줄, SQLite 는 ALTER 로 못 바꾸므로
+    SQLite 공식 절차대로 새 테이블을 만들어 옮긴 뒤 이름을 바꾼다(외래키 검사를 잠시 끄고, 데이터·id 그대로)."""
+    insp = inspect(engine)
+    for table_name, col_name in _NULLABLE_NOW:
+        cols = {c['name']: c for c in insp.get_columns(table_name)}
+        if col_name not in cols or cols[col_name]['nullable']:
+            continue
+        if engine.dialect.name == 'postgresql':
+            with engine.begin() as conn:
+                conn.execute(text(f'ALTER TABLE {table_name} ALTER COLUMN {col_name} DROP NOT NULL'))
+            continue
+        if engine.dialect.name != 'sqlite':
+            continue
+        table = Base.metadata.tables[table_name]
+        tmp_name = f'{table_name}__rebuild'
+        # 외래키가 가리키는 다른 테이블들도 같은 MetaData 에 있어야 CREATE 문을 만들 수 있다
+        target = MetaData()
+        for other in Base.metadata.sorted_tables:
+            if other.name != table_name:
+                other.to_metadata(target)
+        tmp = table.to_metadata(target, name=tmp_name)
+        for idx in list(tmp.indexes):  # 인덱스 이름은 DB 전체에서 유일 — 옛 테이블을 지운 뒤 다시 만든다
+            tmp.indexes.discard(idx)
+        shared = [c for c in table.columns.keys() if c in cols]
+        col_list = ', '.join(shared)
+        with engine.connect() as conn:
+            # 이 PRAGMA 는 트랜잭션 밖에서만 먹는다 — 바로 commit 해 트랜잭션을 닫고 시작
+            conn.exec_driver_sql('PRAGMA foreign_keys=OFF')
+            conn.commit()
+            try:
+                with conn.begin():
+                    conn.execute(text(f'DROP TABLE IF EXISTS {tmp_name}'))
+                    tmp.create(conn)
+                    conn.execute(text(f'INSERT INTO {tmp_name} ({col_list}) SELECT {col_list} FROM {table_name}'))
+                    conn.execute(text(f'DROP TABLE {table_name}'))
+                    conn.execute(text(f'ALTER TABLE {tmp_name} RENAME TO {table_name}'))
+                    for idx in table.indexes:
+                        idx.create(conn)
+            finally:
+                conn.exec_driver_sql('PRAGMA foreign_keys=ON')
+                conn.commit()
 
 
 engine = make_engine()

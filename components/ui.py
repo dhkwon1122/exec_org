@@ -7,7 +7,7 @@ from dash import dcc, html
 
 STATUS_COLOR = {'예정': 'secondary', '진행중': 'primary', '보류': 'warning', '완료': 'success'}
 ENTRY_ICON = {
-    '메모': 'bi-sticky', '피드백': 'bi-chat-left-quote', '회의': 'bi-people', '결정': 'bi-check2-square',
+    '메모': 'bi-sticky', '피드백': 'bi-chat-left-quote', '동향': 'bi-binoculars', '회의': 'bi-people', '결정': 'bi-check2-square',
     '진행': 'bi-arrow-right-circle',
     '이슈': 'bi-exclamation-triangle', '요청': 'bi-envelope', '상태변경': 'bi-flag',
     '연결': 'bi-link-45deg', '자료': 'bi-paperclip', '할일': 'bi-check2-circle',
@@ -34,6 +34,9 @@ def multiline(text: str):
 
 def ref_target(ref: dict):
     """참고자료의 실제 내용(링크/다운로드/메모 본문)."""
+    if ref['kind'] == 'link' and ref['url'].startswith('\\\\'):
+        # 공유 폴더 경로는 웹 링크로 열리지 않으므로 복사해서 탐색기에 붙여넣게 한다
+        return unc_path(ref['url'])
     if ref['kind'] == 'link':
         return html.A(ref['url'], href=ref['url'], target='_blank', rel='noopener noreferrer',
                       className='small text-break')
@@ -44,6 +47,33 @@ def ref_target(ref: dict):
 
 
 AUTO_TYPES = ('상태변경', '연결', '자료', '할일')
+
+
+def unc_path(path: str):
+    return html.Span([
+        html.Code(path, className='small text-break me-1'),
+        dcc.Clipboard(content=path, title='경로 복사 (탐색기 주소창에 붙여넣기)',
+                      style={'display': 'inline-block', 'cursor': 'pointer', 'fontSize': '0.85em'}),
+    ])
+
+
+def history_refs(refs: list[dict], terms: list[str] | None = None):
+    """이력에 붙은 관련 자료 — 링크는 새 탭, 파일은 다운로드, 공유 폴더 경로는 복사."""
+    items = []
+    for r in refs:
+        icon = html.I(className=f"bi {REF_ICON.get(r['kind'], 'bi-link-45deg')} me-1 text-muted")
+        if r['kind'] == 'link' and r['url'].startswith('\\\\'):
+            label = [highlight(r['title'], terms), ' '] if r['title'] != r['url'] else []
+            items.append(html.Div([icon, *label, unc_path(r['url'])]))
+        elif r['kind'] == 'link':
+            items.append(html.Div([icon, html.A(highlight(r['title'], terms), href=r['url'], target='_blank',
+                                                rel='noopener noreferrer', title=r['url'], className='text-break')]))
+        elif r['kind'] == 'file':
+            items.append(html.Div([icon, html.A(highlight(r['file_name'] or r['title'], terms),
+                                                href=f"/files/{r['id']}")]))
+        else:
+            items.append(html.Div([icon, highlight(r['title'], terms)]))
+    return html.Div(items, className='small mt-1 ps-2 border-start border-2')
 
 
 def highlight(text: str, terms: list[str] | None, multiline_text: bool = False):
@@ -74,6 +104,16 @@ def keyword_chips(keywords: list[str], terms: list[str] | None = None):
     ], className='mt-1')
 
 
+def people_chips(people: list[dict], terms: list[str] | None = None):
+    """이력에 연결된 임원 — 누르면 그 임원의 기록 모음으로."""
+    return html.Div([
+        dcc.Link([html.I(className='bi bi-person-badge me-1'), f"{p['name']} {p['position']}".strip()],
+                 href=f"/people/{p['id']}",
+                 className='badge rounded-pill text-decoration-none me-1 mb-1 '
+                           + ('text-bg-warning' if _matches(p['name'], terms) else 'text-bg-primary'))
+        for p in people], className='mb-1')
+
+
 def history_card(h: dict, terms: list[str] | None = None, show_task: bool = False, actions: bool = True,
                  added_todos: set[str] | None = None):
     """이력 한 건. 원문은 그대로 보존하고, AI 정리본(제목·요약·키워드)이 있으면 위에 보여준다."""
@@ -85,9 +125,9 @@ def history_card(h: dict, terms: list[str] | None = None, show_task: bool = Fals
         html.Span(h['occurred_at'], className='small text-muted me-2 text-nowrap'),
         html.Span(h['author'], className='small me-2 text-nowrap'),
     ]
-    if show_task:
+    if show_task and h['task_id']:
         header.append(dcc.Link(f"#{h['task_id']} {h.get('task_title', '')}", href=f"/task/{h['task_id']}",
-                               className='small text-truncate'))
+                               className='small text-truncate me-2'))
     header.append(html.Span(className='me-auto'))
     if actions and not auto:
         header.append(dbc.Button(html.I(className='bi bi-pencil'), id={'type': 'h-edit', 'id': h['id']},
@@ -97,6 +137,8 @@ def history_card(h: dict, terms: list[str] | None = None, show_task: bool = Fals
                                  size='sm', className='text-muted p-0', title='삭제'))
 
     body = []
+    if h.get('people'):
+        body.append(people_chips(h['people'], terms))
     if h['title']:
         body.append(html.Div(highlight(h['title'], terms), className='fw-semibold'))
     if h['summary']:
@@ -137,5 +179,8 @@ def history_card(h: dict, terms: list[str] | None = None, show_task: bool = Fals
         ], open=only_in_raw, className='mt-1'))
     else:
         body.append(html.Div(highlight(h['content'], terms, True)))
+
+    if h.get('refs'):  # 관련 자료는 항상 내용 뒤에
+        body.append(history_refs(h['refs'], terms))
 
     return dbc.ListGroupItem([html.Div(header, className='d-flex align-items-center flex-wrap mb-1'), *body])
