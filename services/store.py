@@ -11,13 +11,13 @@ import re
 import uuid
 from datetime import date, datetime, timedelta
 
-from sqlalchemy import or_, select
+from sqlalchemy import func, or_, select
 
 from services import db
-from services.db import HistoryEntry, Reference, Task, TaskLink, Todo
+from services.db import HistoryEntry, HistoryPerson, Person, Reference, Task, TaskLink, Todo
 
 STATUSES = ['예정', '진행중', '보류', '완료']
-ENTRY_TYPES = ['메모', '피드백', '회의', '결정', '진행', '이슈', '요청']
+ENTRY_TYPES = ['메모', '피드백', '동향', '회의', '결정', '진행', '이슈', '요청']
 AUTO_ENTRY_TYPES = ['상태변경', '연결', '자료', '할일']  # 시스템이 자동으로 남기는 유형
 RELATIONS = ['관련', '선행', '후속', '파생']
 # A→B 를 "선행"으로 연결하면 B 쪽에서 A 는 "후속" 관계로 보인다
@@ -200,10 +200,14 @@ def child_tasks(task_id: int) -> list[dict]:
 
 # ── 이력 ─────────────────────────────────────────────────────────────
 
-def add_history(task_id: int, content: str, entry_type: str = '메모', author: str = '',
+def add_history(task_id: int | None, content: str, entry_type: str = '메모', author: str = '',
                 occurred_at: str | datetime | None = None, title: str = '', summary: str = '',
-                keywords: list[str] | str = '') -> dict:
-    """원문(content)을 그대로 저장한다. AI 요약·키워드는 services.enrich.submit() 으로 따로 요청."""
+                keywords: list[str] | str = '', person_ids: list[int] | None = None) -> dict:
+    """원문(content)을 그대로 저장한다. AI 요약·키워드는 services.enrich.submit() 으로 따로 요청.
+    업무(task_id)나 임원(person_ids) 중 하나는 있어야 한다 — 임원 동향은 업무 없이 임원에만 연결된다."""
+    person_ids = sorted({int(p) for p in (person_ids or [])})
+    if task_id is None and not person_ids:
+        raise ValueError('업무나 임원 중 하나는 지정하세요.')
     content = (content or '').strip()
     if not content:
         raise ValueError('이력 내용을 입력하세요.')
@@ -212,24 +216,32 @@ def add_history(task_id: int, content: str, entry_type: str = '메모', author: 
     if isinstance(occurred_at, str):
         occurred_at = datetime.fromisoformat(occurred_at) if occurred_at.strip() else None
     with db.SessionLocal() as s:
-        t = s.get(Task, task_id)
-        if t is None:
+        t = s.get(Task, task_id) if task_id is not None else None
+        if task_id is not None and t is None:
             raise ValueError('업무를 찾을 수 없습니다.')
+        if person_ids and len(s.scalars(select(Person.id).where(Person.id.in_(person_ids))).all()) != len(person_ids):
+            raise ValueError('임원을 찾을 수 없습니다.')
         h = HistoryEntry(task_id=task_id, entry_type=entry_type, content=content, author=author or '',
                          title=(title or '').strip(), summary=(summary or '').strip(),
                          keywords=_join_keywords(keywords))
         if occurred_at:
             h.occurred_at = occurred_at
         s.add(h)
-        t.updated_at = datetime.now().replace(microsecond=0)
+        s.flush()
+        for pid in person_ids:
+            s.add(HistoryPerson(history_id=h.id, person_id=pid))
+        if t is not None:
+            t.updated_at = datetime.now().replace(microsecond=0)
         s.commit()
-        return _history_dict(h)
+        return _decorate(s, [_history_dict(h)])[0]
 
 
-def get_history(entry_id: int) -> dict | None:
+def get_history(entry_id: int | None) -> dict | None:
+    if entry_id is None:
+        return None
     with db.SessionLocal() as s:
         h = s.get(HistoryEntry, entry_id)
-        return _with_refs(s, [_history_dict(h)])[0] if h else None
+        return _decorate(s, [_history_dict(h)])[0] if h else None
 
 
 def update_history(entry_id: int, **fields) -> dict:
@@ -248,14 +260,27 @@ def update_history(entry_id: int, **fields) -> dict:
             h.entry_type = fields['entry_type']
         if fields.get('occurred_at'):
             v = fields['occurred_at']
-            h.occurred_at = datetime.fromisoformat(v) if isinstance(v, str) else v
+            v = datetime.fromisoformat(v) if isinstance(v, str) else v
+            # 수정 창의 일시 칸은 분 단위라 초가 빠진다 — 같은 분이면 원래 값(초 포함)을 그대로 둬서
+            # 같은 분에 기록된 이력들의 순서가 수정만으로 뒤바뀌지 않게 한다
+            if not (h.occurred_at and h.occurred_at.replace(second=0, microsecond=0) == v.replace(second=0, microsecond=0)):
+                h.occurred_at = v
         for k in ('title', 'summary'):
             if k in fields:
                 setattr(h, k, (fields[k] or '').strip())
         if 'keywords' in fields:
             h.keywords = _join_keywords(fields['keywords'])
+        if 'person_ids' in fields:
+            ids = sorted({int(p) for p in (fields['person_ids'] or [])})
+            if h.task_id is None and not ids:
+                raise ValueError('업무 없는 기록(동향)은 임원을 한 명 이상 지정해야 합니다.')
+            for link in s.scalars(select(HistoryPerson).where(HistoryPerson.history_id == entry_id)):
+                s.delete(link)
+            s.flush()
+            for pid in ids:
+                s.add(HistoryPerson(history_id=entry_id, person_id=pid))
         s.commit()
-        return _history_dict(h)
+        return _decorate(s, [_history_dict(h)])[0]
 
 
 def set_history_ai(entry_id: int, status: str, title: str | None = None, summary: str | None = None,
@@ -277,15 +302,27 @@ def set_history_ai(entry_id: int, status: str, title: str | None = None, summary
         s.commit()
 
 
-def _with_refs(s, entries: list[dict]) -> list[dict]:
-    """이력 dict 들에 'refs'(그 이력에 붙은 관련 자료 목록)를 채운다."""
+def _decorate(s, entries: list[dict]) -> list[dict]:
+    """이력 dict 들에 'refs'(붙은 관련 자료)·'people'(연결된 임원)·'task_title' 을 채운다."""
     ids = [e['id'] for e in entries]
-    by_entry: dict[int, list[dict]] = {i: [] for i in ids}
+    refs: dict[int, list[dict]] = {i: [] for i in ids}
+    people: dict[int, list[dict]] = {i: [] for i in ids}
+    titles: dict[int, str] = {}
     if ids:
         for r in s.scalars(select(Reference).where(Reference.history_id.in_(ids)).order_by(Reference.id)):
-            by_entry[r.history_id].append(_ref_dict(r))
+            refs[r.history_id].append(_ref_dict(r))
+        for hid, p in s.execute(select(HistoryPerson.history_id, Person).join(Person, Person.id == HistoryPerson.person_id)
+                                .where(HistoryPerson.history_id.in_(ids)).order_by(Person.name)):
+            people[hid].append({'id': p.id, 'name': p.name, 'position': p.position or ''})
+        need_titles = {e['task_id'] for e in entries if e['task_id'] and 'task_title' not in e}
+        if need_titles:
+            titles = dict(s.execute(select(Task.id, Task.title).where(Task.id.in_(need_titles))).all())
     for e in entries:
-        e['refs'] = by_entry.get(e['id'], [])
+        e['refs'] = refs.get(e['id'], [])
+        e['people'] = people.get(e['id'], [])
+        if 'task_title' not in e:
+            e['task_title'] = titles.get(e['task_id'], '') if e['task_id'] else ''
+        e['task_title'] = e['task_title'] or ''
     return entries
 
 
@@ -293,7 +330,7 @@ def list_history(task_id: int) -> list[dict]:
     with db.SessionLocal() as s:
         rows = s.scalars(select(HistoryEntry).where(HistoryEntry.task_id == task_id)
                          .order_by(HistoryEntry.occurred_at.desc(), HistoryEntry.id.desc()))
-        return _with_refs(s, [_history_dict(h) for h in rows])
+        return _decorate(s, [_history_dict(h) for h in rows])
 
 
 def delete_history(entry_id: int) -> None:
@@ -310,21 +347,25 @@ def delete_history(entry_id: int) -> None:
 
 def search_history(query: str = '', entry_types: list[str] | None = None, author: str = '',
                    date_from: str = '', date_to: str = '', task_id: int | None = None,
+                   person_id: int | None = None,
                    include_auto: bool = False, limit: int = 200) -> list[dict]:
     """이력 검색. 검색어가 여러 개면 모두 포함(AND)해야 하며, 각 검색어는
     원문·AI 제목·요약·키워드·작성자·업무명 중 어디에든 있으면 된다.
     include_auto=False 면 상태변경/연결/자료 같은 자동 이력은 뺀다."""
     with db.SessionLocal() as s:
-        stmt = select(HistoryEntry, Task.title).join(Task, Task.id == HistoryEntry.task_id)
+        stmt = select(HistoryEntry, Task.title).outerjoin(Task, Task.id == HistoryEntry.task_id)
         for term in search_terms(query):
             like = f'%{term}%'
             ref_hist = select(Reference.history_id).where(Reference.history_id.is_not(None), or_(
                 Reference.title.like(like), Reference.url.like(like), Reference.file_name.like(like),
                 Reference.note.like(like)))
+            person_hist = select(HistoryPerson.history_id).join(Person, Person.id == HistoryPerson.person_id).where(
+                or_(Person.name.like(like), Person.aliases.like(like), Person.position.like(like),
+                    Person.org.like(like)))
             stmt = stmt.where(or_(HistoryEntry.content.like(like), HistoryEntry.title.like(like),
                                   HistoryEntry.summary.like(like), HistoryEntry.keywords.like(like),
                                   HistoryEntry.author.like(like), Task.title.like(like),
-                                  HistoryEntry.id.in_(ref_hist)))
+                                  HistoryEntry.id.in_(ref_hist), HistoryEntry.id.in_(person_hist)))
         if entry_types:
             stmt = stmt.where(HistoryEntry.entry_type.in_(entry_types))
         elif not include_auto:
@@ -333,15 +374,18 @@ def search_history(query: str = '', entry_types: list[str] | None = None, author
             stmt = stmt.where(HistoryEntry.author == author)
         if task_id is not None:
             stmt = stmt.where(HistoryEntry.task_id == task_id)
+        if person_id is not None:
+            stmt = stmt.where(HistoryEntry.id.in_(
+                select(HistoryPerson.history_id).where(HistoryPerson.person_id == person_id)))
         if date_from:
             stmt = stmt.where(HistoryEntry.occurred_at >= datetime.fromisoformat(date_from))
         if date_to:  # 그날 하루 전체 포함
             stmt = stmt.where(HistoryEntry.occurred_at < datetime.fromisoformat(date_to) + timedelta(days=1))
         rows = s.execute(stmt.order_by(HistoryEntry.occurred_at.desc(), HistoryEntry.id.desc()).limit(limit))
-        return _with_refs(s, [{**_history_dict(h), 'task_title': title} for h, title in rows])
+        return _decorate(s, [{**_history_dict(h), 'task_title': title} for h, title in rows])
 
 
-def keyword_stats(limit: int = 40, task_id: int | None = None) -> list[tuple[str, int]]:
+def keyword_stats(limit: int = 40, task_id: int | None = None, person_id: int | None = None) -> list[tuple[str, int]]:
     """이력 키워드 빈도 (많이 나온 순)."""
     counts: dict[str, int] = {}
     display: dict[str, str] = {}
@@ -349,6 +393,9 @@ def keyword_stats(limit: int = 40, task_id: int | None = None) -> list[tuple[str
         stmt = select(HistoryEntry.keywords).where(HistoryEntry.keywords != '')
         if task_id is not None:
             stmt = stmt.where(HistoryEntry.task_id == task_id)
+        if person_id is not None:
+            stmt = stmt.where(HistoryEntry.id.in_(
+                select(HistoryPerson.history_id).where(HistoryPerson.person_id == person_id)))
         for (kws,) in s.execute(stmt):
             for k in _tags(kws):
                 counts[k.lower()] = counts.get(k.lower(), 0) + 1
@@ -362,18 +409,21 @@ def history_authors() -> list[str]:
         return sorted({a for (a,) in s.execute(select(HistoryEntry.author).distinct()) if a})
 
 
-def pending_ai_ids(task_id: int | None = None) -> list[int]:
+def pending_ai_ids(task_id: int | None = None, person_id: int | None = None) -> list[int]:
     with db.SessionLocal() as s:
         stmt = select(HistoryEntry.id).where(HistoryEntry.ai_status == 'pending')
         if task_id is not None:
             stmt = stmt.where(HistoryEntry.task_id == task_id)
+        if person_id is not None:
+            stmt = stmt.where(HistoryEntry.id.in_(
+                select(HistoryPerson.history_id).where(HistoryPerson.person_id == person_id)))
         return list(s.scalars(stmt))
 
 
 def recent_history(limit: int = 20) -> list[dict]:
     """전체 업무의 최근 이력 (업무 제목 포함)."""
     with db.SessionLocal() as s:
-        rows = s.execute(select(HistoryEntry, Task.title).join(Task, Task.id == HistoryEntry.task_id)
+        rows = s.execute(select(HistoryEntry, Task.title).outerjoin(Task, Task.id == HistoryEntry.task_id)
                          .order_by(HistoryEntry.occurred_at.desc(), HistoryEntry.id.desc()).limit(limit))
         return [{**_history_dict(h), 'task_title': title} for h, title in rows]
 
@@ -398,7 +448,7 @@ def upload_abspath(rel_path: str) -> str | None:
     return path if path.startswith(root + os.sep) and os.path.isfile(path) else None
 
 
-def add_reference(task_id: int, kind: str, title: str = '', url: str = '', note: str = '',
+def add_reference(task_id: int | None, kind: str, title: str = '', url: str = '', note: str = '',
                   file_name: str = '', file_bytes: bytes | None = None, author: str = '',
                   history_id: int | None = None) -> dict:
     """history_id 를 주면 그 이력의 관련 자료로 붙는다 (이력 자체가 기록이므로 '자료' 자동 이력은 남기지 않음)."""
@@ -421,9 +471,11 @@ def add_reference(task_id: int, kind: str, title: str = '', url: str = '', note:
             raise ValueError('메모 내용을 입력하세요.')
         title = title or (note.strip().splitlines()[0][:60])
 
+    if task_id is None and history_id is None:
+        raise ValueError('업무를 지정하세요.')
     with db.SessionLocal() as s:
-        t = s.get(Task, task_id)
-        if t is None:
+        t = s.get(Task, task_id) if task_id is not None else None
+        if task_id is not None and t is None:
             raise ValueError('업무를 찾을 수 없습니다.')
         if history_id is not None:
             h = s.get(HistoryEntry, history_id)
@@ -432,7 +484,8 @@ def add_reference(task_id: int, kind: str, title: str = '', url: str = '', note:
         r = Reference(task_id=task_id, kind=kind, title=title, url=url if kind == 'link' else '',
                       note=note or '', history_id=history_id)
         if kind == 'file':
-            rel = os.path.join(str(task_id), f'{uuid.uuid4().hex[:8]}_{_safe_name(file_name)}')
+            folder = str(task_id) if task_id is not None else f'h{history_id}'  # 업무 없는 동향은 이력별 폴더
+            rel = os.path.join(folder, f'{uuid.uuid4().hex[:8]}_{_safe_name(file_name)}')
             dest = os.path.join(db.UPLOAD_DIR, rel)
             os.makedirs(os.path.dirname(dest), exist_ok=True)
             with open(dest, 'wb') as f:
@@ -442,14 +495,15 @@ def add_reference(task_id: int, kind: str, title: str = '', url: str = '', note:
         if history_id is None:
             label = {'link': '링크', 'file': '파일', 'note': '메모'}[kind]
             _log(s, task_id, '자료', f'참고자료 추가 ({label}): {title}', author)
-        t.updated_at = datetime.now().replace(microsecond=0)
+        if t is not None:
+            t.updated_at = datetime.now().replace(microsecond=0)
         s.commit()
         return _ref_dict(r)
 
 
 def list_references(task_id: int | None = None, query: str = '', kind: str = '') -> list[dict]:
     with db.SessionLocal() as s:
-        stmt = select(Reference, Task.title).join(Task, Task.id == Reference.task_id)
+        stmt = select(Reference, Task.title).outerjoin(Task, Task.id == Reference.task_id)
         if task_id is not None:
             stmt = stmt.where(Reference.task_id == task_id)
         if kind:
@@ -460,7 +514,7 @@ def list_references(task_id: int | None = None, query: str = '', kind: str = '')
                                   Reference.url.like(like), Reference.file_name.like(like),
                                   Task.title.like(like)))
         rows = s.execute(stmt.order_by(Reference.created_at.desc(), Reference.id.desc()))
-        return [{**_ref_dict(r), 'task_title': title} for r, title in rows]
+        return [{**_ref_dict(r), 'task_title': title or ''} for r, title in rows]
 
 
 def get_reference(ref_id: int) -> dict | None:
@@ -517,7 +571,7 @@ def parse_links(text: str) -> list[dict]:
     return out
 
 
-def attach_links(task_id: int, history_id: int, links: list[dict], author: str = '') -> int:
+def attach_links(task_id: int | None, history_id: int, links: list[dict], author: str = '') -> int:
     """이력에 링크들을 붙인다. 이미 붙은 같은 URL 은 건너뛴다. 붙인 개수를 돌려준다."""
     with db.SessionLocal() as s:
         existing = set(s.scalars(select(Reference.url).where(Reference.history_id == history_id)))
@@ -726,3 +780,105 @@ def tasks_due_between(date_from: str, date_to: str) -> list[dict]:
         rows = s.scalars(select(Task).where(Task.due_date >= date_from, Task.due_date <= date_to,
                                             Task.status != '완료').order_by(Task.due_date))
         return [_task_dict(t) for t in rows]
+
+
+# ── 임원 ─────────────────────────────────────────────────────────────
+
+def _person_dict(p: Person) -> dict:
+    return {
+        'id': p.id, 'name': p.name, 'position': p.position or '', 'org': p.org or '',
+        'aliases': _tags(p.aliases), 'note': p.note or '', 'active': bool(p.active),
+        'created_at': _dt(p.created_at), 'updated_at': _dt(p.updated_at),
+    }
+
+
+def create_person(name: str, position: str = '', org: str = '', aliases: list[str] | str = '',
+                  note: str = '') -> dict:
+    name = (name or '').strip()
+    if not name:
+        raise ValueError('이름을 입력하세요.')
+    with db.SessionLocal() as s:
+        p = Person(name=name, position=(position or '').strip(), org=(org or '').strip(),
+                   aliases=_join_keywords(aliases), note=note or '')
+        s.add(p)
+        s.commit()
+        return _person_dict(p)
+
+
+def update_person(person_id: int, **fields) -> dict:
+    with db.SessionLocal() as s:
+        p = s.get(Person, person_id)
+        if p is None:
+            raise ValueError('임원을 찾을 수 없습니다.')
+        if 'name' in fields:
+            if not (fields['name'] or '').strip():
+                raise ValueError('이름을 입력하세요.')
+            p.name = fields['name'].strip()
+        for k in ('position', 'org', 'note'):
+            if k in fields:
+                setattr(p, k, (fields[k] or '').strip())
+        if 'aliases' in fields:
+            p.aliases = _join_keywords(fields['aliases'])
+        if 'active' in fields:
+            p.active = bool(fields['active'])
+        s.commit()
+        return _person_dict(p)
+
+
+def get_person(person_id: int) -> dict | None:
+    with db.SessionLocal() as s:
+        p = s.get(Person, person_id)
+        return _person_dict(p) if p else None
+
+
+def delete_person(person_id: int) -> None:
+    """이 임원에게만 연결된(업무도 없는) 동향이 있으면 지우지 않는다 — 기록이 어디에도 안 보이게 되므로.
+    더 추적하지 않을 임원은 '추적 중지'(active=False)를 쓴다."""
+    with db.SessionLocal() as s:
+        p = s.get(Person, person_id)
+        if p is None:
+            return
+        mine = select(HistoryPerson.history_id).where(HistoryPerson.person_id == person_id)
+        others = select(HistoryPerson.history_id).where(HistoryPerson.person_id != person_id)
+        orphan = s.scalar(select(func.count()).select_from(HistoryEntry).where(
+            HistoryEntry.id.in_(mine), HistoryEntry.task_id.is_(None), HistoryEntry.id.notin_(others)))
+        if orphan:
+            raise ValueError(f'이 임원에게만 연결된 동향 {orphan}건이 있어 삭제할 수 없습니다. '
+                             '"추적 중지"를 쓰거나 동향을 먼저 정리하세요.')
+        for link in s.scalars(select(HistoryPerson).where(HistoryPerson.person_id == person_id)):
+            s.delete(link)
+        s.delete(p)
+        s.commit()
+
+
+def list_people(query: str = '', include_inactive: bool = False) -> list[dict]:
+    """임원 목록 + 연결된 기록 수·마지막 기록 일시. 최근에 기록된 사람이 위로."""
+    with db.SessionLocal() as s:
+        stats = (select(HistoryPerson.person_id, func.count().label('n'),
+                        func.max(HistoryEntry.occurred_at).label('last'))
+                 .join(HistoryEntry, HistoryEntry.id == HistoryPerson.history_id)
+                 .group_by(HistoryPerson.person_id).subquery())
+        stmt = select(Person, stats.c.n, stats.c.last).outerjoin(stats, stats.c.person_id == Person.id)
+        if not include_inactive:
+            stmt = stmt.where(Person.active.is_(True))
+        for term in search_terms(query):
+            like = f'%{term}%'
+            stmt = stmt.where(or_(Person.name.like(like), Person.position.like(like), Person.org.like(like),
+                                  Person.aliases.like(like), Person.note.like(like)))
+        rows = [{**_person_dict(p), 'count': n or 0, 'last_at': _dt(last) if last else ''}
+                for p, n, last in s.execute(stmt)]
+    # 최근 기록 순, 기록 없는 사람은 뒤에서 이름순
+    recent = sorted([r for r in rows if r['last_at']], key=lambda r: r['last_at'], reverse=True)
+    return recent + sorted([r for r in rows if not r['last_at']], key=lambda r: r['name'])
+
+
+def detect_people(text: str) -> list[int]:
+    """원문에 이름이나 별칭이 나오는 (추적 중인) 임원 id. 두 글자 미만 별칭은 오탐이 많아 쓰지 않는다."""
+    text = text or ''
+    found = []
+    with db.SessionLocal() as s:
+        for p in s.scalars(select(Person).where(Person.active.is_(True))):
+            names = [p.name] + _tags(p.aliases)
+            if any(len(n) >= 2 and n in text for n in names):
+                found.append(p.id)
+    return found

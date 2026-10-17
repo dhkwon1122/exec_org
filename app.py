@@ -19,6 +19,7 @@ from dash import dcc, html
 from flask.sessions import SecureCookieSessionInterface
 
 import components.todo_ui  # noqa: F401  할 일 체크/삭제 공용 콜백 등록
+from components.history_actions import history_edit_modal  # 이력 수정·삭제 공용 콜백 등록
 from services import auth, store, users
 from services.db import DATA_DIR
 
@@ -226,6 +227,7 @@ def _navbar():
     user = auth.current_user() or {}
     links = [
         dbc.NavItem(dbc.NavLink('업무', href='/', active='exact')),
+        dbc.NavItem(dbc.NavLink('임원', href='/people', active='partial')),
         dbc.NavItem(dbc.NavLink('할 일', href='/todos', active='exact')),
         dbc.NavItem(dbc.NavLink('캘린더', href='/calendar', active='exact')),
         dbc.NavItem(dbc.NavLink('이력 검색', href='/search', active='exact')),
@@ -252,6 +254,8 @@ def serve_layout():
     # 요청마다 다시 만들어 로그인한 사용자 이름을 보여준다
     return html.Div([
         dcc.Store(id='todo-changed', data=0),  # 할 일 체크/추가/삭제 시 증가 (components/todo_ui.py)
+        dcc.Store(id='history-changed', data=0),  # 이력 수정/삭제 시 증가 (components/history_actions.py)
+        history_edit_modal(),
         _navbar(),
         dbc.Container(dash.page_container, fluid=True, className='pb-5'),
     ])

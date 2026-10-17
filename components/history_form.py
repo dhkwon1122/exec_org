@@ -10,6 +10,8 @@ from services import enrich, llm, store
 # (누가/무엇을/왜/다음에 할 일)이 빠지지 않게 하는 용도이고, 받아 적은 원문을 붙여넣을 때는 쓰지 않아도 된다.
 TEMPLATES = {
     '피드백': '누가(이름/직책):\n받은 피드백:\n- \n요청 사항(기한):\n- \n내 대응/생각:\n',
+    '동향': ('대상 임원:\n출처(누구에게·어떤 자리에서 / 직접 확인·전언·추정):\n동향 내용(관심사·발언·움직임):\n- \n'
+           '시사점·우리 쪽 대응:\n'),
     '회의': '회의명/참석:\n논의:\n- \n결정:\n- \n후속 조치(담당·기한):\n- \n',
     '결정': '결정 내용:\n배경/이유:\n검토했지만 택하지 않은 안:\n결정자:\n영향·후속 조치:\n',
     '진행': '한 일:\n- \n다음 할 일:\n- \n막힌 점/도움 필요:\n',
@@ -24,6 +26,8 @@ TIPS = [
     '일시는 "일이 있었던 때"로 (나중에 몰아서 적어도 날짜순으로 정렬된다).',
     '사람 이름·조직·문서명은 원문에 그대로 — 검색 키워드가 된다.',
     '"결정"은 이유와 버린 대안까지 — 몇 달 뒤 "왜 이렇게 했지?"에 답해준다.',
+    '임원 동향은 업무 없이 임원만 골라 남겨도 된다. 출처와 확인 정도(직접 들음/전언/추정)를 꼭 적는다.',
+    '임원 이름·별칭이 원문에 나오면 그 임원에게 자동으로 연결된다 (임원 화면에서 별칭 등록).',
     '근거 자료(메일·컨플·공유폴더 경로)는 아래 "관련 자료"에 붙인다. 원문 속 링크는 자동으로 붙는다.',
 ]
 
@@ -32,20 +36,28 @@ def _opts(values):
     return [{'label': v, 'value': v} for v in values]
 
 
-def history_form(prefix: str = 'h', compact: bool = False):
-    """이력 입력 폼 (업무 상세·홈 빠른 기록에서 같이 씀). 원문을 그대로 붙여넣는 용도."""
+def people_options() -> list[dict]:
+    return [{'label': f"{p['name']} {p['position']}".strip() + (f" · {p['org']}" if p['org'] else ''),
+             'value': p['id']} for p in sorted(store.list_people(), key=lambda p: p['name'])]
+
+
+def history_form(prefix: str = 'h', compact: bool = False, people_value: list[int] | None = None,
+                 default_type: str = '메모'):
+    """이력 입력 폼 (업무 상세·홈 빠른 기록·임원 화면에서 같이 씀). 원문을 그대로 붙여넣는 용도."""
     ai_on = llm.is_configured()
     # compact: 좁은 칸(홈 오른쪽)에서는 유형·일시를 한 줄, 파일 버튼을 다음 줄로
     w = {'type': dict(xs=5), 'when': dict(xs=7), 'file': dict(xs=12)} if compact else \
         {'type': dict(xs=6, md=3), 'when': dict(xs=6, md=4), 'file': dict(xs=12, md=3)}
     return [
         dbc.Row([
-            dbc.Col(dbc.Select(id=f'{prefix}-type', value='메모', options=_opts(store.ENTRY_TYPES)), **w['type']),
+            dbc.Col(dbc.Select(id=f'{prefix}-type', value=default_type, options=_opts(store.ENTRY_TYPES)), **w['type']),
             dbc.Col(dbc.Input(id=f'{prefix}-when', type='datetime-local'), **w['when']),
             dbc.Col(dcc.Upload(dbc.Button([html.I(className='bi bi-file-earmark-text me-1'), '텍스트 파일'],
                                           color='secondary', outline=True, size='sm', className='w-100 h-100'),
                                id=f'{prefix}-file', accept='.txt,.md,.csv,.log', className='h-100'), **w['file']),
         ], className='g-2 mb-2'),
+        dcc.Dropdown(id=f'{prefix}-people', multi=True, options=people_options(), value=people_value or [],
+                     placeholder='관련 임원 (원문에 이름·별칭이 있으면 자동으로 연결)', className='mb-2'),
         dbc.Textarea(id=f'{prefix}-content', rows=6, className='mb-1',
                      placeholder='받아 적은 내용을 그대로 붙여넣으세요 (회의 메모, 피드백, 받아쓰기 등). '
                                  '원문은 그대로 보존되고, AI가 검색용 제목·요약·키워드를 만들어 줍니다.'),
@@ -96,13 +108,14 @@ def parse_uploads(contents, names) -> list[tuple[str, bytes]]:
     return [(n or 'file', base64.b64decode(c.split(',', 1)[1])) for c, n in zip(contents, names or [])]
 
 
-def save_history(task_id: int, etype: str, content: str, when, use_ai: bool, links_text: str,
-                 attach_contents, attach_names, author: str) -> dict:
-    """이력 저장 + 관련 자료(입력한 링크·원문 속 링크·첨부 파일) 연결 + AI 정리 요청.
-    업무 상세와 홈 빠른 기록이 같이 쓴다. 실패하면 ValueError."""
+def save_history(task_id: int | None, etype: str, content: str, when, use_ai: bool, links_text: str,
+                 attach_contents, attach_names, author: str, person_ids: list[int] | None = None) -> dict:
+    """이력 저장 + 임원 연결(선택 + 원문에서 자동 인식) + 관련 자료(입력한 링크·원문 속 링크·첨부 파일)
+    연결 + AI 정리 요청. 업무 상세·홈 빠른 기록·임원 화면이 같이 쓴다. 실패하면 ValueError."""
     files = parse_uploads(attach_contents, attach_names)
     links = store.parse_links(links_text or '')
-    h = store.add_history(task_id, content, etype, author, when or None)
+    people = sorted(set(person_ids or []) | set(store.detect_people(content or '')))
+    h = store.add_history(task_id, content, etype, author, when or None, person_ids=people)
     known = {l['url'] for l in links}
     links += [{'title': u, 'url': u} for u in store.urls_in_text(content) if u not in known]
     store.attach_links(task_id, h['id'], links, author=author)

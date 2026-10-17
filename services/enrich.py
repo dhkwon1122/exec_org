@@ -18,9 +18,10 @@ def enrich_entry(entry_id: int) -> None:
     entry = store.get_history(entry_id)
     if entry is None:
         return
-    task = store.get_task(entry['task_id'])
+    task = store.get_task(entry['task_id']) if entry['task_id'] else None
     try:
-        result = llm.analyze_record(entry['content'], task['title'] if task else '', entry['entry_type'])
+        people = [f"{p['name']} {p['position']}".strip() for p in entry['people']]
+        result = llm.analyze_record(entry['content'], task['title'] if task else '', entry['entry_type'], people)
     except Exception as e:  # noqa: BLE001 — 어떤 실패든 기록에 남기고 화면에서 재시도
         store.set_history_ai(entry_id, 'failed', error=str(e)[:500])
         return

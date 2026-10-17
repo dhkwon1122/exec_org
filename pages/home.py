@@ -66,7 +66,7 @@ def layout(**_):
                 dbc.Card([
                     dbc.CardHeader([html.I(className='bi bi-lightning-charge me-1'), '빠른 기록'], className='small'),
                     dbc.CardBody([
-                        dcc.Dropdown(id='qr-task', placeholder='어느 업무에 기록할까요?', className='mb-2'),
+                        dcc.Dropdown(id='qr-task', placeholder='관련 업무 (임원 동향이면 비워도 됨)', className='mb-2'),
                         *history_form('qr', compact=True),
                         dbc.Alert(id='qr-ok', color='success', is_open=False, duration=5000,
                                   className='mt-2 mb-0 py-2 small'),
@@ -145,25 +145,32 @@ register_form_callbacks('qr')
           Output('qr-links', 'value'), Output('qr-attach', 'contents'), Output('qr-attach', 'filename'),
           Output('qr-attach-names', 'children', allow_duplicate=True),
           Output('qr-error', 'children'), Output('qr-error', 'is_open'),
-          Output('qr-ok', 'children'), Output('qr-ok', 'is_open'),
+          Output('qr-ok', 'children'), Output('qr-ok', 'is_open'), Output('qr-people', 'value'),
           Input('qr-add', 'n_clicks'), State('qr-task', 'value'), State('qr-type', 'value'),
           State('qr-content', 'value'), State('qr-when', 'value'), State('qr-ai', 'value'),
           State('qr-links', 'value'), State('qr-attach', 'contents'), State('qr-attach', 'filename'),
-          State('home-refresh', 'data'), prevent_initial_call=True)
-def quick_record(_, task_id, etype, content, when, use_ai, links, att, att_names, n):
+          State('qr-people', 'value'), State('home-refresh', 'data'), prevent_initial_call=True)
+def quick_record(_, task_id, etype, content, when, use_ai, links, att, att_names, people, n):
     nu = no_update
-    if not task_id:
-        return (nu,) * 7 + ('기록할 업무를 선택하세요.', True, nu, False)
     try:
-        h = save_history(int(task_id), etype, content, when, use_ai, links, att, att_names, auth.current_name())
+        h = save_history(int(task_id) if task_id else None, etype, content, when, use_ai, links, att, att_names,
+                         auth.current_name(), people)
     except ValueError as e:
-        return (nu,) * 7 + (str(e), True, nu, False)
-    n_refs = len(store.get_history(h['id'])['refs'])
-    msg = [f'#{task_id} 업무에 기록했습니다' + (f' (관련 자료 {n_refs}건)' if n_refs else '') + '. ',
-           dcc.Link('열기', href=f'/task/{task_id}')]
+        msg = str(e)
+        if not task_id and not people:
+            msg = '업무를 고르거나, 임원 동향이면 관련 임원을 고르세요 (원문에 등록된 임원 이름이 있으면 자동 연결).'
+        return (nu,) * 7 + (msg, True, nu, False, nu)
+    n_refs = len(h['refs'])
+    where = [f"#{task_id} 업무"] if task_id else []
+    where += [p['name'] for p in h['people']]
+    msg = [f"{', '.join(where)}에 기록했습니다" + (f' (관련 자료 {n_refs}건)' if n_refs else '') + '. ']
+    if task_id:
+        msg.append(dcc.Link('업무 열기', href=f'/task/{task_id}'))
+    elif h['people']:
+        msg.append(dcc.Link('임원 기록 보기', href=f"/people/{h['people'][0]['id']}"))
     if use_ai:
         msg.insert(1, 'AI 요약·키워드는 잠시 후 채워집니다. ')
-    return (n or 0) + 1, '', None, '', None, None, '', '', False, msg, True
+    return (n or 0) + 1, '', None, '', None, None, '', '', False, msg, True, []
 
 
 @callback(Output('new-modal', 'is_open'), Output('new-parent', 'options'), Output('new-error', 'children'),
@@ -175,6 +182,8 @@ def quick_record(_, task_id, etype, content, when, use_ai, links, att, att_names
           prevent_initial_call=True)
 def new_task(_o, _c, _s, title, desc, status, owner, start, due, tags, parent):
     author = auth.current_name()
+    if ctx.triggered_id not in ('new-open', 'new-cancel', 'new-save'):
+        return (no_update,) * 5
     if ctx.triggered_id == 'new-open':
         opts = [{'label': f"#{t['id']} {t['title']}", 'value': t['id']} for t in store.list_tasks()]
         return True, opts, '', False, no_update

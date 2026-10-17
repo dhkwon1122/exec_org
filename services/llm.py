@@ -84,6 +84,7 @@ ANALYZE_SYSTEM = """너는 업무 기록을 정리하는 비서다. 사용자가
 
 ANALYZE_USER = """오늘 날짜: {today} ({weekday})
 업무: {task}
+관련 임원: {people}
 기록 유형: {entry_type}
 
 원문:
@@ -99,10 +100,11 @@ ANALYZE_USER = """오늘 날짜: {today} ({weekday})
   "todos": [{{"title": "해야 할 일 (동사로 끝나는 한 문장)", "due": "YYYY-MM-DD 또는 빈 문자열", "assignee": "담당자 이름 또는 빈 문자열"}}]
 }}
 keywords 에는 (1) 사람·조직·제품·과제·문서 같은 고유명사, (2) 핵심 주제어, (3) 원문에 그 단어가 없더라도 나중에 검색할 때 쓸 법한 동의어·상위 개념을 섞어 넣는다. 각 키워드는 짧은 명사구로.
+기록 유형이 '동향'이면 summary 는 "누가 / 무엇을(관심사·발언·움직임) / 우리에게 주는 시사점" 순으로 쓰고, 원문에 출처나 확인 정도(직접 들음·전언·추정)가 있으면 반드시 밝힌다. keywords 에는 관련 임원의 이름과 직위를 넣는다.
 todos 에는 원문에 나온 요청·지시·약속·후속 조치만 넣는다(없으면 빈 배열). "다음주까지", "금요일까지"처럼 상대적인 기한은 오늘 날짜를 기준으로 실제 날짜로 바꾸고, 기한이 없으면 due 는 빈 문자열."""
 
 
-def analyze_record(text: str, task_title: str = '', entry_type: str = '') -> dict:
+def analyze_record(text: str, task_title: str = '', entry_type: str = '', people: list[str] | None = None) -> dict:
     """원문 → {'title', 'summary', 'keywords': [..], 'todos': [{'title', 'due', 'assignee'}]}"""
     text = (text or '').strip()
     if len(text) > MAX_INPUT_CHARS:
@@ -110,7 +112,7 @@ def analyze_record(text: str, task_title: str = '', entry_type: str = '') -> dic
     today = date.today()
     data = _extract_json(chat(ANALYZE_SYSTEM, ANALYZE_USER.format(
         today=today.isoformat(), weekday='월화수목금토일'[today.weekday()] + '요일',
-        task=task_title or '-', entry_type=entry_type or '-', text=text)))
+        task=task_title or '-', people=', '.join(people or []) or '-', entry_type=entry_type or '-', text=text)))
     kws = data.get('keywords') or []
     if isinstance(kws, str):
         kws = re.split(r'[,\n]', kws)

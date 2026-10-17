@@ -8,12 +8,13 @@ import dash_bootstrap_components as dbc
 from dash import Input, Output, callback, dcc, html
 
 from components import ui
+from components.history_form import people_options
 from services import store
 
 dash.register_page(__name__, path='/search', name='이력 검색', title='업무 기록 · 이력 검색')
 
 
-def layout(q: str = '', **_):
+def layout(q: str = '', person: str = '', **_):
     return html.Div([
         dbc.Row([
             dbc.Col([
@@ -24,7 +25,9 @@ def layout(q: str = '', **_):
                 ], className='mb-2'),
                 dbc.Row([
                     dbc.Col(dcc.Dropdown(id='s-types', multi=True, placeholder='유형 (전체)',
-                                         options=store.ENTRY_TYPES + store.AUTO_ENTRY_TYPES), md=4),
+                                         options=store.ENTRY_TYPES + store.AUTO_ENTRY_TYPES), md=2),
+                    dbc.Col(dcc.Dropdown(id='s-person', placeholder='임원', options=people_options(),
+                                         value=int(person) if str(person).isdigit() else None), md=2),
                     dbc.Col(dcc.Dropdown(id='s-author', placeholder='작성자', options=store.history_authors()), md=2),
                     dbc.Col(dbc.InputGroup([dbc.InputGroupText('부터'), dbc.Input(id='s-from', type='date')],
                                            size='sm'), md=2),
@@ -49,11 +52,11 @@ def layout(q: str = '', **_):
 
 
 @callback(Output('s-results', 'children'), Output('s-count', 'children'),
-          Input('s-q', 'value'), Input('s-types', 'value'), Input('s-author', 'value'),
+          Input('s-q', 'value'), Input('s-types', 'value'), Input('s-person', 'value'), Input('s-author', 'value'),
           Input('s-from', 'value'), Input('s-to', 'value'), Input('s-auto', 'value'))
-def search(q, types, author, date_from, date_to, include_auto):
+def search(q, types, person_id, author, date_from, date_to, include_auto):
     terms = store.search_terms(q or '')
-    rows = store.search_history(q or '', entry_types=types or None, author=author or '',
+    rows = store.search_history(q or '', entry_types=types or None, author=author or '', person_id=person_id,
                                 date_from=date_from or '', date_to=date_to or '', include_auto=bool(include_auto))
     if not rows:
         return dbc.Alert('조건에 맞는 이력이 없습니다.', color='light'), ''

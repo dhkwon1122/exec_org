@@ -7,7 +7,7 @@ from dash import dcc, html
 
 STATUS_COLOR = {'예정': 'secondary', '진행중': 'primary', '보류': 'warning', '완료': 'success'}
 ENTRY_ICON = {
-    '메모': 'bi-sticky', '피드백': 'bi-chat-left-quote', '회의': 'bi-people', '결정': 'bi-check2-square',
+    '메모': 'bi-sticky', '피드백': 'bi-chat-left-quote', '동향': 'bi-binoculars', '회의': 'bi-people', '결정': 'bi-check2-square',
     '진행': 'bi-arrow-right-circle',
     '이슈': 'bi-exclamation-triangle', '요청': 'bi-envelope', '상태변경': 'bi-flag',
     '연결': 'bi-link-45deg', '자료': 'bi-paperclip', '할일': 'bi-check2-circle',
@@ -104,6 +104,16 @@ def keyword_chips(keywords: list[str], terms: list[str] | None = None):
     ], className='mt-1')
 
 
+def people_chips(people: list[dict], terms: list[str] | None = None):
+    """이력에 연결된 임원 — 누르면 그 임원의 기록 모음으로."""
+    return html.Div([
+        dcc.Link([html.I(className='bi bi-person-badge me-1'), f"{p['name']} {p['position']}".strip()],
+                 href=f"/people/{p['id']}",
+                 className='badge rounded-pill text-decoration-none me-1 mb-1 '
+                           + ('text-bg-warning' if _matches(p['name'], terms) else 'text-bg-primary'))
+        for p in people], className='mb-1')
+
+
 def history_card(h: dict, terms: list[str] | None = None, show_task: bool = False, actions: bool = True,
                  added_todos: set[str] | None = None):
     """이력 한 건. 원문은 그대로 보존하고, AI 정리본(제목·요약·키워드)이 있으면 위에 보여준다."""
@@ -115,9 +125,9 @@ def history_card(h: dict, terms: list[str] | None = None, show_task: bool = Fals
         html.Span(h['occurred_at'], className='small text-muted me-2 text-nowrap'),
         html.Span(h['author'], className='small me-2 text-nowrap'),
     ]
-    if show_task:
+    if show_task and h['task_id']:
         header.append(dcc.Link(f"#{h['task_id']} {h.get('task_title', '')}", href=f"/task/{h['task_id']}",
-                               className='small text-truncate'))
+                               className='small text-truncate me-2'))
     header.append(html.Span(className='me-auto'))
     if actions and not auto:
         header.append(dbc.Button(html.I(className='bi bi-pencil'), id={'type': 'h-edit', 'id': h['id']},
@@ -127,6 +137,8 @@ def history_card(h: dict, terms: list[str] | None = None, show_task: bool = Fals
                                  size='sm', className='text-muted p-0', title='삭제'))
 
     body = []
+    if h.get('people'):
+        body.append(people_chips(h['people'], terms))
     if h['title']:
         body.append(html.Div(highlight(h['title'], terms), className='fw-semibold'))
     if h['summary']:
