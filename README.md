@@ -14,6 +14,7 @@
 |---|---|
 | 업무 | 제목·설명·상태(예정/진행중/보류/완료)·담당자·태그·시작/마감일·상위 업무 |
 | 임원 동향 | `/people` 임원 목록(이름·직위·소속·별칭, 최근 기록 순)과 임원별 화면(`/people/<id>`): 그 임원과 연결된 모든 기록(동향·업무 기록) 타임라인, 자주 나온 키워드, 관련 업무. 동향은 업무 없이 임원만 지정해 기록 |
+| 임원 불러오기 | 임원 목록의 'People in SAIT에서 불러오기'(또는 `scripts/sync_people.py`): Researcher-board 가 같은 DB 에 적재한 `researchers` 테이블에서 직급이 임원(`EXEC_ORG_POSITIONS`, 기본 사장·부사장·상무·고문)이고 최신 인원(`is_current`≠N)인 사람의 이름·직위·소속을 가져온다(읽기 전용). 새 임원에는 '성+직위' 별칭(김부사장 — 같은 성·직위가 여럿이면 생략)을 넣고, 이미 있는 임원은 이름·직위·소속만 갱신(별칭·메모·기록 유지), 직접 등록해 둔 같은 이름은 사번으로 연결. 최신 인원에서 빠진 임원은 알려만 준다 |
 | 임원 자동 연결 | 원문에 등록된 임원의 이름·별칭이 나오면 그 임원에게 자동 연결 (업무 피드백 속 임원 언급도 임원 화면에 모인다). 추적 중지한 임원은 제외 |
 | 이력 | 메모/피드백/동향/회의/결정/진행/이슈/요청 유형으로 원문 그대로 기록. 실제 일시 지정, 텍스트 파일(.txt 등, UTF-8·CP949) 불러오기 |
 | 이력별 관련 자료 | 이력마다 링크·파일·공유폴더 경로(`\\서버\폴더\파일`, 복사 버튼)를 붙인다. 원문 속 URL 은 자동으로 붙고, 이력 수정 창에서 추가·삭제. 이력 검색은 붙은 자료 제목·주소·파일명까지 찾는다 |
@@ -108,7 +109,8 @@ pages/todos.py          할 일
 pages/calendar.py       캘린더
 pages/task_detail.py    업무 상세 (이력 / 할 일 / 참고자료 / 연결 업무 탭, 하위 업무)
 pages/references.py     전체 참고자료 검색
-scripts/                auth_check.py(로그인 진단), create_user.py(로컬 계정), fix_data_ownership.sh, gen_self_signed_cert.sh
+services/people_sync.py People in SAIT researchers 테이블에서 임원 기본 정보 불러오기 (읽기 전용)
+scripts/                auth_check.py(로그인 진단), sync_people.py(임원 불러오기), create_user.py(로컬 계정), fix_data_ownership.sh, gen_self_signed_cert.sh
 Dockerfile, docker-compose*.yml, deploy/nginx.conf, certs/   Docker 실행 구성
 tests/                  저장·검색·LLM 파싱 테스트 (pip install -r requirements-dev.txt; pytest)
 ```

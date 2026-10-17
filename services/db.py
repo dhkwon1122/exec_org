@@ -126,6 +126,9 @@ class Person(Base):
     aliases = Column(String(500), default='')
     note = Column(Text, default='')
     active = Column(Boolean, nullable=False, default=True)  # 퇴임 등으로 더 이상 추적하지 않으면 False
+    # People in SAIT(researchers 테이블)에서 불러온 임원이면 그 사번(researcher_id). 직접 등록한 임원은 ''
+    source_id = Column(String(50), default='', index=True)
+    synced_at = Column(DateTime, nullable=True)  # 마지막으로 People in SAIT 정보로 갱신한 시각
     created_at = Column(DateTime, default=_now)
     updated_at = Column(DateTime, default=_now, onupdate=_now)
 

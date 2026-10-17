@@ -4,7 +4,7 @@ import dash_bootstrap_components as dbc
 from dash import Input, Output, State, callback, ctx, dcc, html, no_update
 
 from components import ui
-from services import store
+from services import people_sync, store
 
 dash.register_page(__name__, path='/people', name='임원', title='업무 기록 · 임원')
 
@@ -40,12 +40,20 @@ def layout(**_):
             dbc.Col([
                 dbc.Row([
                     dbc.Col(dbc.Input(id='pl-q', type='search', debounce=True,
-                                      placeholder='이름·직위·소속·별칭·메모 검색'), md=6),
-                    dbc.Col(dbc.Checkbox(id='pl-inactive', label='추적 중지한 임원 포함', value=False), md=3,
+                                      placeholder='이름·직위·소속·별칭·메모 검색'), md=4),
+                    dbc.Col(dbc.Checkbox(id='pl-inactive', label='추적 중지 포함', value=False), md=2,
                             className='d-flex align-items-center'),
-                    dbc.Col(dbc.Button([html.I(className='bi bi-person-plus me-1'), '임원 추가'], id='pn-open',
-                                       color='primary', className='w-100'), md=3),
-                ], className='g-2 mb-3'),
+                    dbc.Col(dbc.Button([html.I(className='bi bi-arrow-repeat me-1'), 'People in SAIT에서 불러오기'],
+                                       id='pl-sync', color='secondary', outline=True, className='w-100',
+                                       disabled=not people_sync.is_available(),
+                                       title='People in SAIT 인사 정보에서 직급이 임원(' +
+                                             '/'.join(people_sync.exec_positions()) + ')인 사람의 이름·직위·소속을 '
+                                             '가져옵니다. 별칭·메모·기록은 그대로 둡니다.'), md=4),
+                    dbc.Col(dbc.Button([html.I(className='bi bi-person-plus me-1'), '직접 추가'], id='pn-open',
+                                       color='primary', className='w-100'), md=2),
+                ], className='g-2 mb-2'),
+                dcc.Loading(dbc.Alert(id='pl-sync-msg', is_open=False, dismissable=True, className='py-2 small'),
+                            type='dot'),
                 html.Div(id='pl-list'),
             ], lg=7),
             dbc.Col([
@@ -68,6 +76,8 @@ def render(q, inactive, _, _h):
                     dcc.Link(p['name'], href=f"/people/{p['id']}", className='fw-semibold me-2'),
                     html.Span(' · '.join(x for x in [p['position'], p['org']] if x), className='small me-auto'),
                     dbc.Badge('추적 중지', color='secondary', className='me-2') if not p['active'] else None,
+                    dbc.Badge('People in SAIT', color='info', className='me-2', title=f"사번 {p['source_id']}")
+                    if p['source_id'] else None,
                     html.Span([f"기록 {p['count']}건", f" · 최근 {p['last_at'][:10]}" if p['last_at'] else ''],
                               className='small text-muted'),
                 ], className='d-flex align-items-center flex-wrap'),
@@ -101,3 +111,27 @@ def add_person(_o, _c, _s, name, position, org, aliases, note):
     except ValueError as e:
         return True, str(e), True, nu, nu, nu, nu, nu, nu
     return False, '', False, f"/people/{p['id']}", nu, nu, nu, nu, nu
+
+
+@callback(Output('pl-sync-msg', 'children'), Output('pl-sync-msg', 'is_open'), Output('pl-sync-msg', 'color'),
+          Output('pl-refresh', 'data', allow_duplicate=True),
+          Input('pl-sync', 'n_clicks'), State('pl-refresh', 'data'), prevent_initial_call=True)
+def sync_from_people_in_sait(n_clicks, n):
+    if not n_clicks:
+        return no_update, no_update, no_update, no_update
+    try:
+        r = people_sync.sync_people()
+    except people_sync.SyncError as e:
+        return str(e), True, 'danger', no_update
+    lines = [html.Div(f"People in SAIT 임원 {r['total']}명 확인 — 새로 추가 {len(r['added'])}명, "
+                      f"정보 갱신 {len(r['updated'])}명, 기존 등록과 연결 {len(r['linked'])}명, 변동 없음 {r['unchanged']}명")]
+    if r['added']:
+        lines.append(html.Div('추가: ' + ', '.join(r['added'])))
+    if r['updated']:
+        lines.append(html.Div('갱신: ' + ', '.join(r['updated'])))
+    if r['linked']:
+        lines.append(html.Div('연결: ' + ', '.join(r['linked'])))
+    if r['missing']:
+        lines.append(html.Div(['People in SAIT 최신 인원에 없는 임원(퇴임·이동?): ', ', '.join(r['missing']),
+                               ' — 더 추적하지 않으려면 임원 화면에서 "추적 중지"']))
+    return lines, True, 'warning' if r['missing'] else 'success', (n or 0) + 1
