@@ -21,6 +21,8 @@ ROWS = [
     ('E003', '박철호', '경영지원', 'D03', '사장', '', 'ch.park', '재직', '2026', '9', 'Y'),
     ('E004', '김지훈', '소자연구소', 'D04', '상무', '', 'jh.kim', '재직', '2026', '9', 'Y'),
     ('E005', '김태현', '반도체연구소', 'D05', '상무', '', 'th.kim', '재직', '2026', '9', 'Y'),
+    ('E006', '한수진', '소재연구소', 'D06', 'Master', '', 'sj.han', '재직', '2026', '9', 'Y'),
+    ('E007', '오민석', 'AI센터', 'D02', ' FELLOW', '', 'ms.oh', '재직', '2026', '9', 'Y'),  # 대소문자·공백 달라도
     ('R100', '최연구', 'AI센터', 'D02', 'CL3', '', 'yg.choi', '재직', '2026', '9', 'Y'),  # 임원 아님
     ('E009', '정퇴임', '전략기획실', 'D01', '상무', '', 'tr.jung', '재직', '2026', '6', 'N'),  # 과거 시점
 ]
@@ -44,16 +46,20 @@ def test_fetch_only_current_executives():
     execs = people_sync.fetch_executives()
     assert [(e['name'], e['position'], e['org']) for e in execs] == [
         ('박철호', '사장', '경영지원'), ('김영수', '부사장', '전략기획실'),
-        ('김지훈', '상무', '소자연구소'), ('김태현', '상무', '반도체연구소'), ('이민정', '상무', 'AI센터')]
+        ('김지훈', '상무', '소자연구소'), ('김태현', '상무', '반도체연구소'), ('이민정', '상무', 'AI센터'),
+        ('한수진', 'Master', '소재연구소'), ('오민석', 'Fellow', 'AI센터')]
 
 
 def test_sync_adds_with_title_aliases_and_preserves_local_fields(env):
     r = people_sync.sync_people()
-    assert r['total'] == 5 and len(r['added']) == 5 and r['missing'] == []
+    assert r['total'] == 7 and len(r['added']) == 7 and r['missing'] == []
     by_name = {p['name']: p for p in store.list_people()}
     assert by_name['김영수']['aliases'] == ['김부사장', '김 부사장']
     assert by_name['이민정']['aliases'] == ['이상무', '이 상무']
     assert by_name['김지훈']['aliases'] == []  # 김상무가 둘이라 모호 → 별칭 안 만듦
+    assert by_name['한수진']['aliases'] == ['한마스터', '한 마스터', '한 Master']
+    assert by_name['오민석']['aliases'] == ['오펠로우', '오 펠로우', '오펠로', '오 펠로', '오 Fellow']
+    assert store.detect_people('한 마스터님 의견') == [by_name['한수진']['id']]
     assert by_name['김영수']['source_id'] == 'E001'
     # 원문 자동 연결이 바로 된다
     assert store.detect_people('김부사장 보고 일정') == [by_name['김영수']['id']]
@@ -63,7 +69,7 @@ def test_sync_adds_with_title_aliases_and_preserves_local_fields(env):
     _researchers(env, [('E001', '김영수', '미래전략실', 'D09', '사장', '', '', '재직', '2026', '10', 'Y')]
                  + [r for r in ROWS if r[0] != 'E001'])
     r = people_sync.sync_people()
-    assert r['added'] == [] and r['updated'] == ['김영수 (position, org)'] and r['unchanged'] == 4
+    assert r['added'] == [] and r['updated'] == ['김영수 (position, org)'] and r['unchanged'] == 6
     p = store.get_person(by_name['김영수']['id'])
     assert (p['position'], p['org'], p['aliases'], p['note']) == ('사장', '미래전략실', ['김부사장', '전략실장'],
                                                                   '해외 경험 많음')
@@ -92,6 +98,8 @@ def test_sync_reports_executives_no_longer_listed(env):
 def test_positions_configurable(monkeypatch):
     monkeypatch.setenv('EXEC_ORG_POSITIONS', '사장,부사장')
     assert [e['name'] for e in people_sync.fetch_executives()] == ['박철호', '김영수']
+    monkeypatch.setenv('EXEC_ORG_POSITIONS', 'fellow')  # 설정 쪽 대소문자도 무시, 표기는 설정값
+    assert [(e['name'], e['position']) for e in people_sync.fetch_executives()] == [('오민석', 'fellow')]
 
 
 def test_sync_errors(monkeypatch, tmp_path):

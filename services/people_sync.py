@@ -2,14 +2,14 @@
 
 Researcher-board 는 헤드카운트 원천을 정제해 같은 PostgreSQL(DATABASE_URL — 로그인용 app_users 와
 같은 DB)의 researchers 테이블에 적재한다. 그 position(직급) 컬럼은 원본 영문 임원 표기를
-상무/부사장/사장/고문 으로 바꿔 둔 값이라, 이 값으로 임원만 골라 이름·직급·소속을 가져온다.
-researchers 테이블은 **읽기만** 한다.
+상무/부사장/사장/고문 으로 바꿔 둔 값이고, Master·Fellow 처럼 매핑 없는 직급은 원본 영문 그대로라,
+이 값으로 임원만 골라 이름·직급·소속을 가져온다(대소문자·앞뒤 공백 무시). researchers 테이블은 **읽기만** 한다.
 
 - 이미 불러온 임원(source_id = 사번)은 이름·직위·소속을 People in SAIT 값으로 갱신한다.
   이 앱에서만 쓰는 별칭·메모·추적 여부는 건드리지 않는다.
 - 직접 등록해 둔 임원과 이름이 같으면(사번 미연결) 그 사람에게 사번을 연결한다 — 같은 이름이 둘 이상이면
   잘못 합칠 수 있으므로 새로 추가한다.
-- 새로 추가하는 임원에게는 '성+직위' 별칭(예: 김부사장, 김 부사장)을 넣어 원문 자동 연결이 바로 되게
+- 새로 추가하는 임원에게는 '성+직위' 별칭(예: 김부사장, 김 부사장, 영문 직급은 김마스터·김 Master)을 넣어 원문 자동 연결이 바로 되게
   한다. 같은 성·직위의 임원이 여럿이면 누구인지 모호하므로 넣지 않는다.
 - People in SAIT 최신 인원 목록에 더 이상 없는 임원(퇴임·이동 등)은 지우거나 추적 중지하지 않고
   결과에 알려만 준다 — 기록은 그대로 남아야 하므로 판단은 사람이 한다.
@@ -17,16 +17,26 @@ researchers 테이블은 **읽기만** 한다.
 import os
 from datetime import datetime
 
-from sqlalchemy import MetaData, Table, create_engine, select, text
+from sqlalchemy import MetaData, Table, create_engine, func, select, text
 
 from services import db, users
 from services.db import Person
 
-EXEC_POSITIONS_DEFAULT = '사장,부사장,상무,고문'
+EXEC_POSITIONS_DEFAULT = '사장,부사장,상무,고문,Master,Fellow'
+# 영문 그대로 적재되는 직급의 한글 호칭 — '성+호칭' 별칭(김마스터)을 만들 때 쓴다.
+POSITION_READINGS = {'master': ['마스터'], 'fellow': ['펠로우', '펠로']}
 
 
 def exec_positions() -> list[str]:
     return [p.strip() for p in os.environ.get('EXEC_ORG_POSITIONS', EXEC_POSITIONS_DEFAULT).split(',') if p.strip()]
+
+
+def _canonical_positions() -> dict[str, str]:
+    """소문자 직급 → 설정에 적힌 표기 (Researcher-board 값이 'MASTER'·' Fellow' 여도 같은 직급으로)."""
+    out = {}
+    for p in exec_positions():
+        out.setdefault(p.lower(), p)
+    return out
 
 
 class SyncError(RuntimeError):
@@ -58,7 +68,8 @@ def fetch_executives() -> list[dict]:
             raise SyncError(f'researchers 테이블에 필요한 컬럼이 없습니다: {sorted(need - set(t.c.keys()))}')
         cols = [t.c[c] for c in ('researcher_id', 'name', 'position', 'department', 'org_code',
                                  'employment_status', 'is_current') if c in t.c]
-        stmt = select(*cols).where(t.c.position.in_(exec_positions()))
+        canon = _canonical_positions()
+        stmt = select(*cols).where(func.lower(func.trim(t.c.position)).in_(list(canon)))
         if 'is_current' in t.c:  # 과거 시점 행(N)은 빼고 최신 인원만
             stmt = stmt.where((t.c.is_current != 'N') | t.c.is_current.is_(None))
         with engine.begin() as conn:
@@ -79,16 +90,19 @@ def fetch_executives() -> list[dict]:
         if not rid or not name:
             continue
         out[rid] = {  # 같은 사번이 여러 행이면 마지막 값
-            'source_id': rid, 'name': name, 'position': str(r.get('position') or '').strip(),
+            'source_id': rid, 'name': name,
+            'position': canon.get(str(r.get('position') or '').strip().lower(), str(r.get('position') or '').strip()),
             'org': str(r.get('department') or r.get('org_code') or '').strip(),
             'employment_status': str(r.get('employment_status') or '').strip(),
         }
-    return sorted(out.values(), key=lambda x: (exec_positions().index(x['position'])
-                                                if x['position'] in exec_positions() else 99, x['name']))
+    order = list(canon.values())
+    return sorted(out.values(), key=lambda x: (order.index(x['position']) if x['position'] in order else 99,
+                                               x['name']))
 
 
 def _title_aliases(execs: list[dict]) -> dict[str, list[str]]:
-    """'성+직위' 별칭(김부사장, 김 부사장). 같은 성·직위가 둘 이상이면 모호하므로 만들지 않는다."""
+    """'성+직위' 별칭(김부사장, 김 부사장 / 김마스터, 김 마스터, 김 Master).
+    같은 성·직위가 둘 이상이면 모호하므로 만들지 않는다."""
     count: dict[tuple[str, str], int] = {}
     for e in execs:
         key = (e['name'][:1], e['position'])
@@ -96,7 +110,14 @@ def _title_aliases(execs: list[dict]) -> dict[str, list[str]]:
     out = {}
     for e in execs:
         surname, pos = e['name'][:1], e['position']
-        out[e['source_id']] = [f'{surname}{pos}', f'{surname} {pos}'] if pos and count[(surname, pos)] == 1 else []
+        if not pos or count[(surname, pos)] > 1:
+            out[e['source_id']] = []
+            continue
+        readings = POSITION_READINGS.get(pos.lower())
+        if readings:  # 영문 직급: 한글 호칭으로, 영문은 띄어 쓴 형태만 (김Master 는 쓰지 않음)
+            out[e['source_id']] = [a for r in readings for a in (f'{surname}{r}', f'{surname} {r}')] + [f'{surname} {pos}']
+        else:
+            out[e['source_id']] = [f'{surname}{pos}', f'{surname} {pos}']
     return out
 
 
