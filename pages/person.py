@@ -76,6 +76,10 @@ def render(_, _h, _t, pid):
                        outline=True, size='sm'),
         ], className='d-flex align-items-center flex-wrap gap-1 mb-1'),
         html.Div(p['org'], className='text-muted') if p['org'] else None,
+        html.Div([dbc.Badge('People in SAIT', color='info', className='me-1'),
+                  f"사번 {p['source_id']} · 이름·직위·소속은 불러오기 때마다 People in SAIT 값으로 갱신 "
+                  f"(최근 {p['synced_at'][:10]})"], className='small text-muted')
+        if p['source_id'] else None,
         html.Div('별칭: ' + ', '.join(p['aliases']), className='small text-muted') if p['aliases'] else None,
         ui.multiline(p['note']) if p['note'] else None,
     ]))

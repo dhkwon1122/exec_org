@@ -788,6 +788,7 @@ def _person_dict(p: Person) -> dict:
     return {
         'id': p.id, 'name': p.name, 'position': p.position or '', 'org': p.org or '',
         'aliases': _tags(p.aliases), 'note': p.note or '', 'active': bool(p.active),
+        'source_id': p.source_id or '', 'synced_at': _dt(p.synced_at),
         'created_at': _dt(p.created_at), 'updated_at': _dt(p.updated_at),
     }
 
