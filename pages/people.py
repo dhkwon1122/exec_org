@@ -124,8 +124,10 @@ def add_person(_o, _c, _s, name, position, org, aliases, note):
     return False, '', False, f"/people/{p['id']}", nu, nu, nu, nu, nu
 
 
-_PLAN_KINDS = [('add', '새 임원 추가'), ('link', '직접 등록한 임원에 사번 연결'), ('set', '정보 변경 — 덮어쓸지')]
+_PLAN_KINDS = [('add', '새 임원 추가'), ('past', '과거 임원 추가'), ('link', '직접 등록한 임원에 사번 연결'),
+               ('set', '정보 변경 — 덮어쓸지')]
 _PLAN_HINTS = {'add': "'성+직위' 별칭(예: 김부사장)도 함께 넣습니다",
+               'past': '지금은 임원이 아닌 사람 — 추적 중지 상태로 넣어 목록·자동 연결에서는 빠지고 기록·경력은 이어 봅니다',
                'link': '연결해야 아래 정보 변경도 반영됩니다',
                'set': '왼쪽이 지금 값, 오른쪽이 People in SAIT 값'}
 
@@ -146,8 +148,13 @@ def _plan_layout():
 def _plan_view(plan: dict) -> list:
     """제안을 화면 값으로: 머리말, 종류별 (보이기, 제목, 옵션, 기본 선택), 빠진 임원 경고."""
     items, keys = plan['items'], set(people_sync.default_keys(plan))
-    out = [f"People in SAIT 임원 {plan['total']}명 확인 — 제안 {len(items)}건, 변동 없음 {plan['unchanged']}명"
-           + ('' if items else ' · 반영할 변경이 없습니다.')]
+    head = (f"People in SAIT 현재 임원 {plan['total']}명·과거 임원 {plan['past_total']}명 확인 — 제안 {len(items)}건, "
+            f"변동 없음 {plan['unchanged']}명")
+    if plan['career_new']:
+        head += f" · 경력 이력 새로 {plan['career_new']}건(반영하면 함께 쌓임)"
+    elif not items:
+        head += ' · 반영할 변경이 없습니다.'
+    out = [head]
     for kind, title in _PLAN_KINDS:
         opts = [{'label': i['label'], 'value': i['key']} for i in items if i['kind'] == kind]
         out += [None if opts else {'display': 'none'}, f'{title} ({len(opts)})', opts,
@@ -168,9 +175,9 @@ _PLAN_OUTPUTS = [Output('ps-head', 'children')] + [
           Output('pl-sync-msg', 'children'), Output('pl-sync-msg', 'is_open'), Output('pl-sync-msg', 'color'),
           Output('pl-refresh', 'data', allow_duplicate=True),
           Input('pl-sync', 'n_clicks'), Input('ps-cancel', 'n_clicks'), Input('ps-apply', 'n_clicks'),
-          State('ps-plan', 'data'), State('ps-add', 'value'), State('ps-link', 'value'), State('ps-set', 'value'),
+          State('ps-plan', 'data'), *[State(f'ps-{kind}', 'value') for kind, _ in _PLAN_KINDS],
           State('pl-refresh', 'data'), prevent_initial_call=True)
-def sync_from_people_in_sait(n_sync, _c, n_apply, plan, add, link, set_, n):
+def sync_from_people_in_sait(n_sync, _c, n_apply, plan, *chosen_and_n):
     nu = no_update
     keep = (nu,) * len(_PLAN_OUTPUTS)
     trig = ctx.triggered_id
@@ -183,13 +190,18 @@ def sync_from_people_in_sait(n_sync, _c, n_apply, plan, add, link, set_, n):
             plan = people_sync.plan_sync()
         except people_sync.SyncError as e:
             return (nu,) * 3 + keep + (str(e), True, 'danger', nu)
-        return (True, plan, not plan['items'], *_plan_view(plan), nu, False, nu, nu)
+        return (True, plan, not (plan['items'] or plan['career_new']), *_plan_view(plan), nu, False, nu, nu)
     if trig != 'ps-apply' or not plan:
         return (nu,) * 3 + keep + (nu,) * 4
-    r = people_sync.apply_sync(plan, [*(add or []), *(link or []), *(set_ or [])])
-    lines = [html.Div(f"반영 완료 — 추가 {len(r['added'])}명, 연결 {len(r['linked'])}명, 정보 갱신 {len(r['updated'])}명, "
-                      f"유지 {len(r['kept'])}건")]
-    for label, key in (('추가', 'added'), ('연결', 'linked'), ('갱신', 'updated'), ('유지', 'kept'),
+    *chosen, n = chosen_and_n
+    try:
+        r = people_sync.apply_sync(plan, [k for v in chosen for k in (v or [])])
+    except people_sync.SyncError as e:
+        return (nu,) * 3 + keep + (str(e), True, 'danger', nu)
+    lines = [html.Div(f"반영 완료 — 추가 {len(r['added'])}명, 과거 임원 {len(r['past_added'])}명, 연결 {len(r['linked'])}명, "
+                      f"정보 갱신 {len(r['updated'])}명, 유지 {len(r['kept'])}건, 경력 이력 {r['career_added']}건")]
+    for label, key in (('추가', 'added'), ('과거 임원', 'past_added'), ('연결', 'linked'), ('갱신', 'updated'),
+                       ('유지', 'kept'),
                        ('건너뜀(그 사이 바뀜)', 'skipped')):
         if r[key]:
             lines.append(html.Div(f'{label}: ' + ', '.join(r[key])))

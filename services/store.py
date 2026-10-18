@@ -14,7 +14,7 @@ from datetime import date, datetime, timedelta
 from sqlalchemy import func, or_, select
 
 from services import db
-from services.db import HistoryEntry, HistoryPerson, Person, Reference, Task, TaskLink, Todo
+from services.db import HistoryEntry, HistoryPerson, Person, PersonCareer, Reference, Task, TaskLink, Todo
 
 STATUSES = ['예정', '진행중', '보류', '완료']
 ENTRY_TYPES = ['메모', '피드백', '동향', '회의', '결정', '진행', '이슈', '요청']
@@ -850,6 +850,15 @@ def delete_person(person_id: int) -> None:
             s.delete(link)
         s.delete(p)
         s.commit()
+
+
+def list_career(person_id: int) -> list[dict]:
+    """임원 경력 이력 (People in SAIT 직급·소속 변천·인사발령), 최근 것이 위로."""
+    with db.SessionLocal() as s:
+        rows = s.scalars(select(PersonCareer).where(PersonCareer.person_id == person_id)
+                         .order_by(PersonCareer.date.desc(), PersonCareer.id.desc()))
+        return [{'kind': c.kind, 'date': c.date, 'position': c.position or '', 'org': c.org or '',
+                 'title': c.title or '', 'assignment': c.assignment or ''} for c in rows]
 
 
 def list_people(query: str = '', include_inactive: bool = False) -> list[dict]:

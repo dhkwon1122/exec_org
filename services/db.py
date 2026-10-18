@@ -12,6 +12,7 @@ PostgreSQL(exec-db). 없으면(개발·테스트) 프로젝트 안의 SQLite 파
 - references_    : 업무별 참고자료 (링크/파일/메모). history_id 가 있으면 그 이력에 붙은 관련 자료
 - task_links     : 업무 ↔ 업무 연결 (관련/선행/후속/파생)
 - people         : 임원 (이름·직위·소속·별칭). 동향 기록의 대상
+- person_career  : 임원 경력 이력 (People in SAIT 직급·소속 변천, 인사발령 — 누적)
 - history_people : 이력 ↔ 임원 연결 (한 이력에 여러 임원). 업무 없이 임원에만 연결된 이력(동향)도 있다
 - todos          : 할 일 (업무에 속하거나 단독). 이력 원문에서 AI 가 뽑은 제안을 추가할 수 있음
 """
@@ -141,6 +142,25 @@ class HistoryPerson(Base):
 
     history_id = Column(Integer, ForeignKey('history.id', ondelete='CASCADE'), primary_key=True)
     person_id = Column(Integer, ForeignKey('people.id', ondelete='CASCADE'), primary_key=True, index=True)
+
+
+class PersonCareer(Base):
+    """임원 경력 이력 — People in SAIT 의 월별 인원 스냅샷(researchers_history)에서 직급·소속이 바뀐 시점과
+    인사발령(hr_orders)을 불러올 때마다 쌓는다. 원천에서 사라져도 지우지 않는다(누적).
+    source_key 로 같은 항목을 두 번 넣지 않는다 (snap:YYYY-MM / order:날짜:발령명:부서)."""
+    __tablename__ = 'person_career'
+    __table_args__ = (UniqueConstraint('person_id', 'source_key', name='uq_person_career_key'),)
+
+    id = Column(Integer, primary_key=True)
+    person_id = Column(Integer, ForeignKey('people.id', ondelete='CASCADE'), nullable=False, index=True)
+    kind = Column(String(20), nullable=False)  # '직급·소속' | '발령'
+    date = Column(String(10), nullable=False, default='')  # YYYY-MM 또는 YYYY-MM-DD
+    position = Column(String(100), default='')
+    org = Column(String(200), default='')
+    title = Column(String(200), default='')  # 발령명
+    assignment = Column(String(100), default='')  # 직책
+    source_key = Column(String(300), nullable=False)
+    created_at = Column(DateTime, default=_now)
 
 
 class Todo(Base):
