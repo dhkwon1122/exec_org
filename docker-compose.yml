@@ -2,8 +2,13 @@
 #
 # 사용:
 #   cp .env.example .env              # DATABASE_URL(People in SAIT 사용자 DB) 등 채우기 — tea-meeting-agenda 와 같은 값
+#                                     # + EXEC_DB_PASSWORD(이 앱 전용 PostgreSQL 비밀번호) 필수
 #   sudo scripts/fix_data_ownership.sh  # 처음 한 번 — ./data 를 컨테이너 사용자(uid 10001) 소유로
-#   docker compose up -d --build       # http://<서버>:8502
+#   docker compose up -d --build       # http://<서버>:8502  (exec-db PostgreSQL 이 함께 뜬다)
+#
+#   # 예전 SQLite(./data/exec_org.db) 기록이 있으면 처음 한 번 옮긴다
+#   docker compose exec app python scripts/migrate_to_postgres.py
+#   # 백업: scripts/backup_db.sh
 #
 #   # HTTPS 리버스 프록시까지 (certs/server.crt·server.key 필요 — scripts/gen_self_signed_cert.sh)
 #   docker compose --profile proxy up -d --build
@@ -15,6 +20,29 @@
 # 값은 이 디렉터리의 .env 에서 읽는다(docker compose 가 자동으로 읽음). 아래 ${VAR:-기본값} 참고.
 
 services:
+  # 이 앱 전용 PostgreSQL — 업무 기록·임원 정보. People in SAIT DB 와 별개라 그쪽에는 읽기만 한다.
+  exec-db:
+    image: postgres:16
+    container_name: exec_org_db
+    restart: unless-stopped
+    environment:
+      TZ: ${TZ:-Asia/Seoul}
+      PGTZ: ${TZ:-Asia/Seoul}
+      POSTGRES_USER: exec_org
+      # URL 에 그대로 들어가므로 영문·숫자로만 (예: openssl rand -hex 24)
+      POSTGRES_PASSWORD: ${EXEC_DB_PASSWORD:?EXEC_DB_PASSWORD must be set in .env}
+      POSTGRES_DB: exec_org
+    # 백업·점검용으로 호스트의 127.0.0.1 에만 연다 (People in SAIT bundled-db 의 5433 과 겹치지 않게 5434)
+    ports:
+      - "127.0.0.1:${EXEC_DB_PORT:-5434}:5432"
+    volumes:
+      - exec_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U exec_org -d exec_org"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
   app:
     build:
       context: .
@@ -33,7 +61,7 @@ services:
     # .env 의 값을 통째로 컨테이너에 넣는다 (tea-meeting-agenda 와 같은 방식).
     #   DATABASE_URL   People in SAIT 사용자 DB(app_users) — tea-meeting-agenda 의 .env 값 그대로
     #   SESSION_SECRET 세션 서명 키 (비우면 ./data/.flask_secret_key 자동 생성)
-    #   EXEC_ORG_DATABASE_URL  업무 기록 DB (비우면 ./data/exec_org.db SQLite)
+    #   EXEC_DB_PASSWORD       이 앱 전용 PostgreSQL(exec-db) 비밀번호
     env_file:
       - path: .env
         required: false
@@ -47,6 +75,8 @@ services:
       SESSION_COOKIE_NAME: ${SESSION_COOKIE_NAME:-exec_org_session}   # People in SAIT(session)와 분리
       TRUSTED_PROXY_COUNT: ${TRUSTED_PROXY_COUNT:-0}           # --profile proxy 면 1
       MAX_CONTENT_LENGTH: ${MAX_CONTENT_LENGTH:-83886080}
+      # 업무 기록 DB — 기본은 위 exec-db. 다른 PostgreSQL 을 쓰려면 .env 에 EXEC_ORG_DATABASE_URL 을 적는다
+      EXEC_ORG_DATABASE_URL: ${EXEC_ORG_DATABASE_URL:-postgresql+psycopg2://exec_org:${EXEC_DB_PASSWORD}@exec-db:5432/exec_org}
 
       # ── 사내 LLM (AI 요약·키워드·할 일 추출) — Researcher-board 의 LLM2_* 와 같은 값 ──
       LLM2_API_URL: ${LLM2_API_URL:-http://75.12.15.121:8000/v1/chat/completions}
@@ -56,14 +86,17 @@ services:
       LLM_MAX_CONCURRENT: ${LLM_MAX_CONCURRENT:-2}
 
       # 사내 LLM·DB 는 프록시를 거치지 않게
-      NO_PROXY: "localhost,127.0.0.1,::1,host.docker.internal,db,75.12.15.121,samsungds.net,*.samsungds.net,*.samsung.net,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16"
-      no_proxy: "localhost,127.0.0.1,::1,host.docker.internal,db,75.12.15.121,samsungds.net,*.samsungds.net,*.samsung.net,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16"
+      NO_PROXY: "localhost,127.0.0.1,::1,host.docker.internal,db,exec-db,75.12.15.121,samsungds.net,*.samsungds.net,*.samsung.net,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16"
+      no_proxy: "localhost,127.0.0.1,::1,host.docker.internal,db,exec-db,75.12.15.121,samsungds.net,*.samsungds.net,*.samsung.net,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16"
+    depends_on:
+      exec-db:
+        condition: service_healthy
     extra_hosts:
       - "host.docker.internal:host-gateway"
     ports:
       - "${APP_PORT:-8502}:8502"
     volumes:
-      # 업무 기록 DB(SQLite)·업로드 파일·세션 키 — 백업 대상
+      # 업로드 파일·세션 키(와 예전 SQLite 기록) — 백업 대상
       - ./data:/app/data
 
   # app 앞단 TLS 리버스 프록시 (선택). certs/server.crt·server.key 필요.
@@ -83,3 +116,6 @@ services:
       - ./deploy/nginx.conf:/etc/nginx/conf.d/default.conf:ro
       - ./certs/server.crt:/etc/nginx/certs/server.crt:ro
       - ./certs/server.key:/etc/nginx/certs/server.key:ro
+
+volumes:
+  exec_pgdata:   # exec-db 데이터 — `docker compose down -v` 를 하면 지워지니 주의
