@@ -29,6 +29,17 @@ def person_form(prefix: str):
 def layout(**_):
     return html.Div([
         dcc.Store(id='pl-refresh', data=0),
+        dcc.Store(id='ps-plan'),
+        dbc.Modal([
+            dbc.ModalHeader(dbc.ModalTitle('People in SAIT 변경 제안')),
+            dbc.ModalBody(_plan_layout()),
+            dbc.ModalFooter([
+                html.Span('고른 것만 반영합니다. 고르지 않은 덮어쓰기는 지금 값을 유지하고 다음에 기본 해제로 제안합니다.',
+                          className='small text-muted me-auto'),
+                dbc.Button('취소', id='ps-cancel', color='secondary', outline=True),
+                dbc.Button('선택 반영', id='ps-apply', color='primary'),
+            ]),
+        ], id='ps-modal', is_open=False, size='lg', scrollable=True),
         dcc.Location(id='pl-redirect', refresh='callback-nav'),
         dbc.Modal([
             dbc.ModalHeader(dbc.ModalTitle('임원 추가')),
@@ -48,7 +59,7 @@ def layout(**_):
                                        disabled=not people_sync.is_available(),
                                        title='People in SAIT 인사 정보에서 직급이 임원(' +
                                              '/'.join(people_sync.exec_positions()) + ')인 사람의 이름·직위·소속을 '
-                                             '가져옵니다. 별칭·메모·기록은 그대로 둡니다.'), md=4),
+                                             '비교해 추가·변경할 것을 제안합니다. 고른 것만 반영하고 별칭·메모·기록은 그대로 둡니다.'), md=4),
                     dbc.Col(dbc.Button([html.I(className='bi bi-person-plus me-1'), '직접 추가'], id='pn-open',
                                        color='primary', className='w-100'), md=2),
                 ], className='g-2 mb-2'),
@@ -113,25 +124,73 @@ def add_person(_o, _c, _s, name, position, org, aliases, note):
     return False, '', False, f"/people/{p['id']}", nu, nu, nu, nu, nu
 
 
-@callback(Output('pl-sync-msg', 'children'), Output('pl-sync-msg', 'is_open'), Output('pl-sync-msg', 'color'),
+_PLAN_KINDS = [('add', '새 임원 추가'), ('link', '직접 등록한 임원에 사번 연결'), ('set', '정보 변경 — 덮어쓸지')]
+_PLAN_HINTS = {'add': "'성+직위' 별칭(예: 김부사장)도 함께 넣습니다",
+               'link': '연결해야 아래 정보 변경도 반영됩니다',
+               'set': '왼쪽이 지금 값, 오른쪽이 People in SAIT 값'}
+
+
+def _plan_layout():
+    """제안 창 내용 — 체크 목록은 콜백 State 로 읽으므로 처음부터 자리를 만들어 둔다."""
+    return [
+        html.Div(id='ps-head', className='mb-3'),
+        *[html.Div([
+            html.Div([html.Span(id=f'ps-title-{kind}', className='fw-semibold me-2'),
+                      html.Span(_PLAN_HINTS[kind], className='small text-muted')], className='mb-1'),
+            dbc.Checklist(id=f'ps-{kind}', options=[], value=[], className='ms-2'),
+        ], id=f'ps-group-{kind}', className='mb-3') for kind, _ in _PLAN_KINDS],
+        dbc.Alert(id='ps-missing', color='warning', is_open=False, className='small py-2 mb-0'),
+    ]
+
+
+def _plan_view(plan: dict) -> list:
+    """제안을 화면 값으로: 머리말, 종류별 (보이기, 제목, 옵션, 기본 선택), 빠진 임원 경고."""
+    items, keys = plan['items'], set(people_sync.default_keys(plan))
+    out = [f"People in SAIT 임원 {plan['total']}명 확인 — 제안 {len(items)}건, 변동 없음 {plan['unchanged']}명"
+           + ('' if items else ' · 반영할 변경이 없습니다.')]
+    for kind, title in _PLAN_KINDS:
+        opts = [{'label': i['label'], 'value': i['key']} for i in items if i['kind'] == kind]
+        out += [None if opts else {'display': 'none'}, f'{title} ({len(opts)})', opts,
+                [o['value'] for o in opts if o['value'] in keys]]
+    missing = plan['missing']
+    out += [['People in SAIT 최신 인원에 없는 임원(퇴임·이동?): ', ', '.join(missing),
+             ' — 더 추적하지 않으려면 임원 화면에서 "추적 중지"'] if missing else '', bool(missing)]
+    return out
+
+
+_PLAN_OUTPUTS = [Output('ps-head', 'children')] + [
+    o for kind, _ in _PLAN_KINDS for o in (Output(f'ps-group-{kind}', 'style'), Output(f'ps-title-{kind}', 'children'),
+                                           Output(f'ps-{kind}', 'options'), Output(f'ps-{kind}', 'value'))
+] + [Output('ps-missing', 'children'), Output('ps-missing', 'is_open')]
+
+
+@callback(Output('ps-modal', 'is_open'), Output('ps-plan', 'data'), Output('ps-apply', 'disabled'), *_PLAN_OUTPUTS,
+          Output('pl-sync-msg', 'children'), Output('pl-sync-msg', 'is_open'), Output('pl-sync-msg', 'color'),
           Output('pl-refresh', 'data', allow_duplicate=True),
-          Input('pl-sync', 'n_clicks'), State('pl-refresh', 'data'), prevent_initial_call=True)
-def sync_from_people_in_sait(n_clicks, n):
-    if not n_clicks:
-        return no_update, no_update, no_update, no_update
-    try:
-        r = people_sync.sync_people()
-    except people_sync.SyncError as e:
-        return str(e), True, 'danger', no_update
-    lines = [html.Div(f"People in SAIT 임원 {r['total']}명 확인 — 새로 추가 {len(r['added'])}명, "
-                      f"정보 갱신 {len(r['updated'])}명, 기존 등록과 연결 {len(r['linked'])}명, 변동 없음 {r['unchanged']}명")]
-    if r['added']:
-        lines.append(html.Div('추가: ' + ', '.join(r['added'])))
-    if r['updated']:
-        lines.append(html.Div('갱신: ' + ', '.join(r['updated'])))
-    if r['linked']:
-        lines.append(html.Div('연결: ' + ', '.join(r['linked'])))
-    if r['missing']:
-        lines.append(html.Div(['People in SAIT 최신 인원에 없는 임원(퇴임·이동?): ', ', '.join(r['missing']),
-                               ' — 더 추적하지 않으려면 임원 화면에서 "추적 중지"']))
-    return lines, True, 'warning' if r['missing'] else 'success', (n or 0) + 1
+          Input('pl-sync', 'n_clicks'), Input('ps-cancel', 'n_clicks'), Input('ps-apply', 'n_clicks'),
+          State('ps-plan', 'data'), State('ps-add', 'value'), State('ps-link', 'value'), State('ps-set', 'value'),
+          State('pl-refresh', 'data'), prevent_initial_call=True)
+def sync_from_people_in_sait(n_sync, _c, n_apply, plan, add, link, set_, n):
+    nu = no_update
+    keep = (nu,) * len(_PLAN_OUTPUTS)
+    trig = ctx.triggered_id
+    if trig is None or not ctx.triggered[0]['value']:
+        return (nu,) * 3 + keep + (nu,) * 4
+    if trig == 'ps-cancel':
+        return (False, None, nu) + keep + (nu,) * 4
+    if trig == 'pl-sync':
+        try:
+            plan = people_sync.plan_sync()
+        except people_sync.SyncError as e:
+            return (nu,) * 3 + keep + (str(e), True, 'danger', nu)
+        return (True, plan, not plan['items'], *_plan_view(plan), nu, False, nu, nu)
+    if trig != 'ps-apply' or not plan:
+        return (nu,) * 3 + keep + (nu,) * 4
+    r = people_sync.apply_sync(plan, [*(add or []), *(link or []), *(set_ or [])])
+    lines = [html.Div(f"반영 완료 — 추가 {len(r['added'])}명, 연결 {len(r['linked'])}명, 정보 갱신 {len(r['updated'])}명, "
+                      f"유지 {len(r['kept'])}건")]
+    for label, key in (('추가', 'added'), ('연결', 'linked'), ('갱신', 'updated'), ('유지', 'kept'),
+                       ('건너뜀(그 사이 바뀜)', 'skipped')):
+        if r[key]:
+            lines.append(html.Div(f'{label}: ' + ', '.join(r[key])))
+    return (False, None, nu) + keep + (lines, True, 'success', (n or 0) + 1)

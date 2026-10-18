@@ -69,7 +69,7 @@ def test_sync_adds_with_title_aliases_and_preserves_local_fields(env):
     _researchers(env, [('E001', '김영수', '미래전략실', 'D09', '사장', '', '', '재직', '2026', '10', 'Y')]
                  + [r for r in ROWS if r[0] != 'E001'])
     r = people_sync.sync_people()
-    assert r['added'] == [] and r['updated'] == ['김영수 (position, org)'] and r['unchanged'] == 6
+    assert r['added'] == [] and r['updated'] == ['김영수 (직위, 소속)'] and r['unchanged'] == 6
     p = store.get_person(by_name['김영수']['id'])
     assert (p['position'], p['org'], p['aliases'], p['note']) == ('사장', '미래전략실', ['김부사장', '전략실장'],
                                                                   '해외 경험 많음')
@@ -121,3 +121,59 @@ def test_people_in_sait_db_is_read_only(env):
     assert set(inspect(eng).get_table_names()) == before
     with eng.connect() as c:
         assert c.execute(text('SELECT COUNT(*) FROM researchers')).scalar() == len(ROWS)
+
+
+def _keys(plan, kind=None):
+    return [i['key'] for i in plan['items'] if kind is None or i['kind'] == kind]
+
+
+def test_plan_only_proposes_and_apply_takes_selected(env):
+    people_sync.sync_people()
+    by_name = {p['name']: p for p in store.list_people()}
+    _researchers(env, [('E001', '김영수', '미래전략실', 'D09', '사장', '', '', '재직', '2026', '10', 'Y'),
+                       ('E010', '신임원', '경영지원', 'D03', '상무', '', '', '재직', '2026', '10', 'Y')]
+                 + [r for r in ROWS if r[0] != 'E001'])
+    plan = people_sync.plan_sync()
+    assert sorted(_keys(plan)) == ['add:E010', 'set:E001:org', 'set:E001:position']
+    labels = {i['key']: i['label'] for i in plan['items']}
+    assert labels['set:E001:position'] == '김영수 직위: 부사장 → 사장'
+    assert store.get_person(by_name['김영수']['id'])['position'] == '부사장'  # 제안만으로는 안 바뀐다
+
+    # 직위만 덮어쓰고 소속은 유지, 새 임원은 추가하지 않음
+    r = people_sync.apply_sync(plan, ['set:E001:position'])
+    assert r['updated'] == ['김영수 (직위)'] and r['kept'] == ['김영수 소속'] and r['added'] == []
+    p = store.get_person(by_name['김영수']['id'])
+    assert (p['position'], p['org']) == ('사장', '전략기획실')
+
+    # 다음 제안: 유지한 소속은 '지난번에 유지함'으로 기본 해제, 추가 제안은 여전히 나온다
+    plan = people_sync.plan_sync()
+    kept = [i for i in plan['items'] if i['kind'] == 'set']
+    assert len(kept) == 1 and kept[0]['kept'] and '지난번에 유지함' in kept[0]['label']
+    assert people_sync.default_keys(plan) == ['add:E010']
+
+    # People in SAIT 값이 또 바뀌면 다시 기본 선택
+    _researchers(env, [('E001', '김영수', '신사업실', 'D09', '사장', '', '', '재직', '2026', '11', 'Y')]
+                 + [r for r in ROWS if r[0] != 'E001'])
+    plan = people_sync.plan_sync()
+    assert 'set:E001:org' in people_sync.default_keys(plan)
+
+
+def test_link_is_a_proposal_and_its_changes_need_it(env):
+    mine = store.create_person('이민정', '전무', aliases='이상무')
+    plan = people_sync.plan_sync()
+    assert {'link:E002', 'set:E002:position', 'set:E002:org'} <= set(_keys(plan))
+    # 연결을 고르지 않으면 변경도 반영되지 않는다
+    people_sync.apply_sync(plan, ['set:E002:position'])
+    assert store.get_person(mine['id'])['source_id'] == ''
+    plan = people_sync.plan_sync()
+    r = people_sync.apply_sync(plan, ['link:E002', 'set:E002:position'])
+    p = store.get_person(mine['id'])
+    assert r['linked'] == ['이민정'] and (p['source_id'], p['position'], p['org']) == ('E002', '상무', '')
+
+
+def test_apply_skips_stale_proposals():
+    plan = people_sync.plan_sync()
+    people_sync.apply_sync(plan, _keys(plan, 'add'))
+    r = people_sync.apply_sync(plan, _keys(plan, 'add'))  # 같은 제안을 두 번 반영해도 중복 추가 없음
+    assert r['added'] == [] and len(r['skipped']) == 7
+    assert len(store.list_people()) == 7

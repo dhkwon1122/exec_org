@@ -130,6 +130,8 @@ class Person(Base):
     # People in SAIT(researchers 테이블)에서 불러온 임원이면 그 사번(researcher_id). 직접 등록한 임원은 ''
     source_id = Column(String(50), default='', index=True)
     synced_at = Column(DateTime, nullable=True)  # 마지막으로 People in SAIT 정보로 갱신한 시각
+    # 불러오기에서 덮어쓰지 않고 유지하기로 한 People in SAIT 값 (JSON {필드: 그때의 값}) — 다음 제안에서 기본 해제
+    sync_skip = Column(Text, default='')
     created_at = Column(DateTime, default=_now)
     updated_at = Column(DateTime, default=_now, onupdate=_now)
 
