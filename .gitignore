@@ -4,6 +4,7 @@ __pycache__/
 .env
 .pytest_cache/
 data/
+backups/
 certs/*.crt
 certs/*.pem
 certs/*.key

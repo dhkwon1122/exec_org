@@ -3,7 +3,7 @@
     docker compose exec app python scripts/sync_people.py
 
 정기 갱신이 필요하면 서버 cron 에 위 명령을 걸어 둔다 (예: 매주 월요일 아침).
-임원 범위는 .env 의 EXEC_ORG_POSITIONS (기본: 사장,부사장,상무,고문).
+임원 범위는 .env 의 EXEC_ORG_POSITIONS (기본: 사장,부사장,상무,고문,Master,Fellow).
 """
 import os
 import sys

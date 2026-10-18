@@ -1,7 +1,7 @@
 """DB 연결과 테이블 정의.
 
-기본은 프로젝트 안의 SQLite 파일(data/exec_org.db)이고, EXEC_ORG_DATABASE_URL 환경변수가
-있으면 그 DB(PostgreSQL 등)를 쓴다. (DATABASE_URL 은 tea-meeting-agenda 처럼 People in SAIT
+EXEC_ORG_DATABASE_URL 환경변수의 DB 를 쓴다 — Docker 운영은 docker-compose.yml 의 이 앱 전용
+PostgreSQL(exec-db). 없으면(개발·테스트) 프로젝트 안의 SQLite 파일(data/exec_org.db). (DATABASE_URL 은 tea-meeting-agenda 처럼 People in SAIT
 사용자 DB 를 가리키므로 업무 기록 DB 로는 쓰지 않는다 — services/users.py) 테이블은 앱 시작 시 없으면 자동 생성한다.
 
 테이블 구성
@@ -15,6 +15,7 @@
 - history_people : 이력 ↔ 임원 연결 (한 이력에 여러 임원). 업무 없이 임원에만 연결된 이력(동향)도 있다
 - todos          : 할 일 (업무에 속하거나 단독). 이력 원문에서 AI 가 뽑은 제안을 추가할 수 있음
 """
+import logging
 import os
 import time
 from datetime import datetime
@@ -254,7 +255,24 @@ def _relax_not_null(engine):
                 conn.commit()
 
 
+def _legacy_sqlite_notice(engine):
+    """PostgreSQL 로 옮겼는데 예전 SQLite 기록이 남아 있고 새 DB 는 비어 있으면, 옮기는 방법을 로그로 알린다."""
+    legacy = os.path.join(DATA_DIR, 'exec_org.db')
+    if engine.dialect.name == 'sqlite' or not os.path.exists(legacy):
+        return
+    try:
+        with engine.connect() as conn:
+            empty = all(conn.execute(text(f'SELECT COUNT(*) FROM {t}')).scalar() == 0 for t in ('history', 'people'))
+    except Exception:  # noqa: BLE001
+        return
+    if empty:
+        logging.getLogger(__name__).warning(
+            '업무 기록 DB(PostgreSQL)가 비어 있고 예전 SQLite 기록(data/exec_org.db)이 있습니다. '
+            '옮기려면: docker compose exec app python scripts/migrate_to_postgres.py')
+
+
 engine = make_engine()
+_legacy_sqlite_notice(engine)
 SessionLocal = sessionmaker(bind=engine, expire_on_commit=False, future=True)
 
 

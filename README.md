@@ -40,9 +40,25 @@ Researcher-board(People in SAIT)와 같은 구성이다 — 사내 pip 저장소
 
 ```bash
 cp .env.example .env                  # DATABASE_URL = tea-meeting-agenda 의 .env 와 같은 값 (People in SAIT 사용자 DB)
+                                      # EXEC_DB_PASSWORD = 이 앱 전용 PostgreSQL 비밀번호 (openssl rand -hex 24)
 sudo scripts/fix_data_ownership.sh    # 처음 한 번: ./data 를 컨테이너 사용자 소유로 + 다른 사용자 접근 차단
 docker compose up -d --build          # http://<서버>:8502
 ```
+
+**업무 기록 DB — 이 앱 전용 PostgreSQL(`exec-db`)**
+
+- `docker compose up` 하면 `exec-db`(postgres:16) 컨테이너가 함께 뜨고, 업무 기록·임원 정보·할 일이 모두 여기에 저장된다.
+  People in SAIT DB 와는 별개다(그쪽은 로그인·임원 불러오기에 **읽기만**).
+- 데이터는 도커 볼륨 `exec_pgdata`에 있다. `docker compose down -v` 는 이 볼륨까지 지우니 쓰지 않는다.
+- 포트는 호스트의 `127.0.0.1:5434`(`EXEC_DB_PORT`)에만 열린다 — 서버 안에서 점검·백업용.
+- **예전 SQLite 기록 옮기기**(이전 버전에서 쓰던 `./data/exec_org.db`가 있으면 처음 한 번):
+  `docker compose exec app python scripts/migrate_to_postgres.py`
+  — id 그대로 옮기고 행 수를 대조한다. 대상에 기록이 있으면 멈추므로 두 번 실행해도 안전하고, 원본 파일은 지우지 않는다.
+  새 DB 가 비어 있는데 예전 파일이 있으면 앱 로그에 이 안내가 나온다.
+- **백업**: `scripts/backup_db.sh` → `./backups/exec_org_<시각>.dump` (30일 지난 것은 정리, `KEEP_DAYS`).
+  cron 에 걸어 둔다(예: `0 2 * * * cd /path/exec_org && scripts/backup_db.sh`).
+  복원: `docker compose exec -T exec-db pg_restore -U exec_org -d exec_org --clean --if-exists < backups/<파일>.dump`
+- 다른 PostgreSQL 서버를 쓰려면 `.env`에 `EXEC_ORG_DATABASE_URL`을 적는다(그 값이 우선).
 
 - 기본 운영은 **HTTP**(`http://<서버>:8502`)다. 로그인 쿠키의 Secure 속성은 접속 방식에 맞춰 자동으로 정해지므로
   HTTP 에서 따로 설정할 것이 없다. 쿠키 이름은 `exec_org_session`이라 같은 서버의 People in SAIT 로그인과 겹치지 않는다.
@@ -54,7 +70,7 @@ docker compose up -d --build          # http://<서버>:8502
 - People in SAIT 가 같은 서버에서 postgres 컨테이너(bundled-db)를 쓰면 그 네트워크에 붙인다:
   `docker compose -f docker-compose.yml -f docker-compose.people-net.yml up -d --build`
   (이때 `DATABASE_URL`의 호스트는 `db`)
-- 업무 기록·업로드 파일·세션 키는 모두 `./data`에 쌓인다 → **이 디렉터리를 백업**한다.
+- 업로드 파일·세션 키는 `./data`에 쌓인다 → DB 백업(`backups/`)과 함께 **이 디렉터리도 백업**한다.
 - 상태 확인: `curl http://localhost:8502/healthz`, 로그: `docker compose logs -f app`
 
 ### 직접 실행 (개발)
@@ -66,7 +82,7 @@ python app.py                # http://localhost:8050
 
 - 설정은 `.env.example` 참고. LLM 은 OpenAI 호환 `chat/completions` 엔드포인트(사내 vLLM 등)를 쓰며,
   `LLM_API_URL`(없으면 Researcher-board 의 `LLM2_API_URL`)이 비어 있으면 AI 기능만 꺼지고 나머지는 그대로 동작한다.
-- 기본 저장소는 `data/exec_org.db`(SQLite), 업로드 파일은 `data/uploads/`. `data/`는 형상관리에서 제외된다.
+- `EXEC_ORG_DATABASE_URL`이 없으면 저장소는 `data/exec_org.db`(SQLite — 개발·테스트용), 업로드 파일은 `data/uploads/`. `data/`는 형상관리에서 제외된다.
 - 업무 기록을 PostgreSQL 에 두려면 `EXEC_ORG_DATABASE_URL`을 지정한다 (`DATABASE_URL`은 사용자 DB). 테이블은 시작 시 자동 생성되고,
   이전 버전 DB 에 없는 컬럼은 자동으로 추가된다.
 
