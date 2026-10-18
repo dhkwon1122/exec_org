@@ -6,6 +6,7 @@
 """
 import calendar
 import json
+import math
 import os
 import re
 import uuid
@@ -784,12 +785,44 @@ def tasks_due_between(date_from: str, date_to: str) -> list[dict]:
 
 # ── 임원 ─────────────────────────────────────────────────────────────
 
+def _parse_day(v: str) -> date | None:
+    try:
+        return date.fromisoformat((v or '')[:10])
+    except ValueError:
+        return None
+
+
+def promotion_ref_date(today: date) -> date:
+    """연차 기준일 — Researcher-board(researcher_profile_export)와 같은 규칙: 2027-03-01부터 오늘을 지나지 않은 첫 3/1."""
+    ref = date(2027, 3, 1)
+    while ref < today:
+        ref = ref.replace(year=ref.year + 1)
+    return ref
+
+
+def hr_figures(birth_year: str, hire_date: str, promotion_date: str, today: date | None = None) -> dict:
+    """나이(올해 - 출생연도), 연차(승격일부터 연차 기준일까지 햇수, 최소 1 — People in SAIT 와 같은 계산),
+    근속(입사일부터 오늘까지 햇수, 소수 첫째 자리). 계산할 수 없으면 None."""
+    today = today or date.today()
+    age = today.year - int(birth_year) if (birth_year or '').isdigit() else None
+    promo, hire = _parse_day(promotion_date), _parse_day(hire_date)
+    years = max(1, math.floor((promotion_ref_date(today) - promo).days / 365 * 10) / 10) if promo else None
+    tenure = round((today - hire).days / 365, 1) if hire else None
+    return {'age': age, 'grade_years': int(years) if years is not None else None, 'tenure': tenure}
+
+
 def _person_dict(p: Person) -> dict:
+    hr = {'employment_status': p.employment_status or '', 'birth_year': p.birth_year or '',
+          'hire_date': p.hire_date or '', 'promotion_date': p.promotion_date or '', 'education': p.education or '',
+          'hr_state': p.hr_state or ''}
     return {
         'id': p.id, 'name': p.name, 'position': p.position or '', 'org': p.org or '',
         'aliases': _tags(p.aliases), 'note': p.note or '', 'active': bool(p.active),
         'source_id': p.source_id or '', 'synced_at': _dt(p.synced_at),
         'created_at': _dt(p.created_at), 'updated_at': _dt(p.updated_at),
+        **hr, **hr_figures(hr['birth_year'], hr['hire_date'], hr['promotion_date']),
+        # 재직 중 = People in SAIT 현재 임원, 또는 사번 없이 직접 등록해 추적 중인 임원
+        'employed': hr['hr_state'] == 'current' or (hr['hr_state'] == '' and bool(p.active)),
     }
 
 
@@ -861,8 +894,11 @@ def list_career(person_id: int) -> list[dict]:
                  'title': c.title or '', 'assignment': c.assignment or ''} for c in rows]
 
 
-def list_people(query: str = '', include_inactive: bool = False) -> list[dict]:
-    """임원 목록 + 연결된 기록 수·마지막 기록 일시. 최근에 기록된 사람이 위로."""
+def list_people(query: str = '', include_inactive: bool = False, employed_only: bool = False,
+                order: str = 'recent') -> list[dict]:
+    """임원 목록 + 연결된 기록 수·마지막 기록 일시.
+    employed_only: 재직 중인 임원만(퇴직·전출 제외 — 추적 중지 여부와 무관).
+    order: 'recent' 최근 기록된 사람이 위로 / 'rank' 직위 순(EXEC_ORG_POSITIONS) → 이름."""
     with db.SessionLocal() as s:
         stats = (select(HistoryPerson.person_id, func.count().label('n'),
                         func.max(HistoryEntry.occurred_at).label('last'))
@@ -874,9 +910,16 @@ def list_people(query: str = '', include_inactive: bool = False) -> list[dict]:
         for term in search_terms(query):
             like = f'%{term}%'
             stmt = stmt.where(or_(Person.name.like(like), Person.position.like(like), Person.org.like(like),
-                                  Person.aliases.like(like), Person.note.like(like)))
+                                  Person.aliases.like(like), Person.note.like(like), Person.source_id.like(like),
+                                  Person.education.like(like)))
         rows = [{**_person_dict(p), 'count': n or 0, 'last_at': _dt(last) if last else ''}
                 for p, n, last in s.execute(stmt)]
+    if employed_only:
+        rows = [r for r in rows if r['employed']]
+    if order == 'rank':
+        from services.people_sync import exec_positions
+        rank = {x.lower(): i for i, x in enumerate(exec_positions())}
+        return sorted(rows, key=lambda r: (not r['employed'], rank.get(r['position'].lower(), len(rank)), r['name']))
     # 최근 기록 순, 기록 없는 사람은 뒤에서 이름순
     recent = sorted([r for r in rows if r['last_at']], key=lambda r: r['last_at'], reverse=True)
     return recent + sorted([r for r in rows if not r['last_at']], key=lambda r: r['name'])

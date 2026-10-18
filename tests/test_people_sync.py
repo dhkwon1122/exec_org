@@ -5,7 +5,8 @@ from services import db, people_sync, store, users
 
 
 COLS = ['researcher_id', 'name', 'department', 'org_code', 'position', 'job_function', 'knox_id',
-        'employment_status', 'valid_year', 'valid_month', 'is_current']
+        'employment_status', 'valid_year', 'valid_month', 'is_current', 'birth_year', 'hire_date', 'promotion_date']
+HR = {'E001': ('1968', '1995-03-01', '2023-01-01'), 'E006': ('1972.0', '2001-07-01', '2024-01-01')}
 ORDER_COLS = ['researcher_id', 'order_date', 'order_name', 'order_dep', 'order_cl', 'order_assignment']
 
 
@@ -15,6 +16,8 @@ def _text_table(path, name, cols, rows):
         c.execute(text(f'DROP TABLE IF EXISTS {name}'))
         c.execute(text(f'CREATE TABLE {name} (' + ', '.join(f'{col} TEXT' for col in cols) + ')'))
         if rows:
+            if name in ('researchers', 'researchers_history'):  # 인사 정보 열은 HR 에 있는 사번만 채움
+                rows = [tuple(r) + HR.get(r[0], ('', '', ''))[len(r) - 11:] for r in rows]
             c.execute(text(f"INSERT INTO {name} VALUES ({', '.join(':' + col for col in cols)})"),
                       [dict(zip(cols, r)) for r in rows])
 
@@ -253,3 +256,59 @@ def test_career_for_manually_linked_and_missing_tables(env):
     store.delete_person(mine['id'])  # 임원을 지우면 경력 이력도 같이
     with db.SessionLocal() as s:
         assert s.query(db.PersonCareer).count() == 0
+
+
+EDU_COLS = ['researcher_id', 'degree', 'school', 'major', 'graduation_year']
+
+
+def test_hr_fields_fill_and_propose(env):
+    _text_table(env, 'education', EDU_COLS, [('E001', '석사', 'KAIST', '전자공학', '1995'),
+                                             ('E001', '박사', 'KAIST', '전자공학', '1999'),
+                                             ('E001', '학사', '서울대학교', '전자공학', '1993')])
+    people_sync.sync_people()
+    kim = next(p for p in store.list_people() if p['name'] == '김영수')
+    assert (kim['birth_year'], kim['hire_date'], kim['promotion_date'], kim['education'], kim['employment_status']) == (
+        '1968', '1995-03-01', '2023-01-01', '박)KAIST 전자공학', '재직')
+    assert kim['hr_state'] == 'current' and kim['employed'] and kim['age'] is not None
+    han = next(p for p in store.list_people() if p['name'] == '한수진')
+    assert han['birth_year'] == '1972'  # pandas 가 남긴 '1972.0' 정리
+
+    # 직접 등록 후 연결된 사람은 빈 인사 정보를 제안 없이 채운다
+    lee = store.list_people(query='이민정')[0]
+    with db.SessionLocal() as s:
+        p = s.get(db.Person, lee['id'])
+        p.employment_status = p.hire_date = ''
+        s.commit()
+    plan = people_sync.plan_sync()
+    assert [i['key'] for i in people_sync.proposals(plan)] == []
+    assert {i['key'] for i in plan['items'] if i.get('auto')} == {'set:E002:employment_status'}
+    people_sync.apply_sync(plan, [])
+    assert store.get_person(lee['id'])['employment_status'] == '재직'
+
+    # 값이 있는데 바뀌면 덮어쓸지 제안 (휴직)
+    _researchers(env, [('E001', '김영수', '전략기획실', 'D01', '부사장', '', '', '휴직', '2026', '9', 'Y')]
+                 + [r for r in ROWS if r[0] != 'E001'])
+    plan = people_sync.plan_sync()
+    assert [i['label'] for i in people_sync.proposals(plan)] == ['김영수 재직상태: 재직 → 휴직']
+
+
+def test_list_employed_only_and_rank_order(env):
+    people_sync.sync_people()
+    store.create_person('최수동', '상무')  # 직접 등록(사번 없음) — 추적 중이면 재직으로 본다
+    names = [p['name'] for p in store.list_people(include_inactive=True, employed_only=True, order='rank')]
+    assert names[:2] == ['박철호', '김영수'] and '정퇴임' not in names and '최수동' in names
+    assert names[-2:] == ['한수진', '오민석']  # Master·Fellow 는 설정 순서대로 뒤
+    # 현재 목록에서 빠지면 퇴직·전출로 — 기본 목록에서 빠지고 전체 조회에만
+    _researchers(env, [r for r in ROWS if r[0] != 'E002'])
+    people_sync.sync_people()
+    emp = [p['name'] for p in store.list_people(include_inactive=True, employed_only=True)]
+    every = {p['name']: p for p in store.list_people(include_inactive=True)}
+    assert '이민정' not in emp and every['이민정']['hr_state'] == 'former' and every['이민정']['active']
+    assert store.list_people(query='E001')[0]['name'] == '김영수'  # 사번 검색
+
+
+def test_hr_figures():
+    from datetime import date
+    f = store.hr_figures('1968', '1995-03-01', '2023-01-01', today=date(2026, 10, 18))
+    assert f == {'age': 58, 'grade_years': 4, 'tenure': 31.7}  # 연차 기준일 2027-03-01
+    assert store.hr_figures('', 'x', '', today=date(2026, 10, 18)) == {'age': None, 'grade_years': None, 'tenure': None}

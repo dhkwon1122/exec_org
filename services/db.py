@@ -131,6 +131,15 @@ class Person(Base):
     # People in SAIT(researchers 테이블)에서 불러온 임원이면 그 사번(researcher_id). 직접 등록한 임원은 ''
     source_id = Column(String(50), default='', index=True)
     synced_at = Column(DateTime, nullable=True)  # 마지막으로 People in SAIT 정보로 갱신한 시각
+    # People in SAIT 인사 정보 (불러오기 때 비어 있으면 채우고, 다르면 덮어쓸지 제안). 나이·연차·근속은 화면에서 계산
+    employment_status = Column(String(50), default='')  # 재직상태 (재직/휴직 등)
+    birth_year = Column(String(10), default='')
+    hire_date = Column(String(10), default='')  # 입사일(그룹입사일) YYYY-MM-DD
+    promotion_date = Column(String(10), default='')  # 승격 기준일 — 연차 계산용
+    education = Column(String(300), default='')  # 최종학력 '박)○○대학교 전공'
+    # 'current' = 최근 불러오기 때 People in SAIT 현재 임원, 'former' = 퇴직·전출 등으로 빠진(과거) 임원,
+    # '' = 직접 등록(사번 없음) — 임원 목록 기본 화면은 current 와 직접 등록한 추적 중 임원만 보인다
+    hr_state = Column(String(10), default='')
     # 불러오기에서 덮어쓰지 않고 유지하기로 한 People in SAIT 값 (JSON {필드: 그때의 값}) — 다음 제안에서 기본 해제
     sync_skip = Column(Text, default='')
     created_at = Column(DateTime, default=_now)

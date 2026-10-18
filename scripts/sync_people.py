@@ -27,9 +27,9 @@ def main(argv=None) -> int:
     except people_sync.SyncError as e:
         print(f'✗ {e}')
         return 1
-    print(f"People in SAIT 현재 임원 {plan['total']}명·과거 임원 {plan['past_total']}명: 제안 {len(plan['items'])}건, "
+    print(f"People in SAIT 현재 임원 {plan['total']}명·과거 임원 {plan['past_total']}명: 제안 {len(people_sync.proposals(plan))}건, "
           f"변동 없음 {plan['unchanged']}명, 새 경력 이력 {plan['career_new']}건")
-    for it in plan['items']:
+    for it in people_sync.proposals(plan):
         print(f"  [{KINDS[it['kind']]}] {it['label']}")
     if plan['missing']:
         print('  최신 인원에 없음: ' + ', '.join(plan['missing']))

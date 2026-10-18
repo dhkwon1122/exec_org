@@ -108,11 +108,20 @@ def _is_exec(t: Table, canon: dict):
     return func.lower(func.trim(t.c.position)).in_(list(canon))
 
 
+def _clean(v) -> str:
+    v = _s(v)
+    if v.lower() in ('nan', 'none', 'nat'):
+        return ''
+    return v[:-2] if v.endswith('.0') and v[:-2].isdigit() else v
+
+
 def _person_row(r: dict, canon: dict) -> dict:
     pos = _s(r.get('position'))
     return {'source_id': _s(r.get('researcher_id')), 'name': _s(r.get('name')),
             'position': canon.get(pos.lower(), pos), 'org': _s(r.get('department') or r.get('org_code')),
-            'employment_status': _s(r.get('employment_status'))}
+            'employment_status': _clean(r.get('employment_status')), 'birth_year': _clean(r.get('birth_year'))[:4],
+            'hire_date': _clean(r.get('hire_date'))[:10], 'promotion_date': _clean(r.get('promotion_date'))[:10],
+            'education': ''}
 
 
 def _sort_execs(execs, canon):
@@ -131,7 +140,8 @@ def _fetch(engine) -> tuple[list[dict], list[dict]]:
     if not need <= set(t.c.keys()):
         raise SyncError(f'researchers 테이블에 필요한 컬럼이 없습니다: {sorted(need - set(t.c.keys()))}')
     canon = _canonical_positions()
-    base = ('researcher_id', 'name', 'position', 'department', 'org_code', 'employment_status')
+    base = ('researcher_id', 'name', 'position', 'department', 'org_code', 'employment_status', 'birth_year',
+            'hire_date', 'promotion_date')
     rows = _rows(engine, select(*_cols(t, *base, 'is_current', 'valid_year', 'valid_month'))
                  .where(_is_exec(t, canon)))
     current, past = {}, {}
@@ -154,7 +164,37 @@ def _fetch(engine) -> tuple[list[dict], list[dict]]:
                 past[e['source_id']] = {**e, 'until': '%04d-%02d' % _ym(r) if _ym(r)[0] else ''}
     for sid in current:
         past.pop(sid, None)
+    edu = _fetch_education(engine, [*current, *past])
+    for e in [*current.values(), *past.values()]:
+        e['education'] = edu.get(e['source_id'], '')
     return _sort_execs(current.values(), canon), _sort_execs(past.values(), canon)
+
+
+DEGREES = {'박사': '박', '석사': '석', '학사': '학', '전문대': '전', '고교': '고'}  # 높은 학위부터
+
+
+def _fetch_education(engine, sids) -> dict[str, str]:
+    """사번별 최종학력 한 줄 — Researcher-board 프로필과 같은 표기('박)○○대학교 전공', 고교는 전공 없이)."""
+    t = _table(engine, 'education')
+    if t is None or not {'researcher_id', 'degree'} <= set(t.c.keys()):
+        return {}
+    best: dict[str, tuple[int, dict]] = {}
+    order = list(DEGREES)
+    for part in _chunks(sorted(set(sids))):
+        for r in _rows(engine, select(*_cols(t, 'researcher_id', 'degree', 'school', 'major'))
+                       .where(t.c.researcher_id.in_(part))):
+            deg = _s(r.get('degree'))
+            if deg not in DEGREES:
+                continue
+            sid = _s(r['researcher_id'])
+            if sid not in best or order.index(deg) < best[sid][0]:
+                best[sid] = (order.index(deg), r)
+    out = {}
+    for sid, (i, r) in best.items():
+        deg = order[i]
+        school, major = _clean(r.get('school')) or '-', _clean(r.get('major')) or '-'
+        out[sid] = f'{DEGREES[deg]}){school}' if deg == '고교' else f'{DEGREES[deg]}){school} {major}'
+    return out
 
 
 def _chunks(seq, n=500):
@@ -244,6 +284,10 @@ def _title_aliases(execs: list[dict]) -> dict[str, list[str]]:
 
 
 FIELDS = {'name': '이름', 'position': '직위', 'org': '소속'}
+# 인사 정보 — 비어 있으면 제안 없이 채우고(auto), 값이 있는데 다르면 덮어쓸지 제안
+HR_FIELDS = {'employment_status': '재직상태', 'birth_year': '출생연도', 'hire_date': '입사일',
+             'promotion_date': '승격일', 'education': '최종학력'}
+ALL_FIELDS = {**FIELDS, **HR_FIELDS}
 
 
 def _skip_of(p: Person) -> dict:
@@ -301,23 +345,33 @@ def plan_sync() -> dict:
             if is_past:
                 items.append({'key': f'past:{sid}', 'kind': 'past', 'source_id': sid, 'name': e['name'],
                               'position': e['position'], 'org': e['org'], 'aliases': past_aliases[sid],
+                              'hr': {f: e[f] for f in HR_FIELDS},
                               'label': info + (f" ({e['until']}까지)" if e.get('until') else '')})
             else:
                 items.append({'key': f'add:{sid}', 'kind': 'add', 'source_id': sid, 'name': e['name'],
-                              'position': e['position'], 'org': e['org'], 'aliases': aliases[sid], 'label': info})
-            continue
-        if is_past:  # 과거 값으로 덮어쓰지는 않는다
+                              'position': e['position'], 'org': e['org'], 'aliases': aliases[sid],
+                              'hr': {f: e[f] for f in HR_FIELDS}, 'label': info})
             continue
         skip = _skip_of(p)
-        diffs = [f for f in FIELDS if (getattr(p, f) or '') != e[f]]
+        diffs = []
+        for f in ALL_FIELDS:
+            old, new = getattr(p, f) or '', e[f]
+            if old == new or (f in HR_FIELDS and not new):
+                continue
+            if f in HR_FIELDS and not old:  # 빈 칸 채우기 — 제안 없이 반영
+                items.append({'key': f'set:{sid}:{f}', 'kind': 'set', 'source_id': sid, 'person_id': p.id,
+                              'name': p.name, 'field': f, 'old': old, 'new': new, 'auto': True,
+                              'label': f"{p.name} {ALL_FIELDS[f]}: {new}"})
+            elif not is_past:  # 과거 임원은 예전 값으로 덮어쓰지 않는다
+                diffs.append(f)
         for f in diffs:
             old, new = getattr(p, f) or '', e[f]
             kept = skip.get(f) == new
             items.append({'key': f'set:{sid}:{f}', 'kind': 'set', 'source_id': sid, 'person_id': p.id,
                           'name': p.name, 'field': f, 'old': old, 'new': new, 'kept': kept,
-                          'label': f"{p.name} {FIELDS[f]}: {old or '(없음)'} → {new or '(없음)'}"
+                          'label': f"{p.name} {ALL_FIELDS[f]}: {old or '(없음)'} → {new or '(없음)'}"
                                    + (' (지난번에 유지함)' if kept else '')})
-        if not diffs and p.source_id == sid:
+        if not diffs and p.source_id == sid and not is_past:
             unchanged += 1
     seen = {e['source_id'] for e in execs}
     missing = [f'{p.name} {p.position}'.strip() for p in people
@@ -329,6 +383,11 @@ def plan_sync() -> dict:
 def default_keys(plan: dict) -> list[str]:
     """기본으로 고를 제안 — 지난번에 유지하기로 한 덮어쓰기만 빼고 전부."""
     return [i['key'] for i in plan['items'] if not i.get('kept')]
+
+
+def proposals(plan: dict) -> list[dict]:
+    """사람이 고를 제안만 (빈 칸 채우기 auto 는 빼고)."""
+    return [i for i in plan['items'] if not i.get('auto')]
 
 
 _KIND_ORDER = ('add', 'past', 'link', 'set')
@@ -356,8 +415,10 @@ def apply_sync(plan: dict, keys) -> dict:
                 if sid in sources:
                     skipped.append(it['name'])
                     continue
+                hr = {f: str(v) for f, v in (it.get('hr') or {}).items() if f in HR_FIELDS}
                 s.add(Person(name=it['name'], position=it['position'], org=it['org'], source_id=sid,
-                             aliases=', '.join(it['aliases']), synced_at=now, active=it['kind'] == 'add'))
+                             aliases=', '.join(it['aliases']), synced_at=now, active=it['kind'] == 'add',
+                             hr_state='current' if it['kind'] == 'add' else 'former', **hr))
                 sources.add(sid)
                 (added if it['kind'] == 'add' else past_added).append(it['name'])
             elif it['kind'] == 'link':
@@ -370,9 +431,13 @@ def apply_sync(plan: dict, keys) -> dict:
                 p.source_id, p.synced_at = sid, now
                 sources.add(sid)
                 linked.append(it['name'])
-            elif it['kind'] == 'set' and it.get('field') in FIELDS:
+            elif it['kind'] == 'set' and it.get('field') in ALL_FIELDS:
                 p = s.get(Person, it['person_id'])
                 if p is None or p.source_id != sid:  # 연결을 고르지 않았거나 그 사이 바뀜
+                    continue
+                if it.get('auto'):
+                    if not (getattr(p, it['field']) or ''):
+                        setattr(p, it['field'], str(it['new']))
                     continue
                 skip = _skip_of(p)
                 if chosen:
@@ -380,10 +445,10 @@ def apply_sync(plan: dict, keys) -> dict:
                         continue
                     setattr(p, it['field'], it['new'])
                     skip.pop(it['field'], None)
-                    changed_fields.setdefault(p.id, []).append(FIELDS[it['field']])
+                    changed_fields.setdefault(p.id, []).append(ALL_FIELDS[it['field']])
                 else:
                     skip[it['field']] = it['new']
-                    kept.append(f"{p.name} {FIELDS[it['field']]}")
+                    kept.append(f"{p.name} {ALL_FIELDS[it['field']]}")
                 p.sync_skip = json.dumps(skip, ensure_ascii=False) if skip else ''
         s.flush()
         people = list(s.scalars(select(Person)))
@@ -393,6 +458,8 @@ def apply_sync(plan: dict, keys) -> dict:
         for p in people:
             if p.source_id and p.source_id in seen:
                 p.synced_at = now  # People in SAIT 값과 대조를 마친 시각
+            if p.source_id and seen:  # 현재 임원 목록에 있으면 재직, 빠졌으면 퇴직·전출
+                p.hr_state = 'current' if p.source_id in seen else 'former'
             if p.id in changed_fields:
                 updated.append(f"{p.name} ({', '.join(changed_fields[p.id])})")
             have = existing.get(p.id, set())
