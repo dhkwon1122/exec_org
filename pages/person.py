@@ -76,8 +76,9 @@ def render(_, _h, _t, pid):
                        outline=True, size='sm'),
         ], className='d-flex align-items-center flex-wrap gap-1 mb-1'),
         html.Div(p['org'], className='text-muted') if p['org'] else None,
+        _hr_line(p),
         html.Div([dbc.Badge('People in SAIT', color='info', className='me-1'),
-                  f"사번 {p['source_id']} · 이름·직위·소속은 불러오기 때마다 People in SAIT 값으로 갱신 "
+                  "불러오기 때 People in SAIT 값과 비교해 바뀐 점을 제안하고 경력 이력을 쌓음 "
                   f"(최근 {p['synced_at'][:10]})"], className='small text-muted')
         if p['source_id'] else None,
         html.Div('별칭: ' + ', '.join(p['aliases']), className='small text-muted') if p['aliases'] else None,
@@ -104,6 +105,7 @@ def render(_, _h, _t, pid):
                          className='badge rounded-pill text-bg-light border text-decoration-none me-1 mb-1')
                 for k, n in kw]) if kw else html.Div('없음', className='small text-muted')),
         ], className='mb-3'),
+        _career_card(store.list_career(pid)),
         dbc.Card([
             dbc.CardHeader(f'관련 업무 ({len(tasks)})', className='small'),
             dbc.ListGroup([dbc.ListGroupItem(dcc.Link(f'#{tid} {title}', href=f'/task/{tid}'), className='small')
@@ -114,6 +116,47 @@ def render(_, _h, _t, pid):
     task_opts = [{'label': f"#{t['id']} {t['title']}", 'value': t['id']} for t in store.list_tasks()]
     pending = sorted(h['id'] for h in hist if h['ai_status'] == 'pending')
     return header, timeline, count, side, task_opts, pending, not pending
+
+
+def _hr_line(p: dict):
+    """인사 정보 한 줄 — 사번·재직상태·연차·나이·최종학력·입사일·근속 (People in SAIT 에서 불러온 값)."""
+    parts = [
+        ('사번', p['source_id']),
+        ('재직상태', '퇴직·전출' if p['hr_state'] == 'former' else p['employment_status']),
+        ('연차', f"{p['grade_years']}년차" if p['grade_years'] is not None else ''),
+        ('나이', f"{p['age']}세 ({p['birth_year']}년생)" if p['age'] is not None else ''),
+        ('최종학력', p['education']),
+        ('입사일', p['hire_date']),
+        ('근속', f"{p['tenure']}년" if p['tenure'] is not None else ''),
+    ]
+    parts = [(k, v) for k, v in parts if v]
+    if not parts:
+        return None
+    return html.Div([html.Span([html.Span(k, className='text-muted me-1'), v], className='me-3 text-nowrap')
+                     for k, v in parts], className='small d-flex flex-wrap my-1')
+
+
+def _career_card(career: list[dict]):
+    """People in SAIT 에서 쌓은 경력 이력 — 직급·소속이 바뀐 달과 인사발령. 없으면 카드를 안 보인다."""
+    if not career:
+        return None
+    rows = []
+    for c in career:
+        if c['kind'] == '발령':
+            body = [html.Span(c['title'] or '발령', className='fw-semibold me-1'),
+                    ' · '.join(x for x in (c['org'], c['position'], c['assignment']) if x)]
+        else:
+            body = ' · '.join(x for x in (c['position'], c['org']) if x)
+        rows.append(dbc.ListGroupItem([
+            html.Div([html.Span(c['date'], className='text-muted me-2'),
+                      dbc.Badge(c['kind'], color='light', text_color='dark', className='border')],
+                     className='small'),
+            html.Div(body, className='small'),
+        ], className='py-1'))
+    return dbc.Card([
+        dbc.CardHeader(f'경력 이력 ({len(career)}) · People in SAIT', className='small'),
+        html.Div(dbc.ListGroup(rows, flush=True), style={'maxHeight': '360px', 'overflowY': 'auto'}),
+    ], className='mb-3')
 
 
 @callback(Output('pp-refresh', 'data', allow_duplicate=True), Input('pp-poll', 'n_intervals'),

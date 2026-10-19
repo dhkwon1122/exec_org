@@ -4,15 +4,26 @@ from sqlalchemy import create_engine, inspect, text
 from services import db, people_sync, store, users
 
 
-def _researchers(path, rows):
-    """Researcher-board load_to_db 처럼 전 컬럼 TEXT 로 researchers 테이블을 만든다."""
-    cols = ['researcher_id', 'name', 'department', 'org_code', 'position', 'job_function', 'knox_id',
-            'employment_status', 'valid_year', 'valid_month', 'is_current']
+COLS = ['researcher_id', 'name', 'department', 'org_code', 'position', 'job_function', 'knox_id',
+        'employment_status', 'valid_year', 'valid_month', 'is_current', 'birth_year', 'hire_date', 'promotion_date']
+HR = {'E001': ('1968', '1995-03-01', '2023-01-01'), 'E006': ('1972.0', '2001-07-01', '2024-01-01')}
+ORDER_COLS = ['researcher_id', 'order_date', 'order_name', 'order_dep', 'order_cl', 'order_assignment']
+
+
+def _text_table(path, name, cols, rows):
+    """Researcher-board load_to_db 처럼 전 컬럼 TEXT 로 테이블을 만든다."""
     with create_engine(f'sqlite:///{path}').begin() as c:
-        c.execute(text('DROP TABLE IF EXISTS researchers'))
-        c.execute(text('CREATE TABLE researchers (' + ', '.join(f'{col} TEXT' for col in cols) + ')'))
-        c.execute(text(f"INSERT INTO researchers VALUES ({', '.join(':' + col for col in cols)})"),
-                  [dict(zip(cols, r)) for r in rows])
+        c.execute(text(f'DROP TABLE IF EXISTS {name}'))
+        c.execute(text(f'CREATE TABLE {name} (' + ', '.join(f'{col} TEXT' for col in cols) + ')'))
+        if rows:
+            if name in ('researchers', 'researchers_history'):  # 인사 정보 열은 HR 에 있는 사번만 채움
+                rows = [tuple(r) + HR.get(r[0], ('', '', ''))[len(r) - 11:] for r in rows]
+            c.execute(text(f"INSERT INTO {name} VALUES ({', '.join(':' + col for col in cols)})"),
+                      [dict(zip(cols, r)) for r in rows])
+
+
+def _researchers(path, rows):
+    _text_table(path, 'researchers', COLS, rows)
 
 
 ROWS = [
@@ -177,3 +188,127 @@ def test_apply_skips_stale_proposals():
     r = people_sync.apply_sync(plan, _keys(plan, 'add'))  # 같은 제안을 두 번 반영해도 중복 추가 없음
     assert r['added'] == [] and len(r['skipped']) == 7
     assert len(store.list_people()) == 7
+
+
+HISTORY = [  # 월별 스냅샷 — 김영수: CL4 → 상무 → 부사장, 한과거: 상무였다가 지금은 목록에 없음
+    ('E001', '김영수', '전략기획실', 'D01', 'CL4', '', '', '재직', '2022', '1', ''),
+    ('E001', '김영수', '전략기획실', 'D01', 'CL4', '', '', '재직', '2022', '2', ''),
+    ('E001', '김영수', 'AI센터', 'D02', '상무', '', '', '재직', '2023', '3', ''),
+    ('E001', '김영수', 'AI센터', 'D02', '상무', '', '', '재직', '2024', '3', ''),
+    ('E001', '김영수', '전략기획실', 'D01', '부사장', '', '', '재직', '2025', '3', ''),
+    ('P001', '한과거', '소재연구소', 'D06', '상무', '', '', '재직', '2021', '6', ''),
+    ('P001', '한과거', '소재연구소', 'D06', 'Corporate VP', '', '', '재직', '2022', '1', ''),
+    ('P001', '한과거', '경영지원', 'D03', '부사장', '', '', '재직', '2023', '1', ''),
+]
+ORDERS = [
+    ('E001', '2023-03-01', '임원 선임', 'AI센터', '상무', '센터장'),
+    ('E001', '2025-03-01', '승진', '전략기획실', '부사장', '실장'),
+    ('P001', '2023-12-31', '퇴임', '경영지원', '부사장', ''),
+]
+
+
+def test_past_executives_and_career_accumulate(env):
+    _text_table(env, 'researchers_history', COLS, HISTORY)
+    _text_table(env, 'hr_orders', ORDER_COLS, ORDERS)
+    plan = people_sync.plan_sync()
+    past = {i['name']: i for i in plan['items'] if i['kind'] == 'past'}
+    # 이력에서 마지막 임원 시점 값, researchers 에 지난 시점(N)으로 남은 정퇴임도 과거 임원
+    assert past['한과거']['label'] == '한과거 · 부사장 · 경영지원 (2023-01까지)'
+    assert '정퇴임' in past and plan['past_total'] == 2
+    assert '김영수' not in past  # 현재 임원은 과거 임원으로 중복 제안하지 않는다
+
+    r = people_sync.apply_sync(plan, people_sync.default_keys(plan))
+    assert sorted(r['past_added']) == ['정퇴임', '한과거'] and len(r['added']) == 7
+    by_name = {p['name']: p for p in store.list_people(include_inactive=True)}
+    assert by_name['한과거']['active'] is False  # 추적 중지 상태 — 목록·자동 연결에서 빠짐
+    assert all(p['name'] != '한과거' for p in store.list_people())
+
+    kim = store.list_career(by_name['김영수']['id'])
+    assert [(c['date'], c['kind'], c['position'], c['org'], c['title']) for c in kim] == [
+        ('2025-03-01', '발령', '부사장', '전략기획실', '승진'),
+        ('2025-03', '직급·소속', '부사장', '전략기획실', ''),
+        ('2023-03-01', '발령', '상무', 'AI센터', '임원 선임'),
+        ('2023-03', '직급·소속', '상무', 'AI센터', ''),
+        ('2022-01', '직급·소속', 'CL4', '전략기획실', '')]  # 바뀐 달만 (2022-02, 2024-03 는 같은 값)
+    assert [c['title'] for c in store.list_career(by_name['한과거']['id']) if c['kind'] == '발령'] == ['퇴임']
+
+    # 다시 불러와도 중복 없음, 원천에서 지워져도 남고, 새 이력은 더 쌓인다
+    _text_table(env, 'researchers_history', COLS, HISTORY[-3:] + [
+        ('E001', '김영수', '미래전략실', 'D09', '부사장', '', '', '재직', '2026', '3', '')])
+    _text_table(env, 'hr_orders', ORDER_COLS, [])
+    plan = people_sync.plan_sync()
+    assert plan['career_new'] == 1 and plan['items'] == []
+    r = people_sync.apply_sync(plan, [])
+    assert r['career_added'] == 1
+    kim = store.list_career(by_name['김영수']['id'])
+    assert kim[0]['date'] == '2026-03' and len(kim) == 6
+
+
+def test_career_for_manually_linked_and_missing_tables(env):
+    mine = store.create_person('김영수', '부사장')
+    people_sync.sync_people()  # history·orders 테이블이 없는 예전 적재본이어도 동작
+    assert store.get_person(mine['id'])['source_id'] == 'E001' and store.list_career(mine['id']) == []
+    _text_table(env, 'hr_orders', ORDER_COLS, ORDERS)
+    plan = people_sync.plan_sync()
+    assert plan['career_new'] == 2  # 이미 연결된 김영수(E001)의 발령 2건
+    people_sync.apply_sync(plan, [])
+    assert len(store.list_career(mine['id'])) == 2
+    store.delete_person(mine['id'])  # 임원을 지우면 경력 이력도 같이
+    with db.SessionLocal() as s:
+        assert s.query(db.PersonCareer).count() == 0
+
+
+EDU_COLS = ['researcher_id', 'degree', 'school', 'major', 'graduation_year']
+
+
+def test_hr_fields_fill_and_propose(env):
+    _text_table(env, 'education', EDU_COLS, [('E001', '석사', 'KAIST', '전자공학', '1995'),
+                                             ('E001', '박사', 'KAIST', '전자공학', '1999'),
+                                             ('E001', '학사', '서울대학교', '전자공학', '1993')])
+    people_sync.sync_people()
+    kim = next(p for p in store.list_people() if p['name'] == '김영수')
+    assert (kim['birth_year'], kim['hire_date'], kim['promotion_date'], kim['education'], kim['employment_status']) == (
+        '1968', '1995-03-01', '2023-01-01', '박)KAIST 전자공학', '재직')
+    assert kim['hr_state'] == 'current' and kim['employed'] and kim['age'] is not None
+    han = next(p for p in store.list_people() if p['name'] == '한수진')
+    assert han['birth_year'] == '1972'  # pandas 가 남긴 '1972.0' 정리
+
+    # 직접 등록 후 연결된 사람은 빈 인사 정보를 제안 없이 채운다
+    lee = store.list_people(query='이민정')[0]
+    with db.SessionLocal() as s:
+        p = s.get(db.Person, lee['id'])
+        p.employment_status = p.hire_date = ''
+        s.commit()
+    plan = people_sync.plan_sync()
+    assert [i['key'] for i in people_sync.proposals(plan)] == []
+    assert {i['key'] for i in plan['items'] if i.get('auto')} == {'set:E002:employment_status'}
+    people_sync.apply_sync(plan, [])
+    assert store.get_person(lee['id'])['employment_status'] == '재직'
+
+    # 값이 있는데 바뀌면 덮어쓸지 제안 (휴직)
+    _researchers(env, [('E001', '김영수', '전략기획실', 'D01', '부사장', '', '', '휴직', '2026', '9', 'Y')]
+                 + [r for r in ROWS if r[0] != 'E001'])
+    plan = people_sync.plan_sync()
+    assert [i['label'] for i in people_sync.proposals(plan)] == ['김영수 재직상태: 재직 → 휴직']
+
+
+def test_list_employed_only_and_rank_order(env):
+    people_sync.sync_people()
+    store.create_person('최수동', '상무')  # 직접 등록(사번 없음) — 추적 중이면 재직으로 본다
+    names = [p['name'] for p in store.list_people(include_inactive=True, employed_only=True, order='rank')]
+    assert names[:2] == ['박철호', '김영수'] and '정퇴임' not in names and '최수동' in names
+    assert names[-2:] == ['한수진', '오민석']  # Master·Fellow 는 설정 순서대로 뒤
+    # 현재 목록에서 빠지면 퇴직·전출로 — 기본 목록에서 빠지고 전체 조회에만
+    _researchers(env, [r for r in ROWS if r[0] != 'E002'])
+    people_sync.sync_people()
+    emp = [p['name'] for p in store.list_people(include_inactive=True, employed_only=True)]
+    every = {p['name']: p for p in store.list_people(include_inactive=True)}
+    assert '이민정' not in emp and every['이민정']['hr_state'] == 'former' and every['이민정']['active']
+    assert store.list_people(query='E001')[0]['name'] == '김영수'  # 사번 검색
+
+
+def test_hr_figures():
+    from datetime import date
+    f = store.hr_figures('1968', '1995-03-01', '2023-01-01', today=date(2026, 10, 18))
+    assert f == {'age': 58, 'grade_years': 4, 'tenure': 31.7}  # 연차 기준일 2027-03-01
+    assert store.hr_figures('', 'x', '', today=date(2026, 10, 18)) == {'age': None, 'grade_years': None, 'tenure': None}
