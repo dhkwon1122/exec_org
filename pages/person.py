@@ -1,12 +1,12 @@
 """임원 한 사람의 기록 모음 — 동향 기록하기, 연결된 모든 이력(동향·업무 기록) 타임라인, 자주 나온 키워드."""
 import dash
 import dash_bootstrap_components as dbc
-from dash import Input, Output, State, callback, ctx, dcc, html, no_update
+from dash import Input, Output, State, callback, ctx, dash_table, dcc, html, no_update
 
 from components import ui
 from components.history_form import decode_text_upload, history_form, register_form_callbacks, save_history
 from pages.people import person_form
-from services import auth, store
+from services import auth, llm, profile, store
 
 dash.register_page(__name__, path_template='/people/<person_id>', name='임원 상세', title='업무 기록 · 임원')
 
@@ -36,6 +36,51 @@ def layout(person_id=None, **_):
             ]),
         ], id='pe-modal', is_open=False, size='lg'),
         html.Div(id='pp-header', className='mb-3'),
+        dbc.Modal([
+            dbc.ModalHeader(dbc.ModalTitle('주요 이력 정리')),
+            dbc.ModalBody([
+                html.Div([
+                    dbc.Button([html.I(className='bi bi-magic me-1'),
+                                'AI로 발령이력 정리' if llm.is_configured() else '발령이력으로 초안 만들기'],
+                               id='hl-draft', color='secondary', outline=True, size='sm', className='me-2'),
+                    dbc.Button([html.I(className='bi bi-plus me-1'), '줄 추가'], id='hl-add-row', color='secondary',
+                               outline=True, size='sm'),
+                ], className='mb-2'),
+                dcc.Loading(dbc.Alert(id='hl-msg', is_open=False, color='info', className='small py-2'), type='dot'),
+                dash_table.DataTable(
+                    id='hl-table', editable=True, row_deletable=True, data=[],
+                    columns=[{'name': '날짜 (YYYY.MM)', 'id': 'date'}, {'name': '주요 이력', 'id': 'text'}],
+                    style_table={'maxHeight': '50vh', 'overflowY': 'auto'},
+                    style_cell={'textAlign': 'left', 'fontSize': '0.9rem', 'whiteSpace': 'normal', 'height': 'auto',
+                                'fontFamily': 'inherit'},
+                    style_cell_conditional=[{'if': {'column_id': 'date'}, 'width': '130px'}]),
+                html.Div('초안은 경력 이력(People in SAIT 인사발령·직급/소속 변천)에서 만듭니다. 칸을 눌러 고치고, 줄 끝 × 로 지운 뒤 '
+                         '저장하면 DB 에 남습니다. 저장할 때 날짜순으로 정렬됩니다.', className='small text-muted mt-2'),
+            ]),
+            dbc.ModalFooter([dbc.Button('취소', id='hl-cancel', color='secondary', outline=True),
+                             dbc.Button('저장', id='hl-save', color='primary')]),
+        ], id='hl-modal', is_open=False, size='lg'),
+        dbc.Modal([
+            dbc.ModalHeader(dbc.ModalTitle('평가 이력')),
+            dbc.ModalBody([
+                dbc.Button([html.I(className='bi bi-plus me-1'), '줄 추가'], id='ev-add-row', color='secondary',
+                           outline=True, size='sm', className='mb-2'),
+                dash_table.DataTable(
+                    id='ev-table', editable=True, row_deletable=True, data=[],
+                    columns=[{'name': '연도', 'id': 'year', 'type': 'numeric'},
+                             {'name': '평가 종류', 'id': 'kind', 'presentation': 'dropdown'},
+                             {'name': '등급·결과', 'id': 'grade'}, {'name': '메모', 'id': 'note'}],
+                    dropdown={'kind': {'options': []}},
+                    style_table={'maxHeight': '50vh', 'overflowY': 'auto'},
+                    style_cell={'textAlign': 'left', 'fontSize': '0.9rem', 'fontFamily': 'inherit'}),
+                html.Div('해마다 임원종합평가·MBO 를 한 줄씩. 여러 임원을 한꺼번에 넣을 때는 임원 목록의 "엑셀 업로드"를 쓰세요.',
+                         className='small text-muted mt-2'),
+                dbc.Alert(id='ev-error', color='danger', is_open=False, className='small py-2 mt-2 mb-0'),
+            ]),
+            dbc.ModalFooter([dbc.Button('취소', id='ev-cancel', color='secondary', outline=True),
+                             dbc.Button('저장', id='ev-save', color='primary')]),
+        ], id='ev-modal', is_open=False, size='lg'),
+        html.Div(id='pp-profile', className='mb-3'),
         dbc.Row([
             dbc.Col([
                 dbc.Card(dbc.CardBody([
@@ -228,3 +273,102 @@ def edit_person(n_open, _c, _s, _d, n_toggle, pid, name, position, org, aliases,
     except ValueError as e:
         return (True,) + (nu,) * 5 + (str(e), True, nu, nu)
     return (False,) + (nu,) * 5 + ('', False, (n or 0) + 1, nu)
+
+
+def _profile_cards(pid: int):
+    """주요 이력 · 평가 이력 · 추가 항목 카드."""
+    hls = profile.list_highlights(pid)
+    hl_body = html.Div([
+        html.Div([html.Span(h['date'], className='text-muted me-2 text-nowrap', style={'minWidth': '72px'}),
+                  html.Span(h['text'])], className='d-flex small py-1 border-bottom') for h in hls
+    ]) if hls else html.Div('아직 정리한 주요 이력이 없습니다 — "정리"를 눌러 발령이력으로 초안을 만드세요.',
+                            className='small text-muted')
+    kinds, years = profile.evaluation_table(pid)
+    ev_body = dbc.Table([
+        html.Thead(html.Tr([html.Th('연도')] + [html.Th(k) for k in kinds])),
+        html.Tbody([html.Tr([html.Td(r['year'])] + [html.Td(r.get(k, '-')) for k in kinds]) for r in years]),
+    ], size='sm', className='mb-0 small text-center') if years else html.Div('평가 이력이 없습니다.', className='small text-muted')
+    attrs = profile.list_attributes(pid)
+    head = lambda title, btn_id, label: dbc.CardHeader(html.Div([  # noqa: E731
+        html.Span(title, className='me-auto'),
+        dbc.Button(label, id=btn_id, color='link', size='sm', className='p-0 text-decoration-none')],
+        className='d-flex align-items-center'), className='small')
+    cols = [
+        dbc.Col(dbc.Card([head(f'주요 이력 ({len(hls)})', 'hl-open', [html.I(className='bi bi-pencil me-1'), '정리']),
+                          dbc.CardBody(hl_body, style={'maxHeight': '320px', 'overflowY': 'auto'})]), lg=7),
+        dbc.Col([dbc.Card([head('평가 이력', 'ev-open', [html.I(className='bi bi-pencil me-1'), '편집']),
+                           dbc.CardBody(ev_body)]),
+                 dbc.Card([dbc.CardHeader('추가 항목 (엑셀 업로드)', className='small'),
+                           dbc.CardBody(html.Div([html.Div([html.Span(a['name'], className='text-muted me-2'), a['value']],
+                                                           className='small') for a in attrs]))], className='mt-3')
+                 if attrs else None], lg=5),
+    ]
+    return dbc.Row(cols, className='g-3')
+
+
+@callback(Output('pp-profile', 'children'), Input('pp-refresh', 'data'), State('pp-id', 'data'))
+def render_profile(_, pid):
+    return _profile_cards(pid) if store.get_person(pid) else None
+
+
+@callback(Output('hl-modal', 'is_open'), Output('hl-table', 'data'), Output('hl-msg', 'children'),
+          Output('hl-msg', 'is_open'), Output('pp-refresh', 'data', allow_duplicate=True),
+          Input('hl-open', 'n_clicks'), Input('hl-cancel', 'n_clicks'), Input('hl-save', 'n_clicks'),
+          Input('hl-draft', 'n_clicks'), Input('hl-add-row', 'n_clicks'),
+          State('hl-table', 'data'), State('pp-id', 'data'), State('pp-refresh', 'data'), prevent_initial_call=True)
+def edit_highlights(_o, _c, _s, _d, _a, rows, pid, n):
+    nu = no_update
+    trig = ctx.triggered_id
+    if trig is None or not ctx.triggered[0]['value']:
+        return (nu,) * 5  # 카드가 다시 그려지며 버튼이 새로 생길 때의 빈 트리거
+    if trig == 'hl-open':
+        return True, profile.list_highlights(pid), '', False, nu
+    if trig == 'hl-cancel':
+        return False, nu, '', False, nu
+    if trig == 'hl-add-row':
+        return nu, (rows or []) + [{'date': '', 'text': '', 'source': 'manual'}], nu, nu, nu
+    if trig == 'hl-draft':
+        draft, msg = profile.draft_highlights(pid)
+        if not draft:
+            return nu, nu, msg, True, nu
+        if any((r.get('text') or '').strip() for r in rows or []):
+            msg += ' (기존 내용은 바꿨습니다 — 저장하지 않고 취소하면 그대로 남습니다)'
+        return nu, draft, msg, True, nu
+    if trig == 'hl-save':
+        profile.save_highlights(pid, rows or [])
+        return False, nu, '', False, (n or 0) + 1
+    return (nu,) * 5
+
+
+@callback(Output('ev-modal', 'is_open'), Output('ev-table', 'data'), Output('ev-table', 'dropdown'),
+          Output('ev-error', 'children'), Output('ev-error', 'is_open'),
+          Output('pp-refresh', 'data', allow_duplicate=True),
+          Input('ev-open', 'n_clicks'), Input('ev-cancel', 'n_clicks'), Input('ev-save', 'n_clicks'),
+          Input('ev-add-row', 'n_clicks'),
+          State('ev-table', 'data'), State('pp-id', 'data'), State('pp-refresh', 'data'), prevent_initial_call=True)
+def edit_evaluations(_o, _c, _s, _a, rows, pid, n):
+    nu = no_update
+    trig = ctx.triggered_id
+    if trig is None or not ctx.triggered[0]['value']:
+        return (nu,) * 6
+    if trig == 'ev-open':
+        kinds = profile.eval_kinds()
+        evals = profile.list_evaluations(pid)
+        if not evals:  # 빈 표 대신 작년 기본 두 줄을 깔아 둔다
+            from datetime import date
+            evals = [{'year': date.today().year - 1, 'kind': k, 'grade': '', 'note': ''} for k in kinds[:2]]
+        return True, evals, {'kind': {'options': [{'label': k, 'value': k} for k in kinds], 'clearable': False}}, \
+            '', False, nu
+    if trig == 'ev-cancel':
+        return False, nu, nu, '', False, nu
+    if trig == 'ev-add-row':
+        last = (rows or [{}])[-1]
+        return nu, (rows or []) + [{'year': last.get('year') or '', 'kind': '', 'grade': '', 'note': ''}], nu, nu, nu, nu
+    if trig == 'ev-save':
+        bad = [r for r in rows or [] if (r.get('grade') or r.get('note')) and
+               (not profile.normalize_year(r.get('year')) or not (r.get('kind') or '').strip())]
+        if bad:
+            return nu, nu, nu, '연도·평가 종류가 비어 있는 줄이 있습니다.', True, nu
+        profile.save_evaluations(pid, rows or [])
+        return False, nu, nu, '', False, (n or 0) + 1
+    return (nu,) * 6

@@ -50,7 +50,7 @@ def layout(**_):
         dcc.Store(id='pl-all', data=False),
         dbc.Row([
             dbc.Col(dbc.Input(id='pl-q', type='search', debounce=True,
-                              placeholder='사번·이름·직위·소속·학력·별칭·메모 검색'), md=4),
+                              placeholder='사번·이름·직위·소속·학력·별칭·메모 검색'), md=3),
             dbc.Col(dbc.Button(id='pl-all-btn', color='secondary', outline=True, className='w-100'), md=3),
             dbc.Col(dbc.Button([html.I(className='bi bi-arrow-repeat me-1'), 'People in SAIT에서 불러오기'],
                                id='pl-sync', color='secondary', outline=True, className='w-100',
@@ -58,8 +58,11 @@ def layout(**_):
                                title='People in SAIT 인사 정보에서 직급이 임원(' +
                                      '/'.join(people_sync.exec_positions()) + ')인 사람의 정보를 '
                                      '비교해 추가·변경할 것을 제안합니다. 고른 것만 반영하고 별칭·메모·기록은 그대로 둡니다.'), md=3),
-            dbc.Col(dbc.Button([html.I(className='bi bi-person-plus me-1'), '직접 추가'], id='pn-open',
-                               color='primary', className='w-100'), md=2),
+            dbc.Col(dbc.ButtonGroup([
+                dbc.Button([html.I(className='bi bi-file-earmark-spreadsheet me-1'), '엑셀 업로드'], href='/people/import',
+                           color='secondary', outline=True, title='사번·평가(25MBO 등)·주요 이력 등을 엑셀로 한꺼번에'),
+                dbc.Button([html.I(className='bi bi-person-plus me-1'), '직접 추가'], id='pn-open', color='primary'),
+            ], className='w-100'), md=3),
         ], className='g-2 mb-2'),
         dcc.Loading(dbc.Alert(id='pl-sync-msg', is_open=False, dismissable=True, className='py-2 small'), type='dot'),
         html.Div(id='pl-count', className='small text-muted mb-1'),
