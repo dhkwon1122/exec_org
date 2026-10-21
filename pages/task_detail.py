@@ -8,7 +8,7 @@ from dash import ALL, Input, Output, State, callback, ctx, dcc, html, no_update
 from components import doc_ui, todo_ui, ui
 from components.history_form import (decode_text_upload, history_form, register_form_callbacks, save_history,
                                      task_options)
-from services import auth, doc_versions, mailbox, store
+from services import auth, doc_versions, mailbox, outbox, store
 
 dash.register_page(__name__, path_template='/task/<task_id>', name='업무 상세', title='업무 기록 · 상세')
 
@@ -191,6 +191,8 @@ def render(_, _t, _h, tid):
             html.H4([html.Span(f"#{t['id']} ", className='text-muted'), t['title']], className='mb-0 me-auto'),
             dbc.Select(id='td-status', value=t['status'], options=_opts(store.STATUSES),
                        style={'width': '110px'}, className='me-2'),
+            dbc.Button([html.I(className='bi bi-send me-1'), '메일로 공유'], id='td-mail', color='secondary',
+                       outline=True, size='sm'),
             dbc.Button([html.I(className='bi bi-pencil me-1'), '수정'], id='ed-open', color='secondary',
                        outline=True, size='sm'),
         ], className='d-flex align-items-center gap-2 mb-2'),
@@ -466,3 +468,12 @@ def _toggle_mail_source(_o, _c):
     if m is None:
         return no_update, no_update, no_update, no_update
     return True, m['subject'], _mail_body(m), f"/inbox?mail={m['id']}"
+
+
+@callback(Output('mail-draft', 'data', allow_duplicate=True), Input('td-mail', 'n_clicks'), State('td-id', 'data'),
+          prevent_initial_call=True)
+def mail_task(n, tid):
+    """업무 공유 메일 — 상태·담당·하위 업무·최근 기록, 첨부는 이 업무의 파일·메일 첨부(최신 판)에서 고른다."""
+    if not n:  # 머리가 다시 그려질 때의 빈 트리거
+        return no_update
+    return outbox.draft_task(tid)

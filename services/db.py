@@ -347,6 +347,25 @@ class MailAttachment(Base):
     created_at = Column(DateTime, default=_now)
 
 
+class OutboundMail(Base):
+    """이 시스템에서 보낸 메일 기록 (services/outbox.py). related_kind/id: 무엇을 보냈나 — task / schedule /
+    absence / mail(회신) 과 그 id(일정·부재는 기간 'YYYY-MM-DD~YYYY-MM-DD')."""
+    __tablename__ = 'outbound_mails'
+
+    id = Column(Integer, primary_key=True)
+    to_addrs = Column(Text, default='')  # 쉼표
+    cc_addrs = Column(Text, default='')
+    subject = Column(String(500), default='')
+    body_html = Column(Text, default='')
+    attachments = Column(Text, default='')  # 첨부 파일 이름 (쉼표)
+    status = Column(String(10), default='sent')  # sent / failed
+    error = Column(Text, default='')
+    related_kind = Column(String(20), default='', index=True)
+    related_id = Column(String(50), default='', index=True)
+    sent_by = Column(String(100), default='')
+    created_at = Column(DateTime, default=_now)
+
+
 class MailRule(Base):
     """받은 메일 분류 규칙 — 보낸 사람/제목/본문에 글자가 들어 있으면 그 동작. auto 면 확인 없이 바로 반영."""
     __tablename__ = 'mail_rules'
