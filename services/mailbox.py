@@ -322,7 +322,8 @@ def create_tasks(mail: dict, items: list[dict], parent_id: int | None, by: str) 
         if not title:
             continue
         t = store.create_todo(title, task_id=parent_id or None, due_date=str(it.get('due') or '')[:10],
-                              assignee_name=str(it.get('assignee') or ''), created_by=by)
+                              assignee_name=str(it.get('assignee') or ''), created_by=by,
+                              source_mail_id=mail.get('id'))
         content = (f"[받은 메일] {mail['subject']}\n보낸 사람: {mail['sender']}\n날짜: {mail['mail_date']}\n\n"
                    f"{mail['body'][:20000]}")
         store.add_history(t['id'], content, '요청', author=sender_name(mail['sender']) or by,

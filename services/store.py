@@ -16,7 +16,7 @@ from sqlalchemy import func, or_, select
 from sqlalchemy.orm import aliased
 
 from services import db
-from services.db import HistoryEntry, HistoryPerson, Person, PersonCareer, Reference, Task, TaskLink
+from services.db import HistoryEntry, HistoryPerson, HistoryTask, InboundMail, Person, PersonCareer, Reference, Task, TaskLink
 
 STATUSES = ['예정', '진행중', '보류', '완료']
 ENTRY_TYPES = ['메모', '피드백', '동향', '회의', '결정', '진행', '이슈', '요청']
@@ -40,6 +40,7 @@ def _task_dict(t: Task) -> dict:
         'owner': t.owner or '', 'tags': _tags(t.tags), 'parent_id': t.parent_id,
         'start_date': t.start_date or '', 'due_date': t.due_date or '',
         'assignee_id': t.assignee_id or '', 'done_at': _dt(t.done_at),
+        'source_history_id': t.source_history_id, 'source_mail_id': t.source_mail_id,
         'created_at': _dt(t.created_at), 'updated_at': _dt(t.updated_at),
     }
 
@@ -158,6 +159,18 @@ def delete_task(task_id: int) -> None:
         t = s.get(Task, task_id)
         if t is None:
             return
+        # 다른 업무에도 걸친 이력은 지우지 않고 그 업무로 옮긴다 (거기 붙은 자료도 같이)
+        for h in s.scalars(select(HistoryEntry).where(HistoryEntry.task_id == task_id)):
+            link = s.scalars(select(HistoryTask).where(HistoryTask.history_id == h.id, HistoryTask.task_id != task_id)
+                             .order_by(HistoryTask.task_id)).first()
+            if link is None:
+                continue
+            h.task_id = link.task_id
+            for r in s.scalars(select(Reference).where(Reference.history_id == h.id)):
+                r.task_id = link.task_id
+            s.delete(link)
+        s.flush()
+        s.expire(t, ['references'])
         files = [r.file_path for r in t.references if r.file_path]
         s.delete(t)
         s.commit()
@@ -180,9 +193,11 @@ def list_tasks(query: str = '', status: str | list[str] | None = None, tag: str 
             stmt = stmt.where(Task.tags.like(f'%{tag}%'))
         for term in search_terms(query):  # 검색어가 여러 개면 모두 포함(AND)
             like = f'%{term}%'
-            hist_ids = select(HistoryEntry.task_id).where(or_(
-                HistoryEntry.content.like(like), HistoryEntry.title.like(like),
-                HistoryEntry.summary.like(like), HistoryEntry.keywords.like(like)))
+            hist_match = or_(HistoryEntry.content.like(like), HistoryEntry.title.like(like),
+                             HistoryEntry.summary.like(like), HistoryEntry.keywords.like(like))
+            hist_ids = select(HistoryEntry.task_id).where(hist_match).union(
+                select(HistoryTask.task_id).join(HistoryEntry, HistoryEntry.id == HistoryTask.history_id)
+                .where(hist_match))
             ref_ids = select(Reference.task_id).where(
                 or_(Reference.title.like(like), Reference.note.like(like), Reference.url.like(like)))
             stmt = stmt.where(or_(Task.title.like(like), Task.description.like(like), Task.tags.like(like),
@@ -260,10 +275,16 @@ def child_tasks(task_id: int) -> list[dict]:
 
 def add_history(task_id: int | None, content: str, entry_type: str = '메모', author: str = '',
                 occurred_at: str | datetime | None = None, title: str = '', summary: str = '',
-                keywords: list[str] | str = '', person_ids: list[int] | None = None) -> dict:
+                keywords: list[str] | str = '', person_ids: list[int] | None = None,
+                also_task_ids: list[int] | None = None) -> dict:
     """원문(content)을 그대로 저장한다. AI 요약·키워드는 services.enrich.submit() 으로 따로 요청.
-    업무(task_id)나 임원(person_ids) 중 하나는 있어야 한다 — 임원 동향은 업무 없이 임원에만 연결된다."""
+    업무(task_id)나 임원(person_ids) 중 하나는 있어야 한다 — 임원 동향은 업무 없이 임원에만 연결된다.
+    also_task_ids: 이 이력이 함께 걸친 다른 업무들 (task_id 가 없으면 그 첫 업무가 이력의 업무가 된다)."""
     person_ids = sorted({int(p) for p in (person_ids or [])})
+    also = list(dict.fromkeys(int(x) for x in (also_task_ids or [])))
+    if task_id is None and also:
+        task_id = also[0]
+    also = [x for x in also if x != task_id]
     if task_id is None and not person_ids:
         raise ValueError('업무나 임원 중 하나는 지정하세요.')
     content = (content or '').strip()
@@ -279,6 +300,7 @@ def add_history(task_id: int | None, content: str, entry_type: str = '메모', a
             raise ValueError('업무를 찾을 수 없습니다.')
         if person_ids and len(s.scalars(select(Person.id).where(Person.id.in_(person_ids))).all()) != len(person_ids):
             raise ValueError('임원을 찾을 수 없습니다.')
+        others = _check_tasks(s, also)
         h = HistoryEntry(task_id=task_id, entry_type=entry_type, content=content, author=author or '',
                          title=(title or '').strip(), summary=(summary or '').strip(),
                          keywords=_join_keywords(keywords))
@@ -288,10 +310,26 @@ def add_history(task_id: int | None, content: str, entry_type: str = '메모', a
         s.flush()
         for pid in person_ids:
             s.add(HistoryPerson(history_id=h.id, person_id=pid))
-        if t is not None:
-            t.updated_at = datetime.now().replace(microsecond=0)
+        for o in others:
+            s.add(HistoryTask(history_id=h.id, task_id=o.id))
+        for x in [t, *others]:
+            if x is not None:
+                x.updated_at = datetime.now().replace(microsecond=0)
         s.commit()
         return _decorate(s, [_history_dict(h)])[0]
+
+
+def _check_tasks(s, ids: list[int]) -> list[Task]:
+    tasks = list(s.scalars(select(Task).where(Task.id.in_(ids)))) if ids else []
+    if len(tasks) != len(set(ids)):
+        raise ValueError('업무를 찾을 수 없습니다.')
+    return tasks
+
+
+def _history_of_task(task_id: int):
+    """그 업무의 이력 조건 — 업무에 속한 이력 + 다른 업무 이력인데 이 업무에도 걸친 것."""
+    return or_(HistoryEntry.task_id == task_id,
+               HistoryEntry.id.in_(select(HistoryTask.history_id).where(HistoryTask.task_id == task_id)))
 
 
 def get_history(entry_id: int | None) -> dict | None:
@@ -303,7 +341,7 @@ def get_history(entry_id: int | None) -> dict | None:
 
 
 def update_history(entry_id: int, **fields) -> dict:
-    """사용자가 이력(원문·유형·일시·제목·요약·키워드)을 고칠 때."""
+    """사용자가 이력(원문·유형·일시·제목·요약·키워드·임원·걸친 업무 task_ids)을 고칠 때."""
     with db.SessionLocal() as s:
         h = s.get(HistoryEntry, entry_id)
         if h is None:
@@ -328,6 +366,24 @@ def update_history(entry_id: int, **fields) -> dict:
                 setattr(h, k, (fields[k] or '').strip())
         if 'keywords' in fields:
             h.keywords = _join_keywords(fields['keywords'])
+        if 'task_ids' in fields:  # 이 이력이 걸친 업무 전체 — 지금 업무가 빠지면 남은 첫 업무가 이력의 업무가 된다
+            ids = list(dict.fromkeys(int(v) for v in (fields['task_ids'] or [])))
+            _check_tasks(s, ids)
+            primary = h.task_id if h.task_id in ids else (ids[0] if ids else None)
+            has_people = bool(fields['person_ids']) if 'person_ids' in fields else bool(s.scalar(
+                select(func.count()).select_from(HistoryPerson).where(HistoryPerson.history_id == entry_id)))
+            if primary is None and not has_people:
+                raise ValueError('업무나 임원 중 하나는 지정하세요.')
+            if primary != h.task_id:
+                h.task_id = primary
+                for r in s.scalars(select(Reference).where(Reference.history_id == entry_id)):
+                    r.task_id = primary
+            for link in s.scalars(select(HistoryTask).where(HistoryTask.history_id == entry_id)):
+                s.delete(link)
+            s.flush()
+            for tid in ids:
+                if tid != primary:
+                    s.add(HistoryTask(history_id=entry_id, task_id=tid))
         if 'person_ids' in fields:
             ids = sorted({int(p) for p in (fields['person_ids'] or [])})
             if h.task_id is None and not ids:
@@ -339,6 +395,29 @@ def update_history(entry_id: int, **fields) -> dict:
                 s.add(HistoryPerson(history_id=entry_id, person_id=pid))
         s.commit()
         return _decorate(s, [_history_dict(h)])[0]
+
+
+def unlink_history_task(entry_id: int, task_id: int) -> None:
+    """이 업무에서 이력 빼기 — 다른 업무에도 걸친 이력에서 한 업무만 뗀다. 이력의 업무를 빼면
+    함께 걸친 다음 업무가 이력의 업무가 된다(자료도 같이). 걸친 업무가 하나뿐이면 뺄 수 없다(삭제를 쓴다)."""
+    with db.SessionLocal() as s:
+        h = s.get(HistoryEntry, entry_id)
+        if h is None:
+            raise ValueError('이력을 찾을 수 없습니다.')
+        links = list(s.scalars(select(HistoryTask).where(HistoryTask.history_id == entry_id)
+                               .order_by(HistoryTask.task_id)))
+        if h.task_id == task_id:
+            if not links:
+                raise ValueError('이 업무에만 걸린 이력입니다 — 빼려면 삭제하세요.')
+            h.task_id = links[0].task_id
+            for r in s.scalars(select(Reference).where(Reference.history_id == entry_id)):
+                r.task_id = h.task_id
+            s.delete(links[0])
+        else:
+            for link in links:
+                if link.task_id == task_id:
+                    s.delete(link)
+        s.commit()
 
 
 def set_history_ai(entry_id: int, status: str, title: str | None = None, summary: str | None = None,
@@ -366,7 +445,12 @@ def _decorate(s, entries: list[dict]) -> list[dict]:
     refs: dict[int, list[dict]] = {i: [] for i in ids}
     people: dict[int, list[dict]] = {i: [] for i in ids}
     titles: dict[int, str] = {}
+    also: dict[int, list[dict]] = {i: [] for i in ids}
     if ids:
+        for hid, tid, title in s.execute(select(HistoryTask.history_id, Task.id, Task.title)
+                                         .join(Task, Task.id == HistoryTask.task_id)
+                                         .where(HistoryTask.history_id.in_(ids)).order_by(Task.id)):
+            also[hid].append({'id': tid, 'title': title})
         for r in s.scalars(select(Reference).where(Reference.history_id.in_(ids)).order_by(Reference.id)):
             refs[r.history_id].append(_ref_dict(r))
         for hid, p in s.execute(select(HistoryPerson.history_id, Person).join(Person, Person.id == HistoryPerson.person_id)
@@ -381,12 +465,13 @@ def _decorate(s, entries: list[dict]) -> list[dict]:
         if 'task_title' not in e:
             e['task_title'] = titles.get(e['task_id'], '') if e['task_id'] else ''
         e['task_title'] = e['task_title'] or ''
+        e['also_tasks'] = also.get(e['id'], [])  # 함께 걸친 다른 업무 [{'id', 'title'}]
     return entries
 
 
 def list_history(task_id: int) -> list[dict]:
     with db.SessionLocal() as s:
-        rows = s.scalars(select(HistoryEntry).where(HistoryEntry.task_id == task_id)
+        rows = s.scalars(select(HistoryEntry).where(_history_of_task(task_id))
                          .order_by(HistoryEntry.occurred_at.desc(), HistoryEntry.id.desc()))
         return _decorate(s, [_history_dict(h) for h in rows])
 
@@ -412,6 +497,7 @@ def search_history(query: str = '', entry_types: list[str] | None = None, author
     include_auto=False 면 상태변경/연결/자료 같은 자동 이력은 뺀다."""
     with db.SessionLocal() as s:
         stmt = select(HistoryEntry, Task.title).outerjoin(Task, Task.id == HistoryEntry.task_id)
+        other_task = aliased(Task)  # 함께 걸친 업무의 제목 (바깥 Task 와 섞이지 않게 별칭)
         for term in search_terms(query):
             like = f'%{term}%'
             ref_hist = select(Reference.history_id).where(Reference.history_id.is_not(None), or_(
@@ -423,6 +509,9 @@ def search_history(query: str = '', entry_types: list[str] | None = None, author
             stmt = stmt.where(or_(HistoryEntry.content.like(like), HistoryEntry.title.like(like),
                                   HistoryEntry.summary.like(like), HistoryEntry.keywords.like(like),
                                   HistoryEntry.author.like(like), Task.title.like(like),
+                                  HistoryEntry.id.in_(select(HistoryTask.history_id)
+                                                      .join(other_task, other_task.id == HistoryTask.task_id)
+                                                      .where(other_task.title.like(like))),
                                   HistoryEntry.id.in_(ref_hist), HistoryEntry.id.in_(person_hist)))
         if entry_types:
             stmt = stmt.where(HistoryEntry.entry_type.in_(entry_types))
@@ -431,7 +520,7 @@ def search_history(query: str = '', entry_types: list[str] | None = None, author
         if author:
             stmt = stmt.where(HistoryEntry.author == author)
         if task_id is not None:
-            stmt = stmt.where(HistoryEntry.task_id == task_id)
+            stmt = stmt.where(_history_of_task(task_id))
         if person_id is not None:
             stmt = stmt.where(HistoryEntry.id.in_(
                 select(HistoryPerson.history_id).where(HistoryPerson.person_id == person_id)))
@@ -450,7 +539,7 @@ def keyword_stats(limit: int = 40, task_id: int | None = None, person_id: int | 
     with db.SessionLocal() as s:
         stmt = select(HistoryEntry.keywords).where(HistoryEntry.keywords != '')
         if task_id is not None:
-            stmt = stmt.where(HistoryEntry.task_id == task_id)
+            stmt = stmt.where(_history_of_task(task_id))
         if person_id is not None:
             stmt = stmt.where(HistoryEntry.id.in_(
                 select(HistoryPerson.history_id).where(HistoryPerson.person_id == person_id)))
@@ -471,7 +560,7 @@ def pending_ai_ids(task_id: int | None = None, person_id: int | None = None) -> 
     with db.SessionLocal() as s:
         stmt = select(HistoryEntry.id).where(HistoryEntry.ai_status == 'pending')
         if task_id is not None:
-            stmt = stmt.where(HistoryEntry.task_id == task_id)
+            stmt = stmt.where(_history_of_task(task_id))
         if person_id is not None:
             stmt = stmt.where(HistoryEntry.id.in_(
                 select(HistoryPerson.history_id).where(HistoryPerson.person_id == person_id)))
@@ -715,13 +804,14 @@ def _todo_dict(t: Task, parent_title: str | None = None) -> dict:
         'status': t.status, 'due_date': t.due_date or '', 'done': done, 'done_at': _dt(t.done_at),
         'assignee_id': t.assignee_id or '', 'assignee_name': t.owner or '',
         'created_by': t.created_by or '', 'source_history_id': t.source_history_id,
-        'created_at': _dt(t.created_at),
+        'source_mail_id': t.source_mail_id, 'created_at': _dt(t.created_at),
         'overdue': bool(not done and t.due_date and t.due_date < today),
     }
 
 
 def create_todo(title: str, task_id: int | None = None, due_date: str = '', assignee_id: str = '',
-                assignee_name: str = '', created_by: str = '', source_history_id: int | None = None) -> dict:
+                assignee_name: str = '', created_by: str = '', source_history_id: int | None = None,
+                source_mail_id: int | None = None) -> dict:
     """체크 항목처럼 업무를 하나 만든다 — task_id 가 있으면 그 업무의 하위 업무."""
     title = (title or '').strip()
     if not title:
@@ -733,7 +823,8 @@ def create_todo(title: str, task_id: int | None = None, due_date: str = '', assi
             raise ValueError('상위 업무를 찾을 수 없습니다.')
         t = Task(title=title, parent_id=task_id or None, due_date=due_date, status='진행중',
                  owner=assignee_name or '', assignee_id=assignee_id or '', created_by=created_by or '',
-                 source_history_id=source_history_id, description='', tags='', start_date='')
+                 source_history_id=source_history_id, source_mail_id=source_mail_id, description='', tags='',
+                 start_date='')
         s.add(t)
         s.flush()
         if parent:
@@ -827,8 +918,35 @@ def list_todos(task_id: int | None = None, assignee_id: str | None = None, done:
 
 def todo_titles_for_history(entry_id: int) -> set[str]:
     """이 이력의 AI 제안으로 이미 만든 업무 제목들."""
+    return set(todos_for_history(entry_id))
+
+
+def todos_for_history(entry_id: int) -> dict[str, int]:
+    """이 이력의 AI 제안으로 만든 업무 — {제목: 업무 id} (같은 제목이 여럿이면 먼저 만든 것)."""
     with db.SessionLocal() as s:
-        return set(s.scalars(select(Task.title).where(Task.source_history_id == entry_id)))
+        rows = s.execute(select(Task.title, Task.id).where(Task.source_history_id == entry_id)
+                         .order_by(Task.id.desc()))
+        return dict(rows.all())
+
+
+def task_sources(task_id: int) -> dict:
+    """업무를 만든 출처 — {'history': AI 가 할 일을 찾은 메모(이력) | None, 'mail': 받은 메일 | None}.
+    메일 칸이 없던 예전 업무는 받은 메일의 '만든 업무' 목록에서 찾는다."""
+    with db.SessionLocal() as s:
+        t = s.get(Task, task_id)
+        if t is None:
+            return {'history': None, 'mail': None}
+        hid, mid = t.source_history_id, t.source_mail_id
+        if mid is None:
+            for m_id, ids in s.execute(select(InboundMail.id, InboundMail.task_ids)
+                                       .where(InboundMail.task_ids.like(f'%{task_id}%'))):
+                if str(task_id) in (ids or '').split(','):
+                    mid = m_id
+                    break
+        m = s.get(InboundMail, mid) if mid else None
+        mail = {'id': m.id, 'subject': m.subject or '(제목 없음)', 'sender': m.sender or '',
+                'mail_date': m.mail_date or '', 'body': m.body or ''} if m else None
+    return {'history': get_history(hid), 'mail': mail}
 
 
 # ── 캘린더 ────────────────────────────────────────────────────────────

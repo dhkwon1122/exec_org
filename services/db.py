@@ -60,12 +60,13 @@ class Task(Base):
     start_date = Column(String(10), default='')  # YYYY-MM-DD
     due_date = Column(String(10), default='')
     # 예전 '할 일'을 업무로 합치며 들어온 칸 — 담당자(사용자 DB user_id, 이름은 owner), 완료 시각,
-    # 이 업무를 만든 사람, AI 가 이 업무를 제안한 이력
+    # 이 업무를 만든 사람, AI 가 이 업무를 제안한 이력(메모)
     assignee_id = Column(String(100), default='')
     done_at = Column(DateTime, nullable=True)
     created_by = Column(String(100), default='')
     source_history_id = Column(Integer, ForeignKey('history.id', ondelete='SET NULL', use_alter=True,
                                                    name='fk_tasks_source_history'), nullable=True)
+    source_mail_id = Column(Integer, nullable=True, index=True)  # 이 업무를 만든 받은 메일 (inbound_mails.id)
     created_at = Column(DateTime, default=_now)
     updated_at = Column(DateTime, default=_now, onupdate=_now)
 
@@ -156,6 +157,15 @@ class Person(Base):
     sync_skip = Column(Text, default='')
     created_at = Column(DateTime, default=_now)
     updated_at = Column(DateTime, default=_now, onupdate=_now)
+
+
+class HistoryTask(Base):
+    """한 이력이 여러 업무에 걸칠 때 — 이력의 업무(history.task_id) 말고 함께 걸친 다른 업무들.
+    걸친 업무마다 그 업무의 이력 목록에 같이 보인다."""
+    __tablename__ = 'history_tasks'
+
+    history_id = Column(Integer, ForeignKey('history.id', ondelete='CASCADE'), primary_key=True)
+    task_id = Column(Integer, ForeignKey('tasks.id', ondelete='CASCADE'), primary_key=True, index=True)
 
 
 class HistoryPerson(Base):
