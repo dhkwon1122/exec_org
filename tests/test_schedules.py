@@ -148,3 +148,44 @@ def test_korean_corporate_eml(charset):
     assert '10/27(월) | 09:00~10:00 | 똠양꿍 오찬 | 본관' in m['text']  # euc-kr 이라고 적힌 cp949 확장 한글도
     ev = schedules.rule_parse(m['text'], m['mail_date'])
     assert [(e['date'], e['title']) for e in ev] == [('2026-10-27', '똠양꿍 오찬')]
+
+
+MERGED_HTML = """<table><tr><th>일자</th><th>시간</th><th>내용</th><th>장소</th></tr>
+<tr><td rowspan="2">10/21(화)</td><td>00;00 ~</td><td>일정 1</td><td rowspan="3">원장실</td></tr>
+<tr><td>01;00 ~</td><td>일정 2</td></tr>
+<tr><td>10/22(수)</td><td>09:00~10:00</td><td>일정 3<br>준비: 자료</td></tr>
+<tr><td colspan="2">비고</td><td>없음</td><td>-</td></tr></table>"""
+
+
+def test_merged_cells_are_expanded():
+    text = mail_text.html_to_text(MERGED_HTML)
+    assert text.splitlines() == [
+        '일자 | 시간 | 내용 | 장소',
+        '10/21(화) | 00;00 ~ | 일정 1 | 원장실',
+        '10/21(화) | 01;00 ~ | 일정 2 | 원장실',  # 세로 병합 → 아래 행에도 날짜·장소
+        '10/22(수) | 09:00~10:00 | 일정 3 / 준비: 자료 | 원장실',
+        '비고 | | 없음 | -']
+    ev = schedules.rule_parse(text, '2026-10-20')
+    assert [(e['date'], e['start_time'], e['title']) for e in ev] == [
+        ('2026-10-21', '00:00', '일정 1'), ('2026-10-21', '01:00', '일정 2'), ('2026-10-22', '09:00', '일정 3 / 준비: 자료')]
+
+
+def test_pasted_table_without_date_cell_gets_previous_date(monkeypatch):
+    pasted = ('보낸 날짜: 2026년 10월 20일 월요일\n제목: 원장님 일정\n일자\t시간\t내용\n'
+              '10/21(화)\t00;00 ~\t일정 1\n\t01;00 ~\t일정 2\n01;30 ~\t일정 3\n감사합니다.\n15:00 회의')
+    m = mail_text.from_pasted(pasted)
+    filled = schedules.fill_dates(m['text'], m['mail_date']).splitlines()
+    assert filled[3:6] == ['10/21(화) | 00;00 ~ | 일정 1', '2026-10-21 | 01;00 ~ | 일정 2', '2026-10-21 | 01;30 ~ | 일정 3']
+    assert filled[-1] == '15:00 회의'  # 표 밖 문장 뒤는 이어 쓰지 않음
+    seen = {}
+
+    def fake_chat(system, user, temperature=0.2):
+        seen['user'] = user
+        return json.dumps({'events': [{'date': '2026-10-21', 'start_time': '01:00', 'title': '일정 2'}]})
+    monkeypatch.setattr(llm, 'is_configured', lambda: True)
+    monkeypatch.setattr(llm, 'chat', fake_chat)
+    iid = schedules.create_import(m['name'], m['mail_date'], m['text'])
+    schedules.submit_import(iid, background=False)
+    assert '2026-10-21 | 01;00 ~ | 일정 2' in seen['user']  # AI 에는 날짜를 채운 표를 준다
+    assert '병합' in schedules.PARSE_SYSTEM
+    assert schedules.get_import(iid)['raw_text'] == m['text']  # 원문은 그대로 보관

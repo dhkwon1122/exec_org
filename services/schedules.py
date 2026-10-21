@@ -37,7 +37,7 @@ def norm_time(v) -> str:
         return ''
     pm = '오후' in s or 'pm' in s.lower()
     am = '오전' in s or 'am' in s.lower()
-    m = re.search(r'(\d{1,2})\s*[:시.]\s*(\d{2})?', s) or re.search(r'^(\d{2})(\d{2})$', s)
+    m = re.search(r'(\d{1,2})\s*[:;시.]\s*(\d{2})?', s) or re.search(r'^(\d{2})(\d{2})$', s)
     if not m:
         return ''
     h, mi = int(m.group(1)), int(m.group(2) or 0)
@@ -127,7 +127,8 @@ PARSE_SYSTEM = f"""너는 원장님 비서실의 일정 담당자다. 비서가 
 규칙:
 - 날짜는 YYYY-MM-DD. 메일에 연도가 없으면 메일 보낸 날짜의 연도로(12월 메일에 1월 일정이면 다음 해). '오늘·내일·다음주 월요일'은 메일 날짜 기준.
 - 시간은 24시간 HH:MM. 종료 시간을 모르면 빈 문자열, 시간이 없는 일정(종일·미정)은 둘 다 빈 문자열.
-- 표에서 날짜 칸이 비어 있는 행은 위 행과 같은 날짜다.
+- 표에서 날짜 칸이 비어 있거나(병합된 칸) 아예 빠져 시간으로 시작하는 행은 바로 위 일정과 같은 날짜다.
+  그런 행을 메일 보낸 날짜로 넣지 않는다. 메일 보낸 날짜는 연도·'다음주' 같은 표현을 풀 때만 쓴다.
 - title 은 일정 이름만 짧게, location 은 장소, attendees 는 참석자(쉼표로), details 는 그 밖의 내용(준비물·비고·담당 등).
 - category 는 {', '.join(CATEGORIES)} 중 하나.
 - 취소·연기된 일정은 details 에 '취소' 또는 '연기'를 적고 그대로 넣는다. 일정이 아닌 인사말·서명은 무시한다.
@@ -151,7 +152,9 @@ _DATE_PATTERNS = [
 ]
 # 메일 머리 줄(보낸 날짜·제목·받는 사람…)은 일정이 아니다
 _HEADER_LINE = re.compile(r'^\s*(보낸\s*(날짜|사람)|받는\s*사람|날짜|제목|참조|숨은\s*참조|From|To|Cc|Sent|Date|Subject)\s*:', re.I)
-_TIME_RANGE = re.compile(r'((?:오전|오후)?\s*\d{1,2}\s*[:시]\s*\d{0,2}\s*분?)\s*(?:[~\-–]\s*((?:오전|오후)?\s*\d{1,2}\s*[:시]\s*\d{0,2}\s*분?))?')
+_TIME_RANGE = re.compile(r'((?:오전|오후)?\s*\d{1,2}\s*[:;시]\s*\d{0,2}\s*분?)\s*(?:[~\-–]\s*((?:오전|오후)?\s*\d{1,2}\s*[:;시]\s*\d{0,2}\s*분?)?)?')
+# 줄 맨 앞(빈 칸 '|' 뒤 포함)이 시간이면 일정 행 — 병합된 날짜 칸이 빠진 행인지 볼 때 쓴다
+_ROW_STARTS_WITH_TIME = re.compile(r'^\s*(?:\|\s*)*(?:오전|오후)?\s*\d{1,2}\s*[:;시]')
 
 
 def _find_date(line: str, base: date) -> tuple[str, str] | None:
@@ -173,6 +176,30 @@ def _find_date(line: str, base: date) -> tuple[str, str] | None:
     return None
 
 
+def fill_dates(text: str, mail_date: str) -> str:
+    """날짜 칸이 병합돼 아래 행에 날짜가 없는 표(시간으로 시작하는 행)에 위 행의 날짜를 채운다.
+
+        10/21(화) | 00:00 ~ | 일정 1          10/21(화) | 00:00 ~ | 일정 1
+                  | 01:00 ~ | 일정 2    →    2026-10-21 | 01:00 ~ | 일정 2
+    메일 머리 줄(보낸 날짜·제목)의 날짜는 쓰지 않고, 표가 아닌 문장이 나오면 이어 쓰기를 멈춘다."""
+    base = date.fromisoformat(mail_date) if mail_date else date.today()
+    cur, out = None, []
+    for line in (text or '').splitlines():
+        if not line.strip() or _HEADER_LINE.match(line):
+            out.append(line)
+            continue
+        found = _find_date(line, base)
+        if found:
+            cur = found[0]
+        elif cur and _ROW_STARTS_WITH_TIME.match(line):
+            stripped = line.lstrip()
+            line = f'{cur} ' + (stripped if stripped.startswith('|') else '| ' + stripped)
+        elif '|' not in line:
+            cur = None  # 표 밖 문장 — 다음 표는 그 표의 날짜부터
+        out.append(line)
+    return '\n'.join(out)
+
+
 def rule_parse(text: str, mail_date: str) -> list[dict]:
     """규칙 초안 — 날짜가 나온 뒤 시간이 있는 줄을 일정으로. 표 행이면 칸을 제목/장소/참석자로 나눈다."""
     base = date.fromisoformat(mail_date) if mail_date else date.today()
@@ -184,6 +211,9 @@ def rule_parse(text: str, mail_date: str) -> list[dict]:
         rest = line
         if found:
             cur, rest = found
+        elif '|' not in line and not _ROW_STARTS_WITH_TIME.match(line):
+            cur = None  # 표 밖 문장 — 앞 표의 날짜를 이어 쓰지 않는다
+            continue
         t = _TIME_RANGE.search(rest)
         all_day = not (t and norm_time(t.group(1))) and re.search(r'종일|하루', rest)
         if not cur or not (all_day or (t and norm_time(t.group(1)))):
@@ -236,6 +266,7 @@ def parse_import(import_id: int) -> None:
             return
         text, mail_date = x.raw_text, x.mail_date
     status, error, events = 'done', '', []
+    text = fill_dates(text, mail_date)
     try:
         if llm.is_configured():
             try:
