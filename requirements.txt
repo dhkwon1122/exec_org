@@ -7,3 +7,4 @@ requests==2.34.2
 psycopg2-binary==2.9.12
 Werkzeug>=3.0
 openpyxl==3.1.5
+olefile==0.47

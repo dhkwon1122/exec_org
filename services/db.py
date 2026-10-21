@@ -16,6 +16,7 @@ PostgreSQL(exec-db). 없으면(개발·테스트) 프로젝트 안의 SQLite 파
 - person_highlights  : 임원 주요 이력 (발령이력을 정리·정제한 핵심 경력)
 - person_evaluations : 임원 평가 이력 (연도·종류별 — 임원종합평가, MBO 등)
 - person_attributes  : 임원 추가 항목 (엑셀 업로드로 생긴 이름-값)
+- schedules / schedule_imports : 원장님 일정 / 비서실 일정 메일(원문·AI 정리 결과)
 - history_people : 이력 ↔ 임원 연결 (한 이력에 여러 임원). 업무 없이 임원에만 연결된 이력(동향)도 있다
 - todos          : 할 일 (업무에 속하거나 단독). 이력 원문에서 AI 가 뽑은 제안을 추가할 수 있음
 """
@@ -221,6 +222,44 @@ class PersonAttribute(Base):
     name = Column(String(100), nullable=False)
     value = Column(Text, default='')
     updated_at = Column(DateTime, default=_now, onupdate=_now)
+
+
+class Schedule(Base):
+    """원장님 일정 — 비서실 메일을 AI 가 정리해 넣거나 직접 입력. 지난 일정이 곧 원장님 일정 이력이다.
+    날짜만 있고 시간이 없으면 종일 일정(start_time='')."""
+    __tablename__ = 'schedules'
+
+    id = Column(Integer, primary_key=True)
+    date = Column(String(10), nullable=False, index=True)  # YYYY-MM-DD
+    start_time = Column(String(5), default='')  # HH:MM ('' = 종일·시간 미정)
+    end_time = Column(String(5), default='')
+    title = Column(String(300), nullable=False)
+    location = Column(String(300), default='')
+    attendees = Column(Text, default='')
+    category = Column(String(30), default='')  # 회의/보고/행사/외부/출장/면담/기타
+    details = Column(Text, default='')  # 세부 사항·결과
+    source = Column(String(20), default='manual')  # manual / mail
+    import_id = Column(Integer, ForeignKey('schedule_imports.id', ondelete='SET NULL'), nullable=True)
+    created_by = Column(String(100), default='')
+    created_at = Column(DateTime, default=_now)
+    updated_at = Column(DateTime, default=_now, onupdate=_now)
+
+
+class ScheduleImport(Base):
+    """일정 메일 한 통(붙여넣기·파일) — 원문을 그대로 두고 AI 가 일정 목록으로 정리한 결과를 담는다.
+    사람이 확인하고 반영(applied)해야 schedules 에 들어간다."""
+    __tablename__ = 'schedule_imports'
+
+    id = Column(Integer, primary_key=True)
+    name = Column(String(300), default='')  # 메일 제목 또는 파일 이름
+    mail_date = Column(String(10), default='')  # 메일 보낸 날 (상대 날짜 '다음주 월요일' 해석 기준)
+    raw_text = Column(Text, default='')
+    status = Column(String(20), default='pending')  # pending / done / failed
+    events = Column(Text, default='')  # JSON 목록
+    error = Column(Text, default='')
+    applied_at = Column(DateTime, nullable=True)
+    created_by = Column(String(100), default='')
+    created_at = Column(DateTime, default=_now)
 
 
 class Todo(Base):

@@ -1,4 +1,4 @@
-"""캘린더 — 월 단위로 업무 마감·시작과 이력을 날짜별로 본다. 날짜를 누르면 그날 내용."""
+"""캘린더 — '업무' 탭: 월 단위로 업무 마감·시작과 이력. '원장님 일정' 탭: components/director_ui.py."""
 import calendar as pycal
 from datetime import date
 
@@ -6,7 +6,7 @@ import dash
 import dash_bootstrap_components as dbc
 from dash import ALL, Input, Output, State, callback, ctx, dcc, html, no_update
 
-from components import todo_ui, ui
+from components import director_ui, todo_ui, ui
 from services import store
 
 dash.register_page(__name__, path='/calendar', name='캘린더', title='업무 기록 · 캘린더')
@@ -15,7 +15,14 @@ WEEKDAYS = ['월', '화', '수', '목', '금', '토', '일']
 MAX_ITEMS = 3
 
 
-def layout(**_):
+def layout(tab=None, **_):
+    return dbc.Tabs([
+        dbc.Tab(_work_layout(), label='업무 캘린더', tab_id='work', className='pt-3'),
+        dbc.Tab(director_ui.layout(), label='원장님 일정', tab_id='director', className='pt-3'),
+    ], id='cal-tabs', active_tab='director' if tab == 'director' else 'work')
+
+
+def _work_layout():
     today = date.today()
     return html.Div([
         dcc.Store(id='cal-month', data=[today.year, today.month]),
