@@ -5,10 +5,10 @@ import dash
 import dash_bootstrap_components as dbc
 from dash import ALL, Input, Output, State, callback, ctx, dcc, html, no_update
 
-from components import todo_ui, ui
+from components import doc_ui, todo_ui, ui
 from components.history_form import (decode_text_upload, history_form, register_form_callbacks, save_history,
                                      task_options)
-from services import auth, mailbox, store
+from services import auth, doc_versions, mailbox, store
 
 dash.register_page(__name__, path_template='/task/<task_id>', name='업무 상세', title='업무 기록 · 상세')
 
@@ -245,6 +245,14 @@ def render(_, _t, _h, tid):
                      className='small text-muted mt-1') if r['history_id'] else None,
         ]) for r in refs
     ]) if refs else html.Div('참고자료가 없습니다.', className='text-muted small')
+    docs = doc_versions.for_task(tid)
+    if docs:  # 연결된 메일의 첨부 문서 — 같은 문서는 판(버전)으로 묶어서
+        ref_view = html.Div([
+            html.H6([html.I(className='bi bi-paperclip me-1'), '메일 첨부 문서'], className='mb-2'),
+            doc_ui.doc_groups(docs),
+            html.H6([html.I(className='bi bi-folder2 me-1'), '참고자료'], className='mt-3 mb-2'),
+            ref_view,
+        ])
 
     links = store.linked_tasks(tid)
     link_view = dbc.ListGroup([

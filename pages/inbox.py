@@ -3,8 +3,8 @@ import dash
 import dash_bootstrap_components as dbc
 from dash import ALL, Input, Output, State, callback, ctx, dash_table, dcc, html, no_update
 
-from components import ui
-from services import auth, mailbox, schedules, store
+from components import doc_ui, ui
+from services import auth, doc_versions, mailbox, schedules, store
 
 dash.register_page(__name__, path='/inbox', name='받은 메일', title='업무 기록 · 받은 메일')
 
@@ -45,6 +45,7 @@ def layout(mail=None, **_):
             dbc.Col(html.Div(id='ib-list'), lg=5),
             dbc.Col(html.Div([
                 html.Div(id='ib-head'),
+                html.Div(id='ib-attach'),
                 html.Div(id='ib-link-box', style={'display': 'none'}, children=[
                     dbc.Card(dbc.CardBody([
                         html.Div([html.I(className='bi bi-link-45deg me-1'), '이 메일과 연결된 업무'],
@@ -305,12 +306,12 @@ def act(_a, _i, _r, _f, sel, tasks, parent, sched, task_style, sched_style, n):
 
 @callback(Output('ib-link-box', 'style'), Output('ib-linked', 'children'), Output('ib-link-task', 'options'),
           Output('ib-link-task', 'value'), Output('ib-new-title', 'value'), Output('ib-new-parent', 'options'),
-          Output('ib-new-parent', 'value'), Output('ib-new-due', 'value'),
+          Output('ib-new-parent', 'value'), Output('ib-new-due', 'value'), Output('ib-attach', 'children'),
           Input('ib-sel', 'data'), Input('ib-refresh', 'data'))
 def render_links(sel, _):
     m = mailbox.get_mail(sel) if sel else None
     if m is None:
-        return {'display': 'none'}, None, [], None, '', [], None, None
+        return {'display': 'none'}, None, [], None, '', [], None, None, None
     tasks = {t['id']: t for t in store.list_tasks()}
     linked = [tasks[t] for t in m['task_ids'] if t in tasks]
     view = html.Div([
@@ -326,8 +327,16 @@ def render_links(sel, _):
     parent_opts = [o for o in opts if '(완료)' not in o['label']]
     # 상위 업무 기본값: 받을 때 추천한 상위 업무, 없으면 같은 메일 스레드의 업무 (AI 는 부르지 않음 — 화면이 느려짐)
     suggested = m['suggestion'].get('parent_task_id') or mailbox._thread_parent(m['subject'], m['id'])[0]
+    docs = doc_versions.for_mails([m['id']])
+    attach = dbc.Card(dbc.CardBody([
+        html.Div([html.I(className='bi bi-paperclip me-1'), f'첨부 파일 {sum(len(g["files"]) for g in docs)}개'],
+                 className='fw-semibold small mb-2'),
+        doc_ui.doc_groups(docs, current_mail=m['id']),
+        html.Div('파일 이름의 날짜·_r1·_v2·최종 같은 꼬리표를 떼고 같은 문서끼리 묶어, 메일 날짜 순으로 판을 매깁니다.',
+                 className='small text-muted mt-2'),
+    ]), className='mt-2') if docs else None
     return ({}, view, opts, None, mailbox.clean_subject(m['subject']), parent_opts,
-            suggested if suggested in tasks else None, None)
+            suggested if suggested in tasks else None, None, attach)
 
 
 @callback(Output('ib-refresh', 'data', allow_duplicate=True), Output('ib-msg', 'children', allow_duplicate=True),

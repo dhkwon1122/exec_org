@@ -21,7 +21,7 @@ from flask.sessions import SecureCookieSessionInterface
 import components.todo_ui  # noqa: F401  업무 체크/삭제 공용 콜백 등록
 from services import mailbox
 from components.history_actions import history_edit_modal  # 이력 수정·삭제 공용 콜백 등록
-from services import auth, store, users
+from services import auth, doc_versions, store, users
 from services.db import DATA_DIR
 
 
@@ -222,6 +222,16 @@ def download_file(ref_id: int):
     if not path:
         flask.abort(404)
     return flask.send_file(path, as_attachment=True, download_name=ref['file_name'] or os.path.basename(path))
+
+
+@server.route('/mail-files/<int:att_id>')
+def download_mail_file(att_id: int):
+    """받은 메일 첨부 내려받기 (로그인 필요 — _require_login)."""
+    att = doc_versions.get(att_id)
+    path = store.upload_abspath(att['file_path']) if att else None
+    if not path:
+        flask.abort(404)
+    return flask.send_file(path, as_attachment=True, download_name=att['filename'])
 
 
 _NAV = [  # (이름, 주소, 아이콘, 주소 맞춤)

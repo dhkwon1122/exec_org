@@ -23,7 +23,7 @@ from email.utils import parseaddr
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 
-from services import db, llm, mail_text, schedules, store
+from services import db, doc_versions, llm, mail_text, schedules, store
 from services.db import InboundMail, MailRule
 
 log = logging.getLogger(__name__)
@@ -48,6 +48,7 @@ def settings() -> dict:
             'user': _env('POP3_USER'), 'password': _env('POP3_PASSWORD'),
             'minutes': max(1, int(_env('POLL_MINUTES', '5'))), 'since_days': int(_env('SINCE_DAYS', '7')),
             'max_per_run': int(_env('MAX_PER_RUN', '50')),
+            'max_attachment_mb': int(_env('MAX_ATTACHMENT_MB', '30')),
             'delete': _env('DELETE_FROM_SERVER', '0') in ('1', 'true', 'yes')}
 
 
@@ -497,7 +498,8 @@ def fetch_new(connect=None, process_now: bool = True) -> dict:
         since = (date.today() - timedelta(days=cfg['since_days'])).isoformat() if cfg['since_days'] > 0 else ''
         for num, uid in todo[-cfg['max_per_run']:] if cfg['max_per_run'] > 0 else todo:  # 가장 최근 것들
             _, lines, _ = conn.retr(num)
-            parsed = mail_text.from_bytes(b'\r\n'.join(lines))
+            raw = b'\r\n'.join(lines)
+            parsed = mail_text.from_bytes(raw)
             old = since and parsed['mail_date'] and parsed['mail_date'] < since
             with db.SessionLocal() as s:
                 m = InboundMail(uidl=uid, message_id=parsed['message_id'][:300], subject=parsed['name'][:500],
@@ -514,6 +516,10 @@ def fetch_new(connect=None, process_now: bool = True) -> dict:
                 skipped += 1
             else:
                 new_ids.append(mid)
+                try:  # 첨부 파일 저장 — 문서별 판(버전) 묶기는 services/doc_versions.py
+                    doc_versions.save(mid, mail_text.attachments(raw, cfg['max_attachment_mb'] * 1024 * 1024))
+                except Exception:  # noqa: BLE001 — 첨부 때문에 메일을 놓치지 않게
+                    log.exception('첨부 저장 실패 %s', mid)
             if cfg['delete']:
                 conn.dele(num)
         # 처음 연결할 때 너무 오래된 메일까지 받지 않도록, 이번에 못 받은(최대 건수 밖) 옛 메일은 건너뜀으로 기록

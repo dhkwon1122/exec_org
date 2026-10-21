@@ -312,6 +312,21 @@ class InboundMail(Base):
     handled_by = Column(String(100), default='')
 
 
+class MailAttachment(Base):
+    """받은 메일의 첨부 파일. doc_key = 파일 이름에서 날짜·_r1·_v2·최종 같은 꼬리표를 뗀 '같은 문서' 열쇠
+    (services/doc_versions.py) — 같은 열쇠끼리 메일 날짜 순으로 판(버전)을 매긴다."""
+    __tablename__ = 'mail_attachments'
+
+    id = Column(Integer, primary_key=True)
+    mail_id = Column(Integer, ForeignKey('inbound_mails.id', ondelete='CASCADE'), nullable=False, index=True)
+    filename = Column(String(300), nullable=False)
+    file_path = Column(String(500), default='')  # UPLOAD_DIR 기준
+    size = Column(Integer, default=0)
+    sha256 = Column(String(64), default='', index=True)
+    doc_key = Column(String(300), default='', index=True)
+    created_at = Column(DateTime, default=_now)
+
+
 class MailRule(Base):
     """받은 메일 분류 규칙 — 보낸 사람/제목/본문에 글자가 들어 있으면 그 동작. auto 면 확인 없이 바로 반영."""
     __tablename__ = 'mail_rules'
