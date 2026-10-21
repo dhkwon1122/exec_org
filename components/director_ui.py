@@ -17,7 +17,8 @@ WEEKDAYS = ['월', '화', '수', '목', '금', '토', '일']
 HOUR_PX = 44
 CAT_COLOR = {'회의': '#0d6efd', '보고': '#6f42c1', '면담': '#20c997', '행사': '#fd7e14', '외부': '#d63384',
              '출장': '#6c757d', '기타': '#adb5bd', '': '#0dcaf0'}
-_STATE = {'new': ('신규', 'success'), 'changed': ('변경', 'warning'), 'same': ('동일', 'secondary')}
+_STATE = {'new': ('신규', 'success'), 'changed': ('변경', 'warning'), 'same': ('동일', 'secondary'),
+          'check': ('확인 필요', 'danger')}
 
 
 def layout():
@@ -109,14 +110,17 @@ def layout():
                                  {'name': '날짜', 'id': 'date'}, {'name': '시작', 'id': 'start_time'},
                                  {'name': '종료', 'id': 'end_time'}, {'name': '일정', 'id': 'title'},
                                  {'name': '장소', 'id': 'location'}, {'name': '참석자', 'id': 'attendees'},
-                                 {'name': '구분', 'id': 'category'}, {'name': '세부', 'id': 'details'}],
+                                 {'name': '구분', 'id': 'category'}, {'name': '세부', 'id': 'details'},
+                                 {'name': '검증', 'id': 'note', 'editable': False}],
                         style_table={'maxHeight': '40vh', 'overflowY': 'auto', 'overflowX': 'auto'},
                         style_cell={'textAlign': 'left', 'fontSize': '0.8rem', 'fontFamily': 'inherit',
                                     'whiteSpace': 'normal', 'height': 'auto', 'minWidth': '60px', 'maxWidth': '260px'},
                         style_data_conditional=[
                             {'if': {'filter_query': '{state} = "new"'}, 'backgroundColor': 'rgba(25,135,84,.08)'},
                             {'if': {'filter_query': '{state} = "changed"'}, 'backgroundColor': 'rgba(255,193,7,.12)'},
-                            {'if': {'filter_query': '{state} = "same"'}, 'color': '#888'}]),
+                            {'if': {'filter_query': '{state} = "same"'}, 'color': '#888'},
+                            {'if': {'filter_query': '{state} = "check"'}, 'backgroundColor': 'rgba(220,53,69,.08)'},
+                            {'if': {'column_id': 'note'}, 'color': '#6b7280', 'fontSize': '0.75rem'}]),
                     dbc.Button([html.I(className='bi bi-check2 me-1'), '이 메일 반영'], id='dr-imp-apply',
                                color='primary', size='sm', className='mt-2'),
                 ], style={'display': 'none'}),
@@ -483,7 +487,8 @@ def imports(is_open, _go, files, _poll, _all, _redo, _del, _undo, _view, _apply,
     elif trig == 'dr-imp-all':
         r = schedules.apply_all_pending(by)
         msg, color, refresh = (f"메일 {r['mails']}통 반영 — 새 일정 {r['added']}건, 바뀐 일정 {r['updated']}건, "
-                               f"이미 있음 {r['same']}건"), 'success', (n or 0) + 1
+                               f"이미 있음 {r['same']}건" + (f", 칸이 밀려 건너뜀 {r['skipped']}건" if r['skipped'] else '')
+                               ), 'success', (n or 0) + 1
     elif isinstance(trig, dict) and trig['type'] == 'dr-imp-redo':
         schedules.reparse(trig['id'])
         sel = trig['id']
@@ -498,7 +503,8 @@ def imports(is_open, _go, files, _poll, _all, _redo, _del, _undo, _view, _apply,
         sel = trig['id']
     elif trig == 'dr-imp-apply' and sel and value:
         r = schedules.apply_events(rows or [], sel, by)
-        msg, color, refresh = (f"반영 — 새 일정 {r['added']}건, 바뀐 일정 {r['updated']}건, 이미 있음 {r['same']}건",
+        msg, color, refresh = (f"반영 — 새 일정 {r['added']}건, 바뀐 일정 {r['updated']}건, 이미 있음 {r['same']}건"
+                               + (f", 칸이 밀려 건너뜀 {r['skipped']}건" if r['skipped'] else ''),
                                'success', (n or 0) + 1)
     elif trig not in ('dr-imp-modal', 'dr-imp-poll'):
         return (nu,) * 8
@@ -521,14 +527,15 @@ def show_preview(sel, _list, shown):
     rows = schedules.preview(imp['events'])
     for r in rows:
         label, _ = _STATE[r['state']]
-        r['state_label'] = label + (f" ({', '.join(r['changed'])})" if r['changed'] else '')
+        r['state_label'] = label + (f" ({', '.join(schedules.LABELS[f] for f in r['changed'])})" if r['changed'] else '')
         r['changed'] = ', '.join(r['changed'])  # 표 칸에는 글자만 넣을 수 있다
     counts = {k: sum(r['state'] == k for r in rows) for k in _STATE}
     head = html.Div([
         html.Span(imp['name'], className='fw-semibold me-2'),
         *[dbc.Badge(f'{_STATE[k][0]} {v}', color=_STATE[k][1], className='me-1') for k, v in counts.items() if v],
         dbc.Badge('반영됨', color='success', className='ms-1') if imp['applied'] else None,
-        html.Div('칸을 눌러 고치고, 넣지 않을 줄은 × 로 지운 뒤 반영하세요. 같은 날짜·제목의 일정은 바뀐 칸만 고칩니다.',
+        html.Div('칸을 눌러 고치고, 넣지 않을 줄은 × 로 지운 뒤 반영하세요. 이미 있는 일정과 같은 일정이면 기존 값과 '
+                 '비교해 정말 바뀐 칸만 고칩니다 — 칸이 밀려 잘못 읽은 값은 기존 값으로 되돌려 보여 줍니다(검증 칸).',
                  className='small text-muted'),
         html.Details([html.Summary('메일 원문 보기', className='small'),
                       html.Pre(imp['raw_text'][:20000], className='small bg-body-tertiary p-2 rounded',

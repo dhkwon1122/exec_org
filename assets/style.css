@@ -279,3 +279,13 @@ body {
   padding-top: .2rem; padding-bottom: .2rem; cursor: pointer;
 }
 .list-group-item:hover .status-select, .status-select:focus { border-color: var(--app-border-strong); background-color: #fff; }
+
+/* 편집 표(DataTable)도 본문 글꼴로 */
+.dash-table-container .dash-spreadsheet-container .dash-spreadsheet-inner td,
+.dash-table-container .dash-spreadsheet-container .dash-spreadsheet-inner th,
+.dash-table-container .dash-spreadsheet-container .dash-spreadsheet-inner input {
+  font-family: var(--bs-body-font-family) !important;
+}
+.dash-table-container .dash-spreadsheet-container .dash-spreadsheet-inner th {
+  background: #f6f7f9; color: var(--app-muted); font-weight: 650;
+}

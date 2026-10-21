@@ -96,7 +96,7 @@ def test_import_flow_with_ai_update_and_apply_all(monkeypatch):
     schedules.submit_import(second, background=False)
     # 수정 메일이 먼저 도착해도 옛 메일부터 반영 → 최신 값(10시)이 남는다
     r = schedules.apply_all_pending()
-    assert r == {'mails': 2, 'added': 3, 'updated': 1, 'same': 0}
+    assert r == {'mails': 2, 'added': 3, 'updated': 1, 'same': 0, 'skipped': 0}
     week = schedules.list_range('2026-10-26', '2026-11-01')
     assert [(e['date'], e['start_time'], e['title']) for e in week] == [
         ('2026-10-27', '10:00', '주간 임원회의'), ('2026-10-27', '14:00', 'AI센터 보고'), ('2026-10-30', '16:00', '외부 강연')]
@@ -322,3 +322,59 @@ def test_same_schedule_in_every_layout(text):
 def test_pasted_quoted_cells_do_not_swallow_prose():
     t = mail_text.from_pasted('a\t"b\nc"\td\n그는 "따옴표 하나 있는 문장\n끝')['text']
     assert t.splitlines() == ['a | b / c | d', '그는 "따옴표 하나 있는 문장', '끝']
+
+
+def _existing():
+    return schedules.save({'date': '2026-10-21', 'start_time': '08:00', 'end_time': '10:00', 'title': '주간 임원 간담회',
+                           'location': '본관동 7층 대회의실', 'attendees': '플랫폼장(7), staff팀장(2)', 'category': '회의'})
+
+
+def test_wrong_mapping_is_not_a_change():
+    """정제해 넣은 일정이 있으면, 다음 메일을 칸이 밀린 채 읽어도 '변경'으로 보지 않고 기존 값을 지킨다."""
+    x = _existing()
+    shifted = {'date': '2026-10-21', 'start_time': '08:00', 'end_time': '10:00', 'title': '26.10.21(수)',
+               'location': '08;00-10;00 주간 임원 간담회', 'attendees': '본관동 7층 대회의실', 'category': '기타'}
+    no_time = {'date': '2026-10-21', 'title': '주간임원간담회', 'location': '대회의실', 'attendees': '플랫폼장(7)'}
+    rows = schedules.preview([shifted]) + schedules.preview([no_time])
+    assert [(r['state'], r['match_id']) for r in rows] == [('same', x['id']), ('same', x['id'])]
+    r0 = rows[0]
+    assert (r0['title'], r0['location'], r0['attendees']) == (x['title'], x['location'], x['attendees'])  # 기존 값으로 보여 줌
+    assert '무시' in r0['note']
+    # 표를 거치지 않고 바로 반영(자동 규칙·모두 반영)해도 기존 값은 그대로
+    r = schedules.apply_events([shifted])
+    assert r == {'added': 0, 'updated': 0, 'same': 1, 'skipped': 0}
+    assert schedules.get(x['id']) == {**x, 'updated_at': schedules.get(x['id'])['updated_at']}
+
+
+def test_real_changes_still_detected():
+    x = _existing()
+    rows = schedules.preview([
+        {'date': '2026-10-21', 'start_time': '09:00', 'end_time': '10:00', 'title': '주간 임원 간담회',
+         'location': '본관 3층 소회의실'},
+        {'date': '2026-10-21', 'start_time': '12:00', 'title': '임원 오찬', 'location': '본관동 7층 대회의실'},
+        {'date': '2026-10-22', 'start_time': '09:00', 'title': '26.10.22(목)'},
+    ])
+    assert [(r['state'], r['changed']) for r in rows] == [
+        ('changed', ['start_time', 'location']), ('new', []), ('check', [])]
+    r = schedules.apply_events(rows)  # 미리보기 표 그대로 반영 — match_id 로 그 일정을 고침, 칸 밀린 새 줄은 건너뜀
+    assert r == {'added': 1, 'updated': 1, 'same': 0, 'skipped': 1}
+    got = schedules.get(x['id'])
+    assert (got['start_time'], got['location'], got['attendees']) == ('09:00', '본관 3층 소회의실', x['attendees'])
+    # 사람이 표에서 고친 값은 그대로 반영 (검증으로 막지 않음)
+    row = {**schedules.preview([{'date': '2026-10-21', 'title': '주간 임원 간담회'}])[0], 'attendees': '대회의실'}
+    schedules.apply_events([row])
+    assert schedules.get(x['id'])['attendees'] == '대회의실'
+
+
+def test_numbered_titles_stay_separate():
+    schedules.save({'date': '2026-10-21', 'start_time': '09:00', 'title': '임원 면담 1'})
+    rows = schedules.preview([{'date': '2026-10-21', 'start_time': '10:00', 'title': '임원 면담 2'}])
+    assert rows[0]['state'] == 'new'
+
+
+def test_ai_gets_existing_schedules_as_reference(monkeypatch):
+    _existing()
+    seen = []
+    monkeypatch.setattr(llm, 'chat', lambda system, user, **k: seen.append(user) or '{"events": []}')
+    schedules.ai_parse('주간 일정 메일', '2026-10-20')
+    assert '이미 등록된 일정' in seen[0] and '주간 임원 간담회 | 본관동 7층 대회의실' in seen[0]
