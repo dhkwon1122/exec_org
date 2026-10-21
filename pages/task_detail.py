@@ -6,7 +6,8 @@ import dash_bootstrap_components as dbc
 from dash import ALL, Input, Output, State, callback, ctx, dcc, html, no_update
 
 from components import todo_ui, ui
-from components.history_form import decode_text_upload, history_form, register_form_callbacks, save_history
+from components.history_form import (decode_text_upload, history_form, register_form_callbacks, save_history,
+                                     task_options)
 from services import auth, store
 
 dash.register_page(__name__, path_template='/task/<task_id>', name='업무 상세', title='업무 기록 · 상세')
@@ -41,8 +42,13 @@ def _edit_modal():
     ], id='ed-modal', is_open=False, size='lg')
 
 
-def _history_form():
-    return dbc.Card(dbc.CardBody(history_form('h')), className='mb-3')
+def _history_form(tid: int):
+    form = history_form('h')
+    # 여러 업무에 걸친 기록이면 다른 업무도 골라 둔다 — 그 업무들의 이력에도 같이 보인다
+    form.insert(2, dcc.Dropdown(id='h-also', multi=True, options=task_options(exclude=tid), value=[],
+                                placeholder='함께 걸친 다른 업무 (여러 업무에 해당하는 기록이면 선택)',
+                                className='mb-2'))
+    return dbc.Card(dbc.CardBody(form), className='mb-3')
 
 
 def _reference_form():
@@ -152,7 +158,7 @@ def layout(task_id=None, src=None, **_):
         dbc.Row([
             dbc.Col([
                 dbc.Tabs([
-                    dbc.Tab([_history_form(), html.Div(id='td-history')], label='이력', tab_id='history'),
+                    dbc.Tab([_history_form(tid), html.Div(id='td-history')], label='이력', tab_id='history'),
                     dbc.Tab([dbc.Card(dbc.CardBody(todo_ui.add_form('tt', with_task=False)), className='mb-3'),
                              html.Div(id='td-todos')], label='하위 업무', tab_id='todos', id='td-todo-tab'),
                     dbc.Tab([_reference_form(), html.Div(id='td-refs')], label='참고자료', tab_id='refs'),
@@ -213,7 +219,8 @@ def render(_, _t, _h, tid):
 
     hist = store.list_history(tid)
     history = dbc.ListGroup([
-        ui.history_card(h, added_todos=store.todos_for_history(h['id']) if h['ai_todos'] else None)
+        ui.history_card(h, added_todos=store.todos_for_history(h['id']) if h['ai_todos'] else None,
+                        context_task_id=tid)
         for h in hist]) if hist else \
         html.Div('이력이 없습니다.', className='text-muted small')
     pending = sorted(h['id'] for h in hist if h['ai_status'] == 'pending')
@@ -346,16 +353,19 @@ register_form_callbacks('h')
           Output('h-when', 'value'), Output('h-links', 'value'), Output('h-attach', 'contents'),
           Output('h-attach', 'filename'), Output('h-attach-names', 'children', allow_duplicate=True),
           Output('h-error', 'children'), Output('h-error', 'is_open'), Output('h-people', 'value'),
+          Output('h-also', 'value'),
           Input('h-add', 'n_clicks'), State('td-id', 'data'), State('h-type', 'value'),
           State('h-content', 'value'), State('h-when', 'value'), State('h-ai', 'value'),
           State('h-links', 'value'), State('h-attach', 'contents'), State('h-attach', 'filename'),
-          State('h-people', 'value'), State('td-refresh', 'data'), prevent_initial_call=True)
-def add_history(_, tid, etype, content, when, use_ai, links, att, att_names, people, n):
+          State('h-people', 'value'), State('h-also', 'value'), State('td-refresh', 'data'),
+          prevent_initial_call=True)
+def add_history(_, tid, etype, content, when, use_ai, links, att, att_names, people, also, n):
     try:
-        save_history(tid, etype, content, when, use_ai, links, att, att_names, auth.current_name(), people)
+        save_history(tid, etype, content, when, use_ai, links, att, att_names, auth.current_name(), people,
+                     also_task_ids=also)
     except ValueError as e:
-        return (no_update,) * 7 + (str(e), True, no_update)
-    return (n or 0) + 1, '', None, '', None, None, '', '', False, []
+        return (no_update,) * 7 + (str(e), True, no_update, no_update)
+    return (n or 0) + 1, '', None, '', None, None, '', '', False, [], []
 
 
 @callback(Output('td-refresh', 'data', allow_duplicate=True),

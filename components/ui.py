@@ -127,9 +127,11 @@ def source_icons(t: dict):
 
 
 def history_card(h: dict, terms: list[str] | None = None, show_task: bool = False, actions: bool = True,
-                 added_todos: set[str] | dict[str, int] | None = None):
+                 added_todos: set[str] | dict[str, int] | None = None, context_task_id: int | None = None):
     """이력 한 건. 원문은 그대로 보존하고, AI 정리본(제목·요약·키워드)이 있으면 위에 보여준다.
-    added_todos 가 {제목: 업무 id} 면 이미 업무로 만든 AI 할 일은 그 업무로 가는 링크가 된다."""
+    added_todos 가 {제목: 업무 id} 면 이미 업무로 만든 AI 할 일은 그 업무로 가는 링크가 된다.
+    context_task_id: 업무 화면에서 그릴 때 그 업무 — 여러 업무에 걸친 기록이면 나머지 업무를 보여 주고,
+    삭제 대신 '이 업무에서 빼기'를 쓸 수 있다."""
     auto = h['entry_type'] in AUTO_TYPES
     header = [
         html.I(className=f"bi {ENTRY_ICON.get(h['entry_type'], 'bi-dot')} me-2"),
@@ -141,7 +143,22 @@ def history_card(h: dict, terms: list[str] | None = None, show_task: bool = Fals
     if show_task and h['task_id']:
         header.append(dcc.Link(f"#{h['task_id']} {h.get('task_title', '')}", href=f"/task/{h['task_id']}",
                                className='small text-truncate me-2'))
+    all_tasks = ([{'id': h['task_id'], 'title': h.get('task_title', '')}] if h['task_id'] else []) \
+        + h.get('also_tasks', [])
+    shown = {h['task_id']} if show_task else set()
+    others = [t for t in all_tasks if t['id'] != context_task_id and t['id'] not in shown]
+    if others:
+        header.append(html.Span([
+            html.I(className='bi bi-diagram-2 me-1', title='여러 업무에 걸친 기록'),
+            *[dcc.Link(f"#{t['id']} {t['title']}", href=f"/task/{t['id']}", className='me-2') for t in others],
+        ], className='small text-muted text-truncate me-2'))
     header.append(html.Span(className='me-auto'))
+    shared = context_task_id is not None and len(all_tasks) > 1
+    if actions and shared:
+        header.append(dbc.Button(html.I(className='bi bi-box-arrow-right'),
+                                 id={'type': 'h-unlink', 'id': h['id'], 'task': context_task_id}, color='link',
+                                 size='sm', className='text-muted p-0 me-2',
+                                 title='이 업무에서 빼기 (다른 업무에는 그대로 남음)'))
     if actions and not auto:
         header.append(dbc.Button(html.I(className='bi bi-pencil'), id={'type': 'h-edit', 'id': h['id']},
                                  color='link', size='sm', className='text-muted p-0 me-2', title='수정'))
@@ -165,7 +182,7 @@ def history_card(h: dict, terms: list[str] | None = None, show_task: bool = Fals
                      className='text-muted mb-1'),
             *[html.Div([
                 html.I(className='bi bi-check-lg text-success me-1') if t['title'] in added_todos else
-                dbc.Button(html.I(className='bi bi-plus-lg'), id={'type': 'h-todo', 'hid': h['id'], 'idx': i},
+                dbc.Button(html.I(className='bi bi-plus-lg'), id={'type': 'h-todo', 'hid': h['id'], 'idx': i, 'task': context_task_id or 0},
                            color='link', size='sm', className='p-0 me-1', title='업무로 추가 (이 기록의 업무가 있으면 그 하위 업무로)')
                 if actions else html.I(className='bi bi-dot me-1'),
                 dcc.Link(t['title'], href=f"/task/{added_todos[t['title']]}", className='me-2',

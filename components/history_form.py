@@ -36,6 +36,13 @@ def _opts(values):
     return [{'label': v, 'value': v} for v in values]
 
 
+def task_options(exclude: int | None = None) -> list[dict]:
+    """이력을 걸 업무 고르기 — 진행 중인 업무 먼저, 완료된 업무는 뒤에."""
+    tasks = sorted(store.list_tasks(), key=lambda t: (t['status'] == '완료', -t['id']))
+    return [{'label': f"#{t['id']} {t['title']}" + (' (완료)' if t['status'] == '완료' else ''), 'value': t['id']}
+            for t in tasks if t['id'] != exclude]
+
+
 def people_options() -> list[dict]:
     return [{'label': f"{p['name']} {p['position']}".strip() + (f" · {p['org']}" if p['org'] else ''),
              'value': p['id']} for p in sorted(store.list_people(), key=lambda p: p['name'])]
@@ -109,13 +116,17 @@ def parse_uploads(contents, names) -> list[tuple[str, bytes]]:
 
 
 def save_history(task_id: int | None, etype: str, content: str, when, use_ai: bool, links_text: str,
-                 attach_contents, attach_names, author: str, person_ids: list[int] | None = None) -> dict:
+                 attach_contents, attach_names, author: str, person_ids: list[int] | None = None,
+                 also_task_ids: list[int] | None = None) -> dict:
     """이력 저장 + 임원 연결(선택 + 원문에서 자동 인식) + 관련 자료(입력한 링크·원문 속 링크·첨부 파일)
-    연결 + AI 정리 요청. 업무 상세·홈 빠른 기록·임원 화면이 같이 쓴다. 실패하면 ValueError."""
+    연결 + AI 정리 요청. 업무 상세·홈 빠른 기록·임원 화면이 같이 쓴다. 실패하면 ValueError.
+    also_task_ids: 이 기록이 함께 걸친 다른 업무들 (task_id 가 없으면 첫 업무가 이력의 업무)."""
     files = parse_uploads(attach_contents, attach_names)
     links = store.parse_links(links_text or '')
     people = sorted(set(person_ids or []) | set(store.detect_people(content or '')))
-    h = store.add_history(task_id, content, etype, author, when or None, person_ids=people)
+    h = store.add_history(task_id, content, etype, author, when or None, person_ids=people,
+                          also_task_ids=also_task_ids)
+    task_id = h['task_id']
     known = {l['url'] for l in links}
     links += [{'title': u, 'url': u} for u in store.urls_in_text(content) if u not in known]
     store.attach_links(task_id, h['id'], links, author=author)

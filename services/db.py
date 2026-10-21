@@ -159,6 +159,15 @@ class Person(Base):
     updated_at = Column(DateTime, default=_now, onupdate=_now)
 
 
+class HistoryTask(Base):
+    """한 이력이 여러 업무에 걸칠 때 — 이력의 업무(history.task_id) 말고 함께 걸친 다른 업무들.
+    걸친 업무마다 그 업무의 이력 목록에 같이 보인다."""
+    __tablename__ = 'history_tasks'
+
+    history_id = Column(Integer, ForeignKey('history.id', ondelete='CASCADE'), primary_key=True)
+    task_id = Column(Integer, ForeignKey('tasks.id', ondelete='CASCADE'), primary_key=True, index=True)
+
+
 class HistoryPerson(Base):
     __tablename__ = 'history_people'
 

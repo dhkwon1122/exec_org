@@ -93,3 +93,41 @@ def test_delete_task_cascades():
     assert store.get_task(b['id'])['parent_id'] is None
     assert store.linked_tasks(b['id']) == []
     assert store.upload_abspath(f['file_path']) is None
+
+
+def test_history_spanning_several_tasks():
+    a, b, c = store.create_task('조직개편'), store.create_task('임원 인사'), store.create_task('예산')
+    h = store.add_history(a['id'], '조직개편안 확정에 따라 임원 인사 발령 준비', '회의', also_task_ids=[b['id'], a['id']],
+                          keywords=['발령'])
+    assert h['task_id'] == a['id'] and [t['id'] for t in h['also_tasks']] == [b['id']]
+    mine = lambda tid: [x['id'] for x in store.list_history(tid) if x['entry_type'] not in store.AUTO_ENTRY_TYPES]  # noqa: E731
+    assert mine(b['id']) == [h['id']]  # 걸친 업무 이력에도 보인다
+    assert store.search_history(task_id=b['id'])[0]['id'] == h['id']
+    assert store.search_history('인사')[0]['id'] == h['id']  # 걸친 업무 제목으로도 찾는다
+    assert b['id'] in [t['id'] for t in store.list_tasks('확정')]
+    assert ('발령', 1) in store.keyword_stats(task_id=b['id'])
+    # 수정 창: 걸친 업무 전체를 다시 고른다 — 원래 업무를 빼면 남은 첫 업무가 이력의 업무
+    store.add_reference(a['id'], 'note', title='메모', note='메모', history_id=h['id'])
+    h = store.update_history(h['id'], task_ids=[b['id'], c['id']])
+    assert h['task_id'] == b['id'] and [t['id'] for t in h['also_tasks']] == [c['id']]
+    assert h['refs'][0]['task_id'] == b['id'] and mine(a['id']) == []
+    # 이 업무에서 빼기
+    store.unlink_history_task(h['id'], c['id'])
+    assert store.get_history(h['id'])['also_tasks'] == [] and mine(c['id']) == []
+    with pytest.raises(ValueError):
+        store.unlink_history_task(h['id'], b['id'])  # 하나만 남으면 빼지 못함 (삭제를 써야)
+    with pytest.raises(ValueError):
+        store.update_history(h['id'], task_ids=[])  # 임원도 업무도 없는 기록은 안 됨
+    with pytest.raises(ValueError):
+        store.add_history(a['id'], 'x', also_task_ids=[9999])
+
+
+def test_deleting_main_task_keeps_shared_history():
+    a, b = store.create_task('A'), store.create_task('B')
+    h = store.add_history(None, '두 업무에 걸친 기록', also_task_ids=[a['id'], b['id']])
+    assert h['task_id'] == a['id']  # 업무 없이 걸친 업무만 주면 첫 업무가 이력의 업무
+    only_a = store.add_history(a['id'], 'A 만의 기록')
+    store.delete_task(a['id'])
+    moved = store.get_history(h['id'])
+    assert moved['task_id'] == b['id'] and moved['also_tasks'] == []
+    assert store.get_history(only_a['id']) is None

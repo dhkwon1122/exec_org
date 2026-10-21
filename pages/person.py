@@ -86,7 +86,8 @@ def layout(person_id=None, **_):
                 dbc.Card(dbc.CardBody([
                     html.Div([html.I(className='bi bi-binoculars me-1'), '이 임원에 대해 기록'],
                              className='fw-semibold mb-2'),
-                    dcc.Dropdown(id='pp-task', placeholder='관련 업무 (동향이면 비워 두세요)', className='mb-2'),
+                    dcc.Dropdown(id='pp-task', multi=True, className='mb-2',
+                                 placeholder='관련 업무 — 여러 업무에 걸치면 모두 (동향이면 비워 두세요)'),
                     *form,
                 ]), className='mb-3'),
                 html.Div(id='pp-count', className='small text-muted mb-2'),
@@ -230,11 +231,11 @@ def load_text_file(contents, current):
           State('pp-content', 'value'), State('pp-when', 'value'), State('pp-ai', 'value'),
           State('pp-links', 'value'), State('pp-attach', 'contents'), State('pp-attach', 'filename'),
           State('pp-people', 'value'), State('pp-refresh', 'data'), prevent_initial_call=True)
-def add_record(_, pid, task_id, etype, content, when, use_ai, links, att, att_names, people, n):
+def add_record(_, pid, task_ids, etype, content, when, use_ai, links, att, att_names, people, n):
     people = sorted(set(people or []) | {pid})  # 이 화면에서 쓴 기록은 항상 이 임원에게 연결
     try:
-        save_history(task_id or None, etype, content, when, use_ai, links, att, att_names, auth.current_name(),
-                     people)
+        save_history(None, etype, content, when, use_ai, links, att, att_names, auth.current_name(),
+                     people, also_task_ids=task_ids or [])
     except ValueError as e:
         return (no_update,) * 7 + (str(e), True, no_update)
     return (n or 0) + 1, '', None, '', None, None, '', '', False, [pid]

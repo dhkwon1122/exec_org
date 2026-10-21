@@ -76,7 +76,8 @@ def layout(**_):
                 dbc.Card([
                     dbc.CardHeader([html.I(className='bi bi-lightning-charge me-1'), '빠른 기록'], className='small'),
                     dbc.CardBody([
-                        dcc.Dropdown(id='qr-task', placeholder='관련 업무 (임원 동향이면 비워도 됨)', className='mb-2'),
+                        dcc.Dropdown(id='qr-task', multi=True, className='mb-2',
+                                     placeholder='관련 업무 — 여러 업무에 걸치면 모두 (임원 동향이면 비워도 됨)'),
                         *history_form('qr', compact=True),
                         dbc.Alert(id='qr-ok', color='success', is_open=False, duration=5000,
                                   className='mt-2 mb-0 py-2 small'),
@@ -193,18 +194,20 @@ register_form_callbacks('qr')
           State('qr-content', 'value'), State('qr-when', 'value'), State('qr-ai', 'value'),
           State('qr-links', 'value'), State('qr-attach', 'contents'), State('qr-attach', 'filename'),
           State('qr-people', 'value'), State('home-refresh', 'data'), prevent_initial_call=True)
-def quick_record(_, task_id, etype, content, when, use_ai, links, att, att_names, people, n):
+def quick_record(_, task_ids, etype, content, when, use_ai, links, att, att_names, people, n):
     nu = no_update
+    task_ids = [int(x) for x in ([task_ids] if isinstance(task_ids, (int, str)) else task_ids or [])]
     try:
-        h = save_history(int(task_id) if task_id else None, etype, content, when, use_ai, links, att, att_names,
-                         auth.current_name(), people)
+        h = save_history(None, etype, content, when, use_ai, links, att, att_names, auth.current_name(), people,
+                         also_task_ids=task_ids)
     except ValueError as e:
         msg = str(e)
-        if not task_id and not people:
+        if not task_ids and not people:
             msg = '업무를 고르거나, 임원 동향이면 관련 임원을 고르세요 (원문에 등록된 임원 이름이 있으면 자동 연결).'
         return (nu,) * 7 + (msg, True, nu, False, nu)
     n_refs = len(h['refs'])
-    where = [f"#{task_id} 업무"] if task_id else []
+    task_id = h['task_id']
+    where = [f"#{t} 업무" for t in task_ids]
     where += [p['name'] for p in h['people']]
     msg = [f"{', '.join(where)}에 기록했습니다" + (f' (관련 자료 {n_refs}건)' if n_refs else '') + '. ']
     if task_id:
