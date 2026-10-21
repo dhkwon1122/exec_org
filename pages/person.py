@@ -1,12 +1,14 @@
 """임원 한 사람의 기록 모음 — 동향 기록하기, 연결된 모든 이력(동향·업무 기록) 타임라인, 자주 나온 키워드."""
+from datetime import date
+
 import dash
 import dash_bootstrap_components as dbc
 from dash import Input, Output, State, callback, ctx, dash_table, dcc, html, no_update
 
-from components import ui
+from components import absence_ui, ui
 from components.history_form import decode_text_upload, history_form, register_form_callbacks, save_history
 from pages.people import person_form
-from services import auth, llm, profile, store
+from services import absences, auth, llm, profile, store
 
 dash.register_page(__name__, path_template='/people/<person_id>', name='임원 상세', title='업무 기록 · 임원')
 
@@ -151,6 +153,7 @@ def render(_, _h, _t, pid):
                          className='badge rounded-pill text-bg-light border text-decoration-none me-1 mb-1')
                 for k, n in kw]) if kw else html.Div('없음', className='small text-muted')),
         ], className='mb-3'),
+        _absence_card(pid),
         _career_card(store.list_career(pid)),
         dbc.Card([
             dbc.CardHeader(f'관련 업무 ({len(tasks)})', className='small'),
@@ -162,6 +165,26 @@ def render(_, _h, _t, pid):
     task_opts = [{'label': f"#{t['id']} {t['title']}", 'value': t['id']} for t in store.list_tasks()]
     pending = sorted(h['id'] for h in hist if h['ai_status'] == 'pending')
     return header, timeline, count, side, task_opts, pending, not pending
+
+
+def _absence_card(pid: int):
+    """부재 — 지금·앞으로의 부재 먼저, 그다음 최근 지난 부재 (캘린더의 '임원 부재' 탭에서 등록)."""
+    rows = absences.for_person(pid, limit=8)
+    today = date.today().isoformat()
+    items = [dbc.ListGroupItem([
+        html.Span(r['kind'], className='badge me-2',
+                  style={'background': absence_ui.KIND_COLOR.get(r['kind'], '#6b7280'), 'color': '#fff'}),
+        html.Span(absence_ui._period(r)),
+        dbc.Badge('부재 중', color='danger', className='ms-2') if r['start_date'] <= today <= r['end_date'] else None,
+        html.Div(' · '.join(x for x in [r['place'], f"대결 {r['deputy']}" if r['deputy'] else ''] if x),
+                 className='text-muted') if r['place'] or r['deputy'] else None,
+    ], className='small', style={'opacity': .6} if r['end_date'] < today else None) for r in rows]
+    return dbc.Card([
+        dbc.CardHeader(html.Div([html.Span('부재 일정'), dcc.Link('캘린더에서 등록', href='/calendar?tab=absence',
+                                                              className='ms-auto small')], className='d-flex'),
+                       className='small'),
+        dbc.ListGroup(items, flush=True) if items else dbc.CardBody('등록된 부재가 없습니다.', className='small text-muted'),
+    ], className='mb-3')
 
 
 def _hr_line(p: dict):

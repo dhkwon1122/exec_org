@@ -1,4 +1,5 @@
-"""캘린더 — '업무' 탭: 월 단위로 업무 마감·시작과 이력. '원장님 일정' 탭: components/director_ui.py."""
+"""캘린더 — '업무' 탭: 월 단위로 업무 마감·시작과 이력. '원장님 일정' 탭: components/director_ui.py.
+'임원 부재' 탭: components/absence_ui.py."""
 import calendar as pycal
 from datetime import date
 
@@ -6,7 +7,7 @@ import dash
 import dash_bootstrap_components as dbc
 from dash import ALL, Input, Output, State, callback, ctx, dcc, html, no_update
 
-from components import director_ui, todo_ui, ui
+from components import absence_ui, director_ui, todo_ui, ui
 from services import store
 
 dash.register_page(__name__, path='/calendar', name='캘린더', title='업무 기록 · 캘린더')
@@ -19,7 +20,8 @@ def layout(tab=None, **_):
     return html.Div([ui.page_head('캘린더'), dbc.Tabs([
         dbc.Tab(_work_layout(), label='업무 캘린더', tab_id='work', className='pt-3'),
         dbc.Tab(director_ui.layout(), label='원장님 일정', tab_id='director', className='pt-3'),
-    ], id='cal-tabs', active_tab='director' if tab == 'director' else 'work')])
+        dbc.Tab(absence_ui.layout(), label='임원 부재', tab_id='absence', className='pt-3'),
+    ], id='cal-tabs', active_tab=tab if tab in ('director', 'absence') else 'work')])
 
 
 def _work_layout():
