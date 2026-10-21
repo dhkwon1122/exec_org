@@ -131,3 +131,20 @@ def test_calendar_month():
     assert [x['title'] for x in days['2026-10-31']['todos']] == ['a']  # 마감인 업무도 같은 체크 목록
     assert days['2026-10-01']['tasks_start'][0]['title'] == 'a'
     assert '2026-11-02' not in days
+
+
+def test_task_tree_depth_and_status_filter():
+    a = store.create_task('A')
+    b = store.create_todo('B', task_id=a['id'])
+    c = store.create_todo('C', task_id=b['id'])
+    store.create_todo('D', task_id=a['id'])
+    store.create_task('E')
+    flat = lambda rows: [(r['task']['title'], r['level'], r['n_hidden']) for r in rows]  # noqa: E731
+    assert flat(store.task_tree(depth=0)) == [('E', 0, 0), ('A', 0, 2)]
+    assert flat(store.task_tree(depth=1)) == [('E', 0, 0), ('A', 0, 0), ('B', 1, 1), ('D', 1, 0)]
+    assert flat(store.task_tree(depth=99)) == [('E', 0, 0), ('A', 0, 0), ('B', 1, 0), ('C', 2, 0), ('D', 1, 0)]
+    store.set_todo_done(c['id'], True)
+    rows = store.task_tree(depth=99)
+    assert next(r for r in rows if r['task']['title'] == 'B')['n_done'] == 1
+    # 진행중만: 완료된 C 는 빠짐
+    assert [r['task']['title'] for r in store.task_tree(['진행중'], depth=99)] == ['E', 'A', 'B', 'D']

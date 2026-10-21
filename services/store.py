@@ -193,6 +193,38 @@ def list_tasks(query: str = '', status: str | list[str] | None = None, tag: str 
         return tasks
 
 
+def task_tree(statuses: list[str] | None = None, depth: int = 1) -> list[dict]:
+    """최상위 업무부터 depth 단계 아래 하위 업무까지 펼친 목록 — [{'task', 'level', 'n_children', 'n_hidden'}].
+    statuses 가 있으면 그 상태의 업무만(상위가 걸러지면 그 아래도 안 보임). 형제는 최근 수정 순, 하위는 만든 순.
+    n_hidden = depth 를 넘어 펼치지 않은 바로 아래 하위 업무 수. 고리(잘못된 상위 지정)가 있어도 멈춘다."""
+    tasks = list_tasks()
+    keep = set(statuses or [])
+    children: dict[int | None, list[dict]] = {}
+    ids = {t['id'] for t in tasks}
+    for t in tasks:
+        children.setdefault(t['parent_id'] if t['parent_id'] in ids else None, []).append(t)
+    for pid, kids in children.items():
+        if pid is not None:
+            kids.sort(key=lambda t: t['id'])
+    out, seen = [], set()
+
+    def walk(t, level):
+        if t['id'] in seen or (keep and t['status'] not in keep):
+            return
+        seen.add(t['id'])
+        kids = children.get(t['id'], [])
+        shown = level < depth
+        out.append({'task': t, 'level': level, 'n_children': len(kids),
+                    'n_done': sum(k['status'] == '완료' for k in kids), 'n_hidden': 0 if shown else len(kids)})
+        if shown:
+            for k in kids:
+                walk(k, level + 1)
+
+    for t in children.get(None, []):
+        walk(t, 0)
+    return out
+
+
 def child_progress(task_ids: list[int]) -> dict[int, tuple[int, int]]:
     """업무별 바로 아래 하위 업무 (완료 수, 전체 수)."""
     if not task_ids:

@@ -1,7 +1,7 @@
 """업무 목록: 검색·필터, 새 업무 등록, 전체 최근 이력."""
 import dash
 import dash_bootstrap_components as dbc
-from dash import Input, Output, State, callback, ctx, dcc, html, no_update
+from dash import ALL, Input, Output, State, callback, ctx, dcc, html, no_update
 
 from datetime import date, timedelta
 
@@ -53,7 +53,17 @@ def layout(**_):
                     dbc.Col(dcc.Dropdown(id='f-tag', placeholder='태그'), md=2),
                     dbc.Col(dbc.Button([html.I(className='bi bi-plus-lg me-1'), '새 업무'], id='new-open',
                                        color='primary', className='w-100'), md=2),
-                ], className='g-2 mb-3'),
+                ], className='g-2 mb-2'),
+                html.Div([
+                    html.Span('하위 업무 펼치기', className='small text-muted me-2'),
+                    dbc.RadioItems(id='home-depth', value=1, inline=True, className='d-flex',
+                                   inputClassName='btn-check', labelClassName='btn btn-sm btn-outline-secondary me-1',
+                                   labelCheckedClassName='active', persistence=True, persistence_type='local',
+                                   options=[{'label': '최상위만', 'value': 0}, {'label': '1단계', 'value': 1},
+                                            {'label': '2단계', 'value': 2}, {'label': '3단계', 'value': 3},
+                                            {'label': '전체', 'value': 99}]),
+                    html.Span('체크 = 완료', className='small text-muted ms-auto'),
+                ], className='d-flex align-items-center flex-wrap mb-2'),
                 html.Div(id='task-list'),
             ], lg=8),
             dbc.Col([
@@ -79,28 +89,56 @@ def layout(**_):
     ])
 
 
+def _task_row(t: dict, level: int = 0, n_children: int = 0, n_done: int = 0, n_hidden: int = 0,
+              parent_title: str = ''):
+    """업무 한 줄 — 완료 체크, 상태 바꾸기, 제목(업무 화면으로), 하위 진행률·담당·마감·태그.
+    하위 업무는 단계만큼 들여 쓴다."""
+    done = t['status'] == '완료'
+    meta = [m for m in [n_children and f"하위 {n_done}/{n_children}", t['owner'] and f"담당 {t['owner']}",
+                        f"수정 {t['updated_at'][:10]}" if level == 0 else ''] if m]
+    return dbc.ListGroupItem(html.Div([
+        dbc.Checkbox(id={'type': 'home-done', 'id': t['id']}, value=done, className='me-2 mt-1'),
+        html.Div([
+            html.Div([
+                html.I(className='bi bi-arrow-return-right text-muted me-1') if level else None,
+                dcc.Link(f"#{t['id']} {t['title']}", href=f"/task/{t['id']}",
+                         className='text-decoration-none fw-semibold' + (' text-muted' if done else ''),
+                         style={'textDecoration': 'line-through'} if done else None),
+                html.Span(f' · 상위 {parent_title}', className='small text-muted') if parent_title else None,
+            ]),
+            html.Div(t['description'][:140] + ('…' if len(t['description']) > 140 else ''),
+                     className='small text-muted') if t['description'] and level == 0 else None,
+            html.Div([
+                todo_ui.due_badge(t['due_date'], done) if t['due_date'] else None,
+                *ui.tag_badges(t['tags']),
+                html.Span(' · '.join(meta), className='small text-muted me-2'),
+                dcc.Link(f'하위 {n_hidden}개 더 ▸', href=f"/task/{t['id']}", className='small')
+                if n_hidden else None,
+            ], className='small'),
+        ], className='flex-grow-1'),
+        dbc.Select(id={'type': 'home-status', 'id': t['id']}, value=t['status'], size='sm',
+                   options=[{'label': x, 'value': x} for x in store.STATUSES], style={'width': '92px'},
+                   className='ms-2'),
+    ], className='d-flex align-items-start'), className='py-2',
+        style={'paddingLeft': f'{0.75 + level * 1.6}rem',
+               'background': 'var(--bs-tertiary-bg)' if level else None})
+
+
 @callback(Output('task-list', 'children'), Output('recent-history', 'children'), Output('f-tag', 'options'),
-          Input('q', 'value'), Input('f-status', 'value'), Input('f-tag', 'value'), Input('home-refresh', 'data'))
-def render_list(q, statuses, tag, _):
-    # 검색하지 않을 때는 최상위 업무만 — 하위 업무는 진행률로 보여 주고 업무 화면에서 연다
-    tasks = store.list_tasks(query=q or '', status=statuses or None, tag=tag or '', top_level=not q and not tag)
-    progress = store.child_progress([t['id'] for t in tasks])
-    if tasks:
-        items = []
-        for t in tasks:
-            done, total = progress.get(t['id'], (0, 0))
-            meta = [m for m in [total and f"하위 {done}/{total}", t['owner'] and f"담당 {t['owner']}",
-                                t['due_date'] and f"마감 {t['due_date']}",
-                                f"수정 {t['updated_at']}"] if m]
-            items.append(dbc.ListGroupItem([
-                html.Div([ui.status_badge(t['status']), ui.task_link(t)], className='mb-1'),
-                html.Div(t['description'][:140] + ('…' if len(t['description']) > 140 else ''),
-                         className='small text-muted mb-1') if t['description'] else None,
-                html.Div([*ui.tag_badges(t['tags']), html.Span(' · '.join(meta), className='small text-muted')]),
-            ]))
-        task_view = dbc.ListGroup(items)
-    else:
-        task_view = dbc.Alert('조건에 맞는 업무가 없습니다. 오른쪽 위 "새 업무"로 등록하세요.', color='light')
+          Input('q', 'value'), Input('f-status', 'value'), Input('f-tag', 'value'), Input('home-refresh', 'data'),
+          Input('home-depth', 'value'), Input('todo-changed', 'data'))
+def render_list(q, statuses, tag, _, depth, _t):
+    if q or tag:  # 검색·태그는 하위 업무까지 찾아 평평하게
+        tasks = store.list_tasks(query=q or '', status=statuses or None, tag=tag or '')
+        titles = {t['id']: t['title'] for t in store.list_tasks()}
+        progress = store.child_progress([t['id'] for t in tasks])
+        rows = [_task_row(t, 0, progress.get(t['id'], (0, 0))[1], progress.get(t['id'], (0, 0))[0],
+                          parent_title=titles.get(t['parent_id'], '')) for t in tasks]
+    else:  # 최상위 업무 아래로 고른 단계만큼 하위 업무를 펼친다
+        tree = store.task_tree(statuses or None, depth if depth is not None else 1)
+        rows = [_task_row(r['task'], r['level'], r['n_children'], r['n_done'], r['n_hidden']) for r in tree]
+    task_view = dbc.ListGroup(rows) if rows else \
+        dbc.Alert('조건에 맞는 업무가 없습니다. 오른쪽 위 "새 업무"로 등록하세요.', color='light')
 
     recent = store.recent_history(15)
     history_view = dbc.ListGroup([
@@ -199,3 +237,24 @@ def new_task(_o, _c, _s, title, desc, status, owner, start, due, tags, parent):
     except ValueError as e:
         return True, no_update, str(e), True, no_update
     return False, no_update, '', False, f"/task/{t['id']}"
+
+
+@callback(Output('home-refresh', 'data', allow_duplicate=True),
+          Input({'type': 'home-done', 'id': ALL}, 'value'), Input({'type': 'home-status', 'id': ALL}, 'value'),
+          State('home-refresh', 'data'), prevent_initial_call=True)
+def change_status(_d, _s, n):
+    """목록에서 완료 체크·상태 바꾸기. 목록이 다시 그려질 때도 불리지만 DB 와 같은 값이면 아무것도 안 한다."""
+    trig = ctx.triggered_id
+    if not isinstance(trig, dict) or not ctx.triggered:
+        return no_update
+    t = store.get_task(trig['id'])
+    value = ctx.triggered[0]['value']
+    if t is None or value is None:
+        return no_update
+    if trig['type'] == 'home-done':
+        changed = store.set_todo_done(t['id'], bool(value), by=auth.current_name())
+    else:
+        changed = value != t['status']
+        if changed:
+            store.update_task(t['id'], author=auth.current_name(), status=value)
+    return (n or 0) + 1 if changed else no_update
