@@ -201,8 +201,19 @@ def _eml(data: bytes) -> dict:
         subject = str(msg.get('subject') or '')
     except Exception:  # noqa: BLE001 — 깨진 머리글
         subject = ''
+    def header(name):
+        try:
+            return str(msg.get(name) or '').strip()
+        except Exception:  # noqa: BLE001
+            return ''
     # Date 머리가 없으면(저장 방식에 따라) 본문에 붙은 '보낸 날짜:' 줄로
-    return {'name': subject, 'mail_date': _date_of(msg.get('date')) or _header_date(body), 'text': body}
+    return {'name': subject, 'mail_date': _date_of(msg.get('date')) or _header_date(body), 'text': body,
+            'sender': header('from'), 'message_id': header('message-id')}
+
+
+def from_bytes(data: bytes) -> dict:
+    """메일 원본(RFC 822, POP3 로 받은 그대로) → {'name','mail_date','text','sender','message_id'}."""
+    return _eml(data)
 
 
 def _msg(data: bytes) -> dict:

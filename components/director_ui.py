@@ -55,7 +55,8 @@ def layout():
             dbc.Button('오늘', id='dr-today', color='secondary', outline=True, size='sm', className='ms-2 me-3'),
             dbc.RadioItems(id='dr-view', value='week', inline=True, className='d-flex', inputClassName='btn-check',
                            labelClassName='btn btn-sm btn-outline-secondary', labelCheckedClassName='active',
-                           options=[{'label': '주', 'value': 'week'}, {'label': '월', 'value': 'month'}]),
+                           options=[{'label': '주', 'value': 'week'}, {'label': '월', 'value': 'month'},
+                                    {'label': '목록', 'value': 'list'}]),
             dbc.Input(id='dr-q', type='search', debounce=True, placeholder='일정 검색 (제목·장소·참석자·내용)',
                       size='sm', className='ms-auto me-2', style={'maxWidth': '260px'}),
             dbc.Button([html.I(className='bi bi-envelope-paper me-1'), '메일로 가져오기'], id='dr-imp-open',
@@ -127,6 +128,9 @@ def layout():
 # ── 보기 ──────────────────────────────────────────────────────────────
 
 def _range(view: str, anchor: date) -> tuple[date, date]:
+    if view == 'list':  # 그 달 1일 ~ 말일
+        last = pycal.monthrange(anchor.year, anchor.month)[1]
+        return anchor.replace(day=1), anchor.replace(day=last)
     if view == 'month':
         weeks = pycal.Calendar(firstweekday=0).monthdatescalendar(anchor.year, anchor.month)
         return weeks[0][0], weeks[-1][-1]
@@ -247,15 +251,54 @@ def month_view(anchor: date, events: list[dict]):
                       className='w-100', style={'tableLayout': 'fixed'})
 
 
+def _label(e: dict) -> str:
+    d = date.fromisoformat(e['date'])
+    time = (e['start_time'] + (f"~{e['end_time']}" if e['end_time'] else '')) if e['start_time'] else '종일'
+    rest = ' · '.join(x for x in (e['location'], e['attendees']) if x)
+    src = ' [메일]' if e['source'] == 'mail' else ''
+    return f"{d.month}/{d.day}({WEEKDAYS[d.weekday()]}) {time}  {e['title']}" + (f'  — {rest}' if rest else '') + src
+
+
+def list_view(events: list[dict], empty: str):
+    """고를 수 있는 일정 목록 — 잘못 들어간 일정을 한꺼번에 지울 때."""
+    if not events:
+        return html.Div(empty, className='text-muted small')
+    return html.Div([
+        html.Div([
+            html.Span(f'일정 {len(events)}건', className='small text-muted me-3'),
+            dbc.Button('전체 선택', id='dr-sel-all', size='sm', color='secondary', outline=True, className='me-1'),
+            dbc.Button('선택 해제', id='dr-sel-none', size='sm', color='secondary', outline=True, className='me-2'),
+            dcc.ConfirmDialogProvider(
+                dbc.Button([html.I(className='bi bi-trash me-1'), '선택한 일정 삭제'], size='sm', color='danger',
+                           outline=True), id='dr-sel-del', message='선택한 일정을 삭제할까요? 되돌릴 수 없습니다.'),
+            html.Span(id='dr-sel-msg', className='small text-muted ms-2'),
+        ], className='d-flex align-items-center flex-wrap gap-1 mb-2'),
+        dbc.Checklist(id='dr-sel', value=[], className='small',
+                      options=[{'label': _label(e), 'value': e['id']} for e in events]),
+        html.Div('일정을 고치려면 주·월 보기에서 누르세요. "[메일]"은 메일에서 가져온 일정입니다.',
+                 className='small text-muted mt-2'),
+    ])
+
+
 def search_view(q: str):
-    found = schedules.search(q)
-    if not found:
-        return html.Div('검색 결과가 없습니다.', className='text-muted small')
-    return html.Div([html.Div(f'일정 {len(found)}건', className='small text-muted mb-1'), dbc.ListGroup([
-        dbc.ListGroupItem(html.Div([
-            html.Span(f"{e['date']} ({WEEKDAYS[date.fromisoformat(e['date']).weekday()]})", className='me-2 text-nowrap'),
-            html.Div(_ev_box(e), className='flex-grow-1')], className='d-flex align-items-center'), className='py-1')
-        for e in found])])
+    return list_view(schedules.search(q), '검색 결과가 없습니다.')
+
+
+@callback(Output('dr-sel', 'value'), Input('dr-sel-all', 'n_clicks'), Input('dr-sel-none', 'n_clicks'),
+          State('dr-sel', 'options'), prevent_initial_call=True)
+def select_all(_a, _n, options):
+    if not ctx.triggered or not ctx.triggered[0]['value']:
+        return no_update
+    return [o['value'] for o in options] if ctx.triggered_id == 'dr-sel-all' else []
+
+
+@callback(Output('dr-refresh', 'data', allow_duplicate=True), Input('dr-sel-del', 'submit_n_clicks'),
+          State('dr-sel', 'value'), State('dr-refresh', 'data'), prevent_initial_call=True)
+def delete_selected(n, ids, r):
+    if not n or not ids:
+        return no_update
+    schedules.delete_many(ids)
+    return (r or 0) + 1
 
 
 @callback(Output('dr-anchor', 'data'), Output('dr-view', 'value'),
@@ -272,7 +315,7 @@ def move(_p, _n, _t, _d, anchor, view):
     if trig == 'dr-today':
         return date.today().isoformat(), no_update
     step = -1 if trig == 'dr-prev' else 1
-    if view == 'month':
+    if view in ('month', 'list'):
         y, m = a.year, a.month + step
         y, m = (y - 1, 12) if m == 0 else (y + 1, 1) if m == 13 else (y, m)
         return date(y, m, 1).isoformat(), no_update
@@ -289,6 +332,8 @@ def render(anchor, view, _, q):
     events = schedules.list_range(start.isoformat(), end.isoformat())
     if view == 'month':
         return month_view(a, events), f'{a.year}년 {a.month}월'
+    if view == 'list':
+        return list_view(events, '이 달 일정이 없습니다.'), f'{a.year}년 {a.month}월 일정 목록'
     title = f'{start.year}년 {start.month}월 {start.day}일 – {end.month}월 {end.day}일'
     return week_view(start, events), title
 
@@ -378,6 +423,12 @@ def _imports_view(imps: list[dict], selected):
                 dbc.Button(html.I(className='bi bi-arrow-repeat'), id={'type': 'dr-imp-redo', 'id': i['id']}, size='sm',
                            color='secondary', outline=True, className='me-1', title='다시 정리',
                            disabled=i['status'] == 'pending'),
+                dcc.ConfirmDialogProvider(
+                    dbc.Button(html.I(className='bi bi-calendar-x'), size='sm', color='danger', outline=True,
+                               className='me-1', title=f"이 메일로 반영된 일정 {i['n_events']}건 지우기"),
+                    id={'type': 'dr-imp-undo', 'id': i['id']},
+                    message=f"이 메일로 반영된 일정 {i['n_events']}건을 모두 지울까요? 메일은 '확인 전'으로 돌아가니 "
+                            '다시 정리해 반영할 수 있습니다.') if i['n_events'] else None,
                 dbc.Button(html.I(className='bi bi-trash'), id={'type': 'dr-imp-del', 'id': i['id']}, size='sm',
                            color='secondary', outline=True, title='가져온 메일 지우기 (반영된 일정은 그대로)'),
             ], className='text-nowrap text-end'),
@@ -396,11 +447,12 @@ def open_import(n):
           Input('dr-imp-modal', 'is_open'), Input('dr-imp-go', 'n_clicks'), Input('dr-imp-files', 'contents'),
           Input('dr-imp-poll', 'n_intervals'), Input('dr-imp-all', 'n_clicks'),
           Input({'type': 'dr-imp-redo', 'id': ALL}, 'n_clicks'), Input({'type': 'dr-imp-del', 'id': ALL}, 'n_clicks'),
+          Input({'type': 'dr-imp-undo', 'id': ALL}, 'submit_n_clicks'),
           Input({'type': 'dr-imp-view', 'id': ALL}, 'n_clicks'), Input('dr-imp-apply', 'n_clicks'),
           State('dr-imp-text', 'value'), State('dr-imp-date', 'value'), State('dr-imp-files', 'filename'),
           State('dr-imp-sel', 'data'), State('dr-imp-table', 'data'), State('dr-refresh', 'data'),
           prevent_initial_call=True)
-def imports(is_open, _go, files, _poll, _all, _redo, _del, _view, _apply, text, mail_date, names, sel, rows, n):
+def imports(is_open, _go, files, _poll, _all, _redo, _del, _undo, _view, _apply, text, mail_date, names, sel, rows, n):
     nu = no_update
     trig = ctx.triggered_id
     msg, color, clear, refresh = nu, 'info', nu, nu
@@ -435,6 +487,10 @@ def imports(is_open, _go, files, _poll, _all, _redo, _del, _view, _apply, text, 
     elif isinstance(trig, dict) and trig['type'] == 'dr-imp-redo':
         schedules.reparse(trig['id'])
         sel = trig['id']
+    elif isinstance(trig, dict) and trig['type'] == 'dr-imp-undo':
+        k = schedules.delete_by_import(trig['id'])
+        msg, color, refresh, sel = (f'이 메일로 반영된 일정 {k}건을 지웠습니다. 다시 정리(↻)한 뒤 반영하세요.', 'warning',
+                                    (n or 0) + 1, trig['id'])
     elif isinstance(trig, dict) and trig['type'] == 'dr-imp-del':
         schedules.delete_import(trig['id'])
         sel = None if sel == trig['id'] else sel

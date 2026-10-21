@@ -19,6 +19,7 @@ from dash import dcc, html
 from flask.sessions import SecureCookieSessionInterface
 
 import components.todo_ui  # noqa: F401  업무 체크/삭제 공용 콜백 등록
+from services import mailbox
 from components.history_actions import history_edit_modal  # 이력 수정·삭제 공용 콜백 등록
 from services import auth, store, users
 from services.db import DATA_DIR
@@ -230,6 +231,7 @@ def _navbar():
         dbc.NavItem(dbc.NavLink('임원', href='/people', active='partial')),
         dbc.NavItem(dbc.NavLink('내 업무', href='/todos', active='exact')),
         dbc.NavItem(dbc.NavLink('캘린더', href='/calendar', active='exact')),
+        dbc.NavItem(dbc.NavLink('받은 메일', href='/inbox', active='exact')),
         dbc.NavItem(dbc.NavLink('이력 검색', href='/search', active='exact')),
         dbc.NavItem(dbc.NavLink('참고자료', href='/references', active='exact')),
     ]
@@ -269,6 +271,9 @@ app.layout = serve_layout
 def _toggle_nav(_, is_open):
     return not is_open
 
+
+# POP3 받은 메일 주기 확인 (MAIL_POP3_* 설정 시, 여러 워커 중 하나만)
+mailbox.start_poller()
 
 if __name__ == '__main__':
     app.run(debug=os.environ.get('DASH_DEBUG', '1') == '1', host='0.0.0.0', port=int(os.environ.get('PORT', 8050)))

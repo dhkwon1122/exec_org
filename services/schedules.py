@@ -11,7 +11,7 @@ import re
 from concurrent.futures import ThreadPoolExecutor
 from datetime import date, datetime, timedelta
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from services import db, llm
 from services.db import Schedule, ScheduleImport
@@ -105,6 +105,33 @@ def delete(sid: int) -> None:
         if x:
             s.delete(x)
             s.commit()
+
+
+def delete_many(ids) -> int:
+    """고른 일정을 한꺼번에 지운다. 지운 건수."""
+    ids = [int(i) for i in ids or []]
+    if not ids:
+        return 0
+    with db.SessionLocal() as s:
+        rows = list(s.scalars(select(Schedule).where(Schedule.id.in_(ids))))
+        for x in rows:
+            s.delete(x)
+        s.commit()
+        return len(rows)
+
+
+def delete_by_import(import_id: int) -> int:
+    """이 메일로 들어간(또는 마지막으로 고쳐진) 일정을 모두 지우고 메일을 '반영 전'으로 돌린다 — 잘못 정리된 메일을
+    지운 뒤 다시 정리·반영할 때. 지운 건수."""
+    with db.SessionLocal() as s:
+        rows = list(s.scalars(select(Schedule).where(Schedule.import_id == import_id)))
+        for x in rows:
+            s.delete(x)
+        imp = s.get(ScheduleImport, import_id)
+        if imp is not None:
+            imp.applied_at = None
+        s.commit()
+        return len(rows)
 
 
 def search(query: str, limit: int = 200) -> list[dict]:
@@ -235,6 +262,126 @@ def rule_parse(text: str, mail_date: str) -> list[dict]:
     return out
 
 
+# ── 표 제목 행 기준 읽기 ──────────────────────────────────────────────
+# 비서실 일정표는 제목 행(일자 | 시간 | 내용 | 장소 | 참석 …)이 있다. 칸을 순서로 짐작하면 날짜 칸 형식을 못 알아볼 때
+# 한 칸씩 밀려 '일정 이름에 날짜, 장소에 내용'이 들어가므로, 제목 행으로 열의 뜻을 정하고 그대로 읽는다.
+HEADER_WORDS = {
+    'datetime': ['일시', '일정일시', '일자/시간', '날짜/시간', '일자및시간'],
+    'date': ['일자', '날짜', '일', '월일', '월/일', '일자(요일)', 'date'],
+    'weekday': ['요일'],
+    'time': ['시간', '시각', 'time', '시간대'],
+    'start': ['시작', '시작시간', '시작시각'],
+    'end': ['종료', '종료시간', '종료시각'],
+    'title': ['내용', '일정', '제목', '행사', '행사명', '회의명', '일정명', '업무', '주요일정', '주요내용', '건명', '안건',
+              '일정내용', '회의', '주요행사'],
+    'location': ['장소', '위치', '회의실', '장소/위치'],
+    'attendees': ['참석', '참석자', '배석', '배석자', '대상', '참석대상', '참석범위', '동행', '수행', '참석인원'],
+    'category': ['구분', '분류', '유형', '종류', '일정구분'],
+    'details': ['비고', '세부', '세부내용', '세부사항', '준비', '준비사항', '준비물', '담당', '담당자', '메모', '주관',
+                '기타', '참고', '복장', '보고자', '주관부서'],
+}
+_HEADER_KEY = {re.sub(r'[\s()/·.]', '', w).lower(): k for k, ws in HEADER_WORDS.items() for w in ws}
+
+
+def _cells(line: str) -> list[str]:
+    return [c.strip() for c in line.split('|')]
+
+
+def _header_kinds(line: str) -> list[str] | None:
+    """제목 행이면 열마다 뜻('date','time','title',…, 모르면 '') 목록, 아니면 None."""
+    if '|' not in line:
+        return None
+    kinds = [_HEADER_KEY.get(re.sub(r'[\s()/·.]', '', c).lower(), '') for c in _cells(line)]
+    known = [k for k in kinds if k]
+    if len(known) >= 2 and ('title' in kinds) and ({'date', 'datetime', 'time', 'start'} & set(kinds)):
+        return kinds
+    return None
+
+
+_DAY_ONLY = re.compile(r'^\s*(?P<d>\d{1,2})\s*일?\s*(?:\(?[월화수목금토일]\)?)?\s*$')
+
+
+def parse_date_cell(cell: str, base: date, prev: str | None) -> str | None:
+    """날짜 칸 → YYYY-MM-DD. '10/21(화)', '10.21', '10월 21일', '2026-10-21' 외에 '21일(화)', '21(화)' 처럼
+    일만 있으면 앞 행(없으면 메일)의 달로, 날이 줄면 다음 달로."""
+    cell = (cell or '').replace(' / ', ' ')
+    found = _find_date(cell, base)
+    if found:
+        return found[0]
+    m = _DAY_ONLY.match(cell)
+    if not m:
+        return None
+    ref = date.fromisoformat(prev) if prev else base
+    d, y, mo = int(m.group('d')), ref.year, ref.month
+    if prev and d < ref.day:
+        y, mo = (y + 1, 1) if mo == 12 else (y, mo + 1)
+    try:
+        return date(y, mo, d).isoformat()
+    except ValueError:
+        return None
+
+
+def table_parse(text: str, mail_date: str) -> list[dict]:
+    """제목 행이 있는 표만 읽는다(없으면 []). 날짜 칸이 비면(병합) 위 행의 날짜, 시간이 없으면 종일."""
+    base = date.fromisoformat(mail_date) if mail_date else date.today()
+    out, kinds, cur = [], None, None
+    for line in (text or '').splitlines():
+        if not line.strip():
+            continue
+        head = _header_kinds(line)
+        if head:
+            kinds, cur = head, None
+            continue
+        if kinds is None:
+            continue
+        if '|' not in line:
+            kinds = None  # 표가 끝났다
+            continue
+        cells = _cells(line)
+        if len(cells) < len(kinds) and _ROW_STARTS_WITH_TIME.match(line) and kinds[0] in ('date', 'datetime'):
+            cells = [''] * (len(kinds) - len(cells)) + cells  # 병합된 날짜 칸이 빠진 행 → 앞을 비운다
+        cells += [''] * (len(kinds) - len(cells))
+        col, extra = {}, []
+        for k, c in zip(kinds, cells):
+            if not c or k == 'weekday':
+                continue
+            if not k:
+                extra.append(c)  # 모르는 열은 세부 사항으로
+            elif k in col:
+                col[k] += ' / ' + c  # 같은 뜻의 열이 둘이면 이어 붙인다
+            else:
+                col[k] = c
+        start = end = ''
+        if 'datetime' in col:  # '10/21(화) 09:00~10:00' 한 칸
+            found = _find_date(col['datetime'], base)
+            d = found[0] if found else parse_date_cell(col['datetime'], base, cur)
+            if d:
+                cur = d
+            t = _TIME_RANGE.search(found[1] if found else col['datetime'])
+            if t and norm_time(t.group(1)):
+                start, end = t.group(1), t.group(2) or ''
+        if 'date' in col:
+            d = parse_date_cell(col['date'], base, cur)
+            if d:
+                cur = d
+        if 'time' in col:
+            t = _TIME_RANGE.search(col['time'])
+            if t and norm_time(t.group(1)):
+                start, end = t.group(1), t.group(2) or ''
+        start = col.get('start', start)
+        end = col.get('end', end)
+        title = col.get('title', '')
+        if not cur or not title:
+            continue
+        details = ' / '.join(x for x in [col.get('details', ''), *extra] if x)
+        ev = clean_event({'date': cur, 'start_time': start, 'end_time': end, 'title': title,
+                          'location': col.get('location', ''), 'attendees': col.get('attendees', ''),
+                          'category': col.get('category', ''), 'details': details})
+        if ev:
+            out.append(ev)
+    return out
+
+
 # ── 가져오기 ──────────────────────────────────────────────────────────
 
 def _import_dict(x: ScheduleImport) -> dict:
@@ -266,9 +413,17 @@ def parse_import(import_id: int) -> None:
             return
         text, mail_date = x.raw_text, x.mail_date
     status, error, events = 'done', '', []
+    try:
+        events = table_parse(text, mail_date)  # 제목 행이 있는 표는 열 이름대로 그대로 읽는다 (AI 보다 정확)
+        if events:
+            error = '표의 제목 행(일자·시간·내용·장소…) 기준으로 읽었습니다.'
+    except Exception:  # noqa: BLE001
+        events = []
     text = fill_dates(text, mail_date)
     try:
-        if llm.is_configured():
+        if events:
+            pass
+        elif llm.is_configured():
             try:
                 events = ai_parse(text, mail_date)
             except Exception as e:  # noqa: BLE001
@@ -307,9 +462,12 @@ def reparse(import_id: int) -> None:
 
 
 def list_imports(limit: int = 100) -> list[dict]:
+    """최근 메일부터. n_events = 이 메일로 들어간(또는 마지막으로 고쳐진) 일정 수."""
     with db.SessionLocal() as s:
+        counts = dict(s.execute(select(Schedule.import_id, func.count()).where(Schedule.import_id.is_not(None))
+                                .group_by(Schedule.import_id)).all())
         rows = s.scalars(select(ScheduleImport).order_by(ScheduleImport.id.desc()).limit(limit))
-        return [_import_dict(x) for x in rows]
+        return [{**_import_dict(x), 'n_events': counts.get(x.id, 0)} for x in rows]
 
 
 def get_import(import_id: int) -> dict | None:
