@@ -28,6 +28,7 @@ def person_form(prefix: str):
 
 def layout(**_):
     return html.Div([
+        ui.page_head('임원'),
         dcc.Store(id='pl-refresh', data=0),
         dcc.Store(id='ps-plan'),
         dbc.Modal([

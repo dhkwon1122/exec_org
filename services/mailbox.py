@@ -20,7 +20,7 @@ import time
 from datetime import date, datetime, timedelta
 from email.utils import parseaddr
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 
 from services import db, llm, mail_text, schedules, store
@@ -133,11 +133,8 @@ def get_mail(mail_id: int) -> dict | None:
 
 
 def counts() -> dict:
-    out = {}
     with db.SessionLocal() as s:
-        for (st,) in s.execute(select(InboundMail.status)):
-            out[st] = out.get(st, 0) + 1
-    return out
+        return dict(s.execute(select(InboundMail.status, func.count()).group_by(InboundMail.status)).all())
 
 
 def _update(mail_id: int, **fields):

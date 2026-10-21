@@ -11,6 +11,7 @@ dash.register_page(__name__, path='/references', name='참고자료', title='업
 
 def layout(**_):
     return html.Div([
+        ui.page_head('참고자료', '업무와 이력에 붙은 링크·파일·메모'),
         dbc.Row([
             dbc.Col(dbc.Input(id='rq', type='search', debounce=True,
                               placeholder='검색: 자료 제목·메모·URL·파일명·업무명'), md=8),

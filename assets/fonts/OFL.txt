@@ -1,0 +1,6 @@
+PretendardVariable.woff2 — Pretendard 1.3.9 (https://github.com/orioncactus/pretendard)
+Copyright (c) 2021, Kil Hyung-jin, with Reserved Font Name Pretendard.
+
+This Font Software is licensed under the SIL Open Font License, Version 1.1.
+The full license text is available at https://openfontlicense.org/open-font-license-official-text/
+사내망에서 외부 CDN 없이 쓰도록 앱에 함께 넣어 둔 글꼴 파일입니다 (assets/style.css 에서 읽음).

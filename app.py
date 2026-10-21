@@ -132,10 +132,10 @@ def _no_cache(resp):
 
 _LOGIN_HTML = '''<!doctype html><html lang="ko"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1"><title>업무 기록 · 로그인</title>
-<link rel="stylesheet" href="{css}"></head>
-<body class="bg-light"><div class="container" style="max-width:380px;margin-top:12vh">
-<div class="card shadow-sm"><div class="card-body p-4">
-<h4 class="mb-1">업무 기록</h4><p class="text-muted small mb-4">{hint}</p>
+<link rel="stylesheet" href="{css}"><link rel="stylesheet" href="/assets/style.css"></head>
+<body><div class="login-wrap"><div class="login-card">
+<div class="d-flex align-items-center gap-2 mb-1"><span class="app-brand-mark">&#10003;</span>
+<h4 class="mb-0">업무 기록</h4></div><p class="text-muted small mb-4">{hint}</p>
 {error}
 <form method="post" action="/login" autocomplete="on">
 <div class="mb-3"><label class="form-label">아이디</label>
@@ -143,7 +143,7 @@ _LOGIN_HTML = '''<!doctype html><html lang="ko"><head><meta charset="utf-8">
 <div class="mb-3"><label class="form-label">비밀번호</label>
 <input class="form-control" type="password" name="password" required></div>
 <button class="btn btn-primary w-100" type="submit">로그인</button>
-</form></div></div></div></body></html>'''
+</form></div></div></body></html>'''
 
 # 로그인 실패 사유 코드 → 화면 문구. POST 결과를 /login?error=코드 로 리다이렉트해서 보여준다
 # (tea-meeting-agenda 와 같은 방식 — 새로고침해도 폼이 다시 전송되지 않는다).
@@ -224,32 +224,40 @@ def download_file(ref_id: int):
     return flask.send_file(path, as_attachment=True, download_name=ref['file_name'] or os.path.basename(path))
 
 
-def _navbar():
+_NAV = [  # (이름, 주소, 아이콘, 주소 맞춤)
+    ('업무', '/', 'bi-check2-square', 'exact'),
+    ('내 업무', '/todos', 'bi-person-check', 'exact'),
+    ('캘린더', '/calendar', 'bi-calendar3', 'exact'),
+    ('받은 메일', '/inbox', 'bi-inbox', 'exact'),
+    ('임원', '/people', 'bi-people', 'partial'),
+    ('이력 검색', '/search', 'bi-search', 'exact'),
+    ('참고자료', '/references', 'bi-folder2', 'exact'),
+]
+
+
+def _sidebar():
+    """왼쪽 사이드바 (좁은 화면에선 위쪽 가로 메뉴 — assets/style.css). 받은 메일은 확인할 건수를 붙인다."""
     user = auth.current_user() or {}
-    links = [
-        dbc.NavItem(dbc.NavLink('업무', href='/', active='exact')),
-        dbc.NavItem(dbc.NavLink('임원', href='/people', active='partial')),
-        dbc.NavItem(dbc.NavLink('내 업무', href='/todos', active='exact')),
-        dbc.NavItem(dbc.NavLink('캘린더', href='/calendar', active='exact')),
-        dbc.NavItem(dbc.NavLink('받은 메일', href='/inbox', active='exact')),
-        dbc.NavItem(dbc.NavLink('이력 검색', href='/search', active='exact')),
-        dbc.NavItem(dbc.NavLink('참고자료', href='/references', active='exact')),
-    ]
-    return dbc.Navbar(
-        dbc.Container([
-            dbc.NavbarBrand([html.I(className='bi bi-journal-text me-2'), '업무 기록'], href='/'),
-            dbc.NavbarToggler(id='nav-toggler'),
-            dbc.Collapse([
-                dbc.Nav(links, navbar=True, className='me-auto'),
-                html.Div([
-                    html.Span([html.I(className='bi bi-person-circle me-1'), user.get('name', '')],
-                              className='text-light small me-3'),
-                    html.A('로그아웃', href='/logout', className='btn btn-outline-light btn-sm'),
-                ], className='d-flex align-items-center'),
-            ], id='nav-collapse', navbar=True, is_open=False),
-        ], fluid=True),
-        color='dark', dark=True, className='mb-3',
-    )
+    name = user.get('name', '')
+    try:
+        review = mailbox.counts().get('review', 0)
+    except Exception:  # noqa: BLE001  메뉴 숫자 때문에 화면이 안 뜨면 안 된다
+        review = 0
+    links = []
+    for label, href, icon, active in _NAV:
+        count = html.Span(review, className='nav-count hot', title='확인할 메일') if href == '/inbox' and review else None
+        links.append(dbc.NavLink([html.I(className=f'bi {icon}'), html.Span(label), count], href=href,
+                                 active=active))
+    return html.Aside([
+        html.A([html.Span(html.I(className='bi bi-check2'), className='app-brand-mark'), html.Span('업무 기록')],
+               href='/', className='app-brand'),
+        dbc.Nav(links, vertical=True, className='app-nav'),
+        html.Div([
+            html.Span(name[:1] or '?', className='avatar'),
+            html.Span(name, className='user-name'),
+            html.A('로그아웃', href='/logout'),
+        ], className='app-user'),
+    ], className='app-sidebar')
 
 
 def serve_layout():
@@ -258,18 +266,14 @@ def serve_layout():
         dcc.Store(id='todo-changed', data=0),  # 업무 체크/추가/삭제 시 증가 (components/todo_ui.py)
         dcc.Store(id='history-changed', data=0),  # 이력 수정/삭제 시 증가 (components/history_actions.py)
         history_edit_modal(),
-        _navbar(),
-        dbc.Container(dash.page_container, fluid=True, className='pb-5'),
+        html.Div([
+            _sidebar(),
+            html.Main(dbc.Container(dash.page_container, fluid=True), className='app-main'),
+        ], className='app-shell'),
     ])
 
 
 app.layout = serve_layout
-
-
-@app.callback(dash.Output('nav-collapse', 'is_open'), dash.Input('nav-toggler', 'n_clicks'),
-              dash.State('nav-collapse', 'is_open'), prevent_initial_call=True)
-def _toggle_nav(_, is_open):
-    return not is_open
 
 
 # POP3 받은 메일 주기 확인 (MAIL_POP3_* 설정 시, 여러 워커 중 하나만)

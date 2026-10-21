@@ -38,11 +38,17 @@ def _new_task_modal():
     ], id='new-modal', is_open=False, size='lg')
 
 
+def _today_label() -> str:
+    d = date.today()
+    return f"{d.month}월 {d.day}일 {'월화수목금토일'[d.weekday()]}요일"
+
+
 def layout(**_):
     return html.Div([
         dcc.Store(id='home-refresh', data=0),
         dcc.Location(id='home-redirect', refresh='callback-nav'),
         _new_task_modal(),
+        ui.page_head('업무', _today_label()),
         dbc.Row([
             dbc.Col([
                 dbc.Row([
@@ -102,9 +108,8 @@ def _task_row(t: dict, level: int = 0, n_children: int = 0, n_done: int = 0, n_h
         html.Div([
             html.Div([
                 html.I(className='bi bi-arrow-return-right text-muted me-1') if level else None,
-                dcc.Link(f"#{t['id']} {t['title']}", href=f"/task/{t['id']}",
-                         className='text-decoration-none fw-semibold' + (' text-muted' if done else ''),
-                         style={'textDecoration': 'line-through'} if done else None),
+                dcc.Link([html.Span(f"#{t['id']}", className='task-no'), t['title']], href=f"/task/{t['id']}",
+                         className='task-title' + (' done' if done else '')),
                 html.Span(ui.source_icons(t), className='ms-1'),
                 html.Span(f' · 상위 {parent_title}', className='small text-muted') if parent_title else None,
             ]),
@@ -120,7 +125,7 @@ def _task_row(t: dict, level: int = 0, n_children: int = 0, n_done: int = 0, n_h
         ], className='flex-grow-1'),
         dbc.Select(id={'type': 'home-status', 'id': t['id']}, value=t['status'], size='sm',
                    options=[{'label': x, 'value': x} for x in store.STATUSES], style={'width': '92px'},
-                   className='ms-2'),
+                   className='ms-2 status-select'),
     ], className='d-flex align-items-start'), className='py-2',
         style={'paddingLeft': f'{0.75 + level * 1.6}rem',
                'background': 'var(--bs-tertiary-bg)' if level else None})

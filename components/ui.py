@@ -19,13 +19,18 @@ def status_badge(status: str):
     return dbc.Badge(status, color=STATUS_COLOR.get(status, 'secondary'), className='me-1')
 
 
+def page_head(title: str, sub=None):
+    """화면 맨 위 큰 제목 (assets/style.css 의 .page-head)."""
+    return html.Div([html.H3(title), html.Span(sub, className='page-sub') if sub else None], className='page-head')
+
+
 def tag_badges(tags: list[str]):
     return [dbc.Badge(t, color='light', text_color='dark', className='me-1 border') for t in tags]
 
 
 def task_link(task: dict, prefix: bool = True):
-    return dcc.Link(f"#{task['id']} {task['title']}" if prefix else task['title'],
-                    href=f"/task/{task['id']}", className='text-decoration-none fw-semibold')
+    label = [html.Span(f"#{task['id']}", className='task-no'), task['title']] if prefix else task['title']
+    return dcc.Link(label, href=f"/task/{task['id']}", className='task-title')
 
 
 def multiline(text: str):

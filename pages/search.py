@@ -16,6 +16,7 @@ dash.register_page(__name__, path='/search', name='이력 검색', title='업무
 
 def layout(q: str = '', person: str = '', **_):
     return html.Div([
+        ui.page_head('이력 검색'),
         dbc.Row([
             dbc.Col([
                 dbc.InputGroup([
