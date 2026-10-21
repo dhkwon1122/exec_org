@@ -17,6 +17,7 @@ PostgreSQL(exec-db). 없으면(개발·테스트) 프로젝트 안의 SQLite 파
 - person_evaluations : 임원 평가 이력 (연도·종류별 — 임원종합평가, MBO 등)
 - person_attributes  : 임원 추가 항목 (엑셀 업로드로 생긴 이름-값)
 - schedules / schedule_imports : 원장님 일정 / 비서실 일정 메일(원문·AI 정리 결과)
+- inbound_mails / mail_rules : POP3 로 받은 메일과 분류 규칙 (일정·업무 자동 반영 / 확인 추천)
 - history_people : 이력 ↔ 임원 연결 (한 이력에 여러 임원). 업무 없이 임원에만 연결된 이력(동향)도 있다
 - todos          : 할 일 (업무에 속하거나 단독). 이력 원문에서 AI 가 뽑은 제안을 추가할 수 있음
 """
@@ -259,6 +260,48 @@ class ScheduleImport(Base):
     error = Column(Text, default='')
     applied_at = Column(DateTime, nullable=True)
     created_by = Column(String(100), default='')
+    created_at = Column(DateTime, default=_now)
+
+
+class InboundMail(Base):
+    """POP3 로 받아 온 메일 한 통 — 규칙에 맞으면 자동 반영, 아니면 AI 추천을 사람이 확인한다.
+    uidl(POP3 고유 번호)로 같은 메일을 두 번 가져오지 않는다."""
+    __tablename__ = 'inbound_mails'
+
+    id = Column(Integer, primary_key=True)
+    uidl = Column(String(200), nullable=False, unique=True)
+    message_id = Column(String(300), default='')
+    subject = Column(String(500), default='')
+    sender = Column(String(300), default='')
+    mail_date = Column(String(10), default='')
+    body = Column(Text, default='')
+    # skipped(오래돼 건너뜀) / auto(규칙으로 자동 반영) / review(확인 필요) / done(사람이 반영) / ignored(무시) / failed
+    status = Column(String(20), default='review', index=True)
+    kind = Column(String(20), default='')  # schedule / task / both / ignore — 규칙 또는 AI 판단
+    rule_id = Column(Integer, ForeignKey('mail_rules.id', ondelete='SET NULL'), nullable=True)
+    reason = Column(String(500), default='')  # 분류 근거 (규칙 이름 또는 AI 설명)
+    suggestion = Column(Text, default='')  # JSON — AI 가 뽑은 업무 후보 등
+    schedule_import_id = Column(Integer, ForeignKey('schedule_imports.id', ondelete='SET NULL'), nullable=True)
+    task_ids = Column(String(500), default='')  # 만든 업무 id (쉼표)
+    error = Column(Text, default='')
+    received_at = Column(DateTime, default=_now)
+    handled_at = Column(DateTime, nullable=True)
+    handled_by = Column(String(100), default='')
+
+
+class MailRule(Base):
+    """받은 메일 분류 규칙 — 보낸 사람/제목/본문에 글자가 들어 있으면 그 동작. auto 면 확인 없이 바로 반영."""
+    __tablename__ = 'mail_rules'
+
+    id = Column(Integer, primary_key=True)
+    name = Column(String(100), default='')
+    field = Column(String(20), default='sender')  # sender / subject / body
+    pattern = Column(String(300), nullable=False)
+    action = Column(String(20), default='task')  # schedule / task / ignore
+    auto = Column(Boolean, nullable=False, default=False)
+    parent_task_id = Column(Integer, ForeignKey('tasks.id', ondelete='SET NULL'), nullable=True)  # 업무를 이 아래에
+    sort = Column(Integer, default=0)
+    active = Column(Boolean, nullable=False, default=True)
     created_at = Column(DateTime, default=_now)
 
 
