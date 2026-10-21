@@ -191,7 +191,8 @@ def ai_classify(subject: str, sender: str, mail_date: str, body: str) -> dict:
 
 def guess(subject: str, mail_date: str, body: str) -> dict:
     """LLM 없이 — 일정표로 읽히면 일정, 아니면 제목을 업무 후보로."""
-    if schedules.table_parse(body, mail_date) or len(schedules.rule_parse(body, mail_date)) >= 2:
+    if schedules.table_parse(body, mail_date) or schedules.block_parse(body, mail_date) or \
+            len(schedules.rule_parse(body, mail_date)) >= 2:
         return {'kind': 'schedule', 'reason': '본문에서 일정표를 찾음', 'tasks': []}
     return {'kind': 'task', 'reason': 'LLM 미설정 — 제목을 업무 후보로', 'tasks': [{'title': subject[:300], 'due': '',
                                                                                   'assignee': ''}]}
