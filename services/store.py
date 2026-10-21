@@ -12,7 +12,7 @@ import re
 import uuid
 from datetime import date, datetime, timedelta
 
-from sqlalchemy import func, or_, select
+from sqlalchemy import func, or_, select, update
 from sqlalchemy.orm import aliased
 
 from services import db
@@ -92,6 +92,8 @@ def _history_dict(h: HistoryEntry) -> dict:
         'author': h.author or '', 'occurred_at': _dt(h.occurred_at), 'created_at': _dt(h.created_at),
         'title': h.title or '', 'summary': h.summary or '', 'keywords': _tags(h.keywords),
         'ai_status': h.ai_status or '', 'ai_error': h.ai_error or '', 'ai_todos': _load_json_list(h.ai_todos),
+        'ai_token': h.ai_token or '',
+        'ai_reference_date': h.ai_reference_date or '',
     }
 
 
@@ -323,7 +325,7 @@ def child_tasks(task_id: int) -> list[dict]:
 def add_history(task_id: int | None, content: str, entry_type: str = '메모', author: str = '',
                 occurred_at: str | datetime | None = None, title: str = '', summary: str = '',
                 keywords: list[str] | str = '', person_ids: list[int] | None = None,
-                also_task_ids: list[int] | None = None) -> dict:
+                also_task_ids: list[int] | None = None, *, session=None) -> dict:
     """원문(content)을 그대로 저장한다. AI 요약·키워드는 services.enrich.submit() 으로 따로 요청.
     업무(task_id)나 임원(person_ids) 중 하나는 있어야 한다 — 임원 동향은 업무 없이 임원에만 연결된다.
     also_task_ids: 이 이력이 함께 걸친 다른 업무들 (task_id 가 없으면 그 첫 업무가 이력의 업무가 된다)."""
@@ -341,7 +343,7 @@ def add_history(task_id: int | None, content: str, entry_type: str = '메모', a
         raise ValueError(f'알 수 없는 이력 유형: {entry_type}')
     if isinstance(occurred_at, str):
         occurred_at = datetime.fromisoformat(occurred_at) if occurred_at.strip() else None
-    with db.SessionLocal() as s:
+    with db.transaction(session) as s:
         t = s.get(Task, task_id) if task_id is not None else None
         if task_id is not None and t is None:
             raise ValueError('업무를 찾을 수 없습니다.')
@@ -362,7 +364,7 @@ def add_history(task_id: int | None, content: str, entry_type: str = '메모', a
         for x in [t, *others]:
             if x is not None:
                 x.updated_at = datetime.now().replace(microsecond=0)
-        s.commit()
+        s.flush()
         return _decorate(s, [_history_dict(h)])[0]
 
 
@@ -387,12 +389,17 @@ def get_history(entry_id: int | None) -> dict | None:
         return _decorate(s, [_history_dict(h)])[0] if h else None
 
 
-def update_history(entry_id: int, **fields) -> dict:
+def update_history(entry_id: int, *, session=None, **fields) -> dict:
     """사용자가 이력(원문·유형·일시·제목·요약·키워드·임원·걸친 업무 task_ids)을 고칠 때."""
-    with db.SessionLocal() as s:
+    with db.transaction(session) as s:
         h = s.get(HistoryEntry, entry_id)
         if h is None:
             raise ValueError('이력을 찾을 수 없습니다.')
+        old_content, old_when = h.content, h.occurred_at
+        # 이 편집 전에 시작한 AI 작업은 원문·직접 고친 요약을 덮어쓸 수 없다.
+        h.ai_token = uuid.uuid4().hex
+        if h.ai_status == 'pending':
+            h.ai_status, h.ai_error = '', ''
         if 'content' in fields:
             if not (fields['content'] or '').strip():
                 raise ValueError('이력 내용을 입력하세요.')
@@ -440,7 +447,9 @@ def update_history(entry_id: int, **fields) -> dict:
             s.flush()
             for pid in ids:
                 s.add(HistoryPerson(history_id=entry_id, person_id=pid))
-        s.commit()
+        if h.content != old_content or h.occurred_at != old_when:
+            h.ai_todos, h.ai_reference_date = '', ''
+        s.flush()
         return _decorate(s, [_history_dict(h)])[0]
 
 
@@ -467,23 +476,35 @@ def unlink_history_task(entry_id: int, task_id: int) -> None:
         s.commit()
 
 
+def begin_history_ai(entry_id: int, status: str = 'pending') -> str | None:
+    """새 요청 번호를 저장해 이전 AI 요청의 응답을 무효화한다."""
+    token = uuid.uuid4().hex
+    with db.transaction() as s:
+        result = s.execute(update(HistoryEntry).where(HistoryEntry.id == entry_id).values(
+            ai_token=token, ai_status=status, ai_error=''))
+        return token if result.rowcount else None
+
+
 def set_history_ai(entry_id: int, status: str, title: str | None = None, summary: str | None = None,
-                   keywords: list[str] | None = None, error: str = '', todos: list[dict] | None = None) -> None:
+                   keywords: list[str] | None = None, error: str = '', todos: list[dict] | None = None,
+                   *, token: str | None = None, reference_date: str | None = None) -> None:
     """AI 정리 상태/결과 저장. None 인 필드는 기존 값을 유지한다(재생성 중에도 이전 결과가 보이도록)."""
-    with db.SessionLocal() as s:
-        h = s.get(HistoryEntry, entry_id)
-        if h is None:
-            return
-        h.ai_status, h.ai_error = status, error or ''
+    with db.transaction() as s:
+        values = {'ai_status': status, 'ai_error': error or ''}
         if title is not None:
-            h.title = title
+            values['title'] = title
         if summary is not None:
-            h.summary = summary
+            values['summary'] = summary
         if keywords is not None:
-            h.keywords = _join_keywords(keywords)
+            values['keywords'] = _join_keywords(keywords)
         if todos is not None:
-            h.ai_todos = json.dumps(todos, ensure_ascii=False)
-        s.commit()
+            values['ai_todos'] = json.dumps(todos, ensure_ascii=False)
+        if reference_date is not None:
+            values['ai_reference_date'] = reference_date
+        stmt = update(HistoryEntry).where(HistoryEntry.id == entry_id)
+        if token is not None:
+            stmt = stmt.where(HistoryEntry.ai_token == token)
+        s.execute(stmt.values(**values))
 
 
 def _decorate(s, entries: list[dict]) -> list[dict]:
@@ -644,7 +665,7 @@ def upload_abspath(rel_path: str) -> str | None:
 
 def add_reference(task_id: int | None, kind: str, title: str = '', url: str = '', note: str = '',
                   file_name: str = '', file_bytes: bytes | None = None, author: str = '',
-                  history_id: int | None = None) -> dict:
+                  history_id: int | None = None, *, session=None) -> dict:
     """history_id 를 주면 그 이력의 관련 자료로 붙는다 (이력 자체가 기록이므로 '자료' 자동 이력은 남기지 않음)."""
     if kind not in ('link', 'file', 'note'):
         raise ValueError(f'알 수 없는 자료 유형: {kind}')
@@ -667,7 +688,7 @@ def add_reference(task_id: int | None, kind: str, title: str = '', url: str = ''
 
     if task_id is None and history_id is None:
         raise ValueError('업무를 지정하세요.')
-    with db.SessionLocal() as s:
+    with db.transaction(session) as s:
         t = s.get(Task, task_id) if task_id is not None else None
         if task_id is not None and t is None:
             raise ValueError('업무를 찾을 수 없습니다.')
@@ -681,9 +702,13 @@ def add_reference(task_id: int | None, kind: str, title: str = '', url: str = ''
             folder = str(task_id) if task_id is not None else f'h{history_id}'  # 업무 없는 동향은 이력별 폴더
             rel = os.path.join(folder, f'{uuid.uuid4().hex[:8]}_{_safe_name(file_name)}')
             dest = os.path.join(db.UPLOAD_DIR, rel)
-            os.makedirs(os.path.dirname(dest), exist_ok=True)
-            with open(dest, 'wb') as f:
-                f.write(file_bytes)
+            s.info.setdefault('rollback_callbacks', []).append(lambda: _remove_upload(rel))
+            try:
+                os.makedirs(os.path.dirname(dest), exist_ok=True)
+                with open(dest, 'wb') as f:
+                    f.write(file_bytes)
+            except OSError as e:
+                raise ValueError('첨부 파일을 저장하지 못했습니다. 저장을 취소했으니 다시 시도하세요.') from e
             r.file_name, r.file_path = file_name, rel
         s.add(r)
         if history_id is None:
@@ -691,7 +716,7 @@ def add_reference(task_id: int | None, kind: str, title: str = '', url: str = ''
             _log(s, task_id, '자료', f'참고자료 추가 ({label}): {title}', author)
         if t is not None:
             t.updated_at = datetime.now().replace(microsecond=0)
-        s.commit()
+        s.flush()
         return _ref_dict(r)
 
 
@@ -765,20 +790,20 @@ def parse_links(text: str) -> list[dict]:
     return out
 
 
-def attach_links(task_id: int | None, history_id: int, links: list[dict], author: str = '') -> int:
+def attach_links(task_id: int | None, history_id: int, links: list[dict], author: str = '', *, session=None) -> int:
     """이력에 링크들을 붙인다. 이미 붙은 같은 URL 은 건너뛴다. 붙인 개수를 돌려준다."""
-    with db.SessionLocal() as s:
+    with db.transaction(session) as s:
         existing = set(s.scalars(select(Reference.url).where(Reference.history_id == history_id)))
-    n = 0
-    for link in links:
-        url = link['url']
-        if url in existing or ('https://' + url) in existing:
-            continue
-        add_reference(task_id, 'link', title=link.get('title') or url, url=url, author=author,
-                      history_id=history_id)
-        existing.add(url)
-        n += 1
-    return n
+        n = 0
+        for link in links:
+            url = link['url']
+            if url in existing or ('https://' + url) in existing:
+                continue
+            ref = add_reference(task_id, 'link', title=link.get('title') or url, url=url, author=author,
+                                history_id=history_id, session=s)
+            existing.add(ref['url'])
+            n += 1
+        return n
 
 
 # ── 업무 연결 ─────────────────────────────────────────────────────────
@@ -858,27 +883,29 @@ def _todo_dict(t: Task, parent_title: str | None = None) -> dict:
 
 def create_todo(title: str, task_id: int | None = None, due_date: str = '', assignee_id: str = '',
                 assignee_name: str = '', created_by: str = '', source_history_id: int | None = None,
-                source_mail_id: int | None = None, assignees: list | None = None) -> dict:
+                source_mail_id: int | None = None, assignees: list | None = None, *, session=None,
+                source_mail_key: str = '') -> dict:
     """체크 항목처럼 업무를 하나 만든다 — task_id 가 있으면 그 업무의 하위 업무.
     담당자: assignees([{'name', 'user_id'}]) 또는 assignee_name(쉼표로 여러 명) + assignee_id(한 명일 때)."""
     title = (title or '').strip()
     if not title:
         raise ValueError('업무 내용을 입력하세요.')
     due_date = _check_date(due_date)
-    with db.SessionLocal() as s:
+    with db.transaction(session) as s:
         parent = s.get(Task, task_id) if task_id else None
         if task_id and parent is None:
             raise ValueError('상위 업무를 찾을 수 없습니다.')
         t = Task(title=title, parent_id=task_id or None, due_date=due_date, status='진행중',
                  owner='', assignee_id='', created_by=created_by or '',
-                 source_history_id=source_history_id, source_mail_id=source_mail_id, description='', tags='',
+                 source_history_id=source_history_id, source_mail_id=source_mail_id, source_mail_key=source_mail_key,
+                 description='', tags='',
                  start_date='')
         s.add(t)
         s.flush()
         _set_assignees(s, t, assignees_of(assignees, assignee_name, assignee_id))
         if parent:
             _log(s, parent.id, '할일', f'하위 업무 추가: {title}', created_by)
-        s.commit()
+        s.flush()
         return _todo_dict(t, parent.title if parent else '')
 
 
@@ -1000,13 +1027,14 @@ def task_sources(task_id: int) -> dict:
     return {'history': get_history(hid), 'mails': mails, 'mail': mails[0] if mails else None}
 
 
-def clear_source_mail(task_id: int, mail_id: int) -> None:
+def clear_source_mail(task_id: int, mail_id: int, *, session=None) -> None:
     """메일과 연결을 끊을 때 — 그 메일로 만든 업무였으면 출처 표시도 지운다."""
-    with db.SessionLocal() as s:
+    with db.transaction(session) as s:
         t = s.get(Task, task_id)
         if t is not None and t.source_mail_id == mail_id:
             t.source_mail_id = None
-            s.commit()
+            t.source_mail_key = ''
+            s.flush()
 
 
 # ── 캘린더 ────────────────────────────────────────────────────────────

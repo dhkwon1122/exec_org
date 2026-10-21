@@ -24,6 +24,7 @@ PostgreSQL(exec-db). 없으면(개발·테스트) 프로젝트 안의 SQLite 파
 import logging
 import os
 import time
+from contextlib import contextmanager
 from datetime import datetime
 
 from dotenv import load_dotenv
@@ -67,6 +68,7 @@ class Task(Base):
     source_history_id = Column(Integer, ForeignKey('history.id', ondelete='SET NULL', use_alter=True,
                                                    name='fk_tasks_source_history'), nullable=True)
     source_mail_id = Column(Integer, nullable=True, index=True)  # 이 업무를 만든 받은 메일 (inbound_mails.id)
+    source_mail_key = Column(String(64), default='')  # 생성 당시 후보의 식별값 — 제목을 고쳐도 중복 반영 방지
     created_at = Column(DateTime, default=_now)
     updated_at = Column(DateTime, default=_now, onupdate=_now)
 
@@ -107,6 +109,8 @@ class HistoryEntry(Base):
     ai_status = Column(String(10), default='')  # '' (요청 안 함) / pending / done / failed
     ai_error = Column(Text, default='')
     ai_todos = Column(Text, default='')  # AI 가 원문에서 뽑은 할 일 제안 (JSON 배열)
+    ai_token = Column(String(32), default='')  # 사용자 수정·새 요청마다 변경해 오래된 AI 응답을 차단
+    ai_reference_date = Column(String(10), default='')  # 상대 기한을 해석할 때 사용한 기록 기준일
 
     task = relationship('Task', back_populates='history', foreign_keys=[task_id])
 
@@ -531,6 +535,27 @@ def _legacy_sqlite_notice(engine):
 engine = make_engine()
 _legacy_sqlite_notice(engine)
 SessionLocal = sessionmaker(bind=engine, expire_on_commit=False, future=True)
+
+
+@contextmanager
+def transaction(session=None):
+    """session 을 받으면 같은 트랜잭션에 참여하고, 없으면 성공 시 한 번만 commit 한다.
+    파일처럼 DB 밖에서 만든 자원은 rollback_callbacks 에 정리 함수를 등록한다."""
+    if session is not None:
+        yield session
+        return
+    with SessionLocal() as s:
+        try:
+            yield s
+            s.commit()
+        except BaseException:
+            s.rollback()
+            for cleanup in reversed(s.info.pop('rollback_callbacks', [])):
+                try:
+                    cleanup()
+                except OSError:
+                    logging.getLogger(__name__).exception('롤백 후 파일 정리 실패')
+            raise
 
 
 def configure(url: str):

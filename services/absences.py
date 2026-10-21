@@ -49,10 +49,10 @@ def _check(data: dict) -> dict:
 
 
 def save(data: dict, person_ids: list[int] | None = None, aid: int | None = None, by: str = '',
-         source_mail_id: int | None = None) -> list[dict]:
+         source_mail_id: int | None = None, *, session=None) -> list[dict]:
     """새로 만들 때는 person_ids 마다 한 건씩, 고칠 때(aid)는 그 한 건. 저장한 부재 목록을 돌려준다."""
     vals = _check(data)
-    with db.SessionLocal() as s:
+    with db.transaction(session) as s:
         if aid is not None:
             a = s.get(Absence, aid)
             if a is None:
@@ -68,7 +68,7 @@ def save(data: dict, person_ids: list[int] | None = None, aid: int | None = None
                 raise ValueError('임원을 찾을 수 없습니다.')
             rows = [Absence(person_id=pid, created_by=by, source_mail_id=source_mail_id, **vals) for pid in ids]
             s.add_all(rows)
-        s.commit()
+        s.flush()
         return [_dict(a, s.get(Person, a.person_id)) for a in rows]
 
 
@@ -296,16 +296,17 @@ def preview(rows: list[dict]) -> list[dict]:
     return out
 
 
-def apply_rows(rows: list[dict], by: str = '', source_mail_id: int | None = None) -> dict:
+def apply_rows(rows: list[dict], by: str = '', source_mail_id: int | None = None, *, session=None) -> dict:
     """미리보기 줄을 등록 — 이미 같은 부재가 있으면 건너뛰고, 임원을 못 찾은 줄도 건너뛴다."""
     added = same = unknown = 0
-    for r in preview([x for x in (_clean_row(x, date.today()) for x in rows) if x]):
-        if r['state'] == 'unknown':
-            unknown += 1
-            continue
-        if r['state'] == 'same':
-            same += 1
-            continue
-        save(r, person_ids=[r['person_id']], by=by, source_mail_id=source_mail_id)
-        added += 1
+    with db.transaction(session) as s:
+        for r in preview([x for x in (_clean_row(x, date.today()) for x in rows) if x]):
+            if r['state'] == 'unknown':
+                unknown += 1
+                continue
+            if r['state'] == 'same':
+                same += 1
+                continue
+            save(r, person_ids=[r['person_id']], by=by, source_mail_id=source_mail_id, session=s)
+            added += 1
     return {'added': added, 'same': same, 'unknown': unknown}

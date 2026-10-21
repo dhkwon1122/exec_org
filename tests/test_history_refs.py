@@ -75,3 +75,78 @@ def test_deleting_history_keeps_its_material_as_task_reference():
 
 def test_templates_cover_entry_types():
     assert set(TEMPLATES) == set(store.ENTRY_TYPES)
+
+
+def test_attachment_failure_rolls_back_history_links_and_written_files(tmp_path, monkeypatch):
+    import builtins
+    from pathlib import Path
+    from services import enrich
+    t = store.create_task('장비 도입')
+    person = store.create_person('김임원')
+    data = 'data:text/plain;base64,YWJj'
+    real_open = builtins.open
+
+    def fail_second_file(path, mode='r', *args, **kwargs):
+        f = real_open(path, mode, *args, **kwargs)
+        if mode == 'wb' and str(path).endswith('_second.txt'):
+            f.write(b'partial')
+            f.close()
+            raise OSError('디스크 가득 참')
+        return f
+
+    with monkeypatch.context() as m:
+        m.setattr(builtins, 'open', fail_second_file)
+        m.setattr(enrich, 'submit', lambda *_: pytest.fail('롤백된 기록에 AI 를 요청하면 안 됨'))
+        with pytest.raises(ValueError, match='첨부 파일을 저장하지 못했습니다'):
+            save_history(t['id'], '회의', '김임원 회의', None, True, '자료 https://example.com',
+                         [data, data], ['first.txt', 'second.txt'], '담당자', [person['id']])
+    assert store.search_history('김임원') == [] and store.list_references() == []
+    assert list(Path(db.UPLOAD_DIR).rglob('*.txt')) == []
+    h = save_history(t['id'], '회의', '김임원 회의', None, False, '', [data], ['first.txt'], '담당자')
+    assert len(store.search_history('김임원')) == 1
+    assert len(h['refs']) == 1 and Path(store.upload_abspath(h['refs'][0]['file_path'])).read_bytes() == b'abc'
+
+
+def test_db_failure_after_file_write_cleans_upload(tmp_path, monkeypatch):
+    from pathlib import Path
+    from sqlalchemy import event
+    from sqlalchemy.exc import IntegrityError
+    from services.db import Reference
+    t = store.create_task('업무')
+
+    def fail_insert(*_):
+        raise IntegrityError('insert failed', {}, RuntimeError('DB 오류'))
+
+    event.listen(Reference, 'before_insert', fail_insert)
+    try:
+        with pytest.raises(IntegrityError):
+            save_history(t['id'], '메모', '저장 취소될 원문', None, False, '',
+                         ['data:text/plain;base64,YWJj'], ['test.txt'], '담당자')
+    finally:
+        event.remove(Reference, 'before_insert', fail_insert)
+    assert store.search_history('저장 취소될 원문') == []
+    assert list(Path(db.UPLOAD_DIR).rglob('*.txt')) == []
+
+
+def test_edit_and_new_materials_roll_back_together(monkeypatch):
+    from components import history_actions
+    from services import auth
+    from types import SimpleNamespace
+    t = store.create_task('업무')
+    h = store.add_history(t['id'], '이전 원문', title='이전 제목')
+    monkeypatch.setattr(history_actions, 'ctx', SimpleNamespace(triggered_id='he-save'))
+    monkeypatch.setattr(auth, 'current_name', lambda: '담당자')
+    add = store.add_reference
+
+    def fail_file(*args, **kwargs):
+        if args[1] == 'file':
+            raise ValueError('첨부 실패')
+        return add(*args, **kwargs)
+
+    monkeypatch.setattr(store, 'add_reference', fail_file)
+    result = history_actions.edit_history(None, None, 1, None, None, h['id'], '메모', None,
+        '새 제목', '', '', '새 원문', '자료 https://example.com',
+        ['data:text/plain;base64,YWJj'], ['test.txt'], [], [t['id']], 0)
+    assert result[0] is True and result[8] == '첨부 실패'
+    got = store.get_history(h['id'])
+    assert got['content'] == '이전 원문' and got['title'] == '이전 제목' and got['refs'] == []

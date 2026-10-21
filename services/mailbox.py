@@ -10,6 +10,7 @@
 그 업무의 '요청' 기록으로 남긴다. POP3 고유 번호(UIDL)로 같은 메일을 두 번 가져오지 않는다.
 """
 import fcntl
+import hashlib
 import json
 import logging
 import os
@@ -20,11 +21,11 @@ import time
 from datetime import date, datetime, timedelta
 from email.utils import parseaddr
 
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select, update
 from sqlalchemy.exc import IntegrityError
 
 from services import absences, db, doc_versions, llm, mail_text, schedules, store
-from services.db import InboundMail, MailRule
+from services.db import InboundMail, MailRule, Task
 
 log = logging.getLogger(__name__)
 ACTIONS = {'schedule': '원장님 일정', 'task': '업무', 'absence': '임원 부재', 'ignore': '무시'}
@@ -138,12 +139,12 @@ def counts() -> dict:
         return dict(s.execute(select(InboundMail.status, func.count()).group_by(InboundMail.status)).all())
 
 
-def _update(mail_id: int, **fields):
-    with db.SessionLocal() as s:
+def _update(mail_id: int, *, session=None, **fields):
+    with db.transaction(session) as s:
         m = s.get(InboundMail, mail_id)
         for k, v in fields.items():
             setattr(m, k, json.dumps(v, ensure_ascii=False) if k == 'suggestion' else v)
-        s.commit()
+        s.flush()
 
 
 def sender_name(sender: str) -> str:
@@ -320,26 +321,48 @@ def _make_schedule_import(m: dict) -> int:
     return iid
 
 
-def create_tasks(mail: dict, items: list[dict], parent_id: int | None, by: str) -> list[int]:
-    """업무 후보 → 업무(상위 업무가 있으면 그 하위). 메일 원문은 각 업무의 '요청' 기록으로 남긴다."""
-    ids = []
-    for it in items:
-        title = str(it.get('title') or '').strip()
-        if not title:
-            continue
-        t = store.create_todo(title, task_id=parent_id or None, due_date=str(it.get('due') or '')[:10],
-                              assignee_name=str(it.get('assignee') or ''), created_by=by,
-                              source_mail_id=mail.get('id'))
-        _mail_history(mail, t['id'], by)
-        ids.append(t['id'])
-    return ids
+def _lock_mail(s, mail_id: int) -> InboundMail:
+    # 쓰기 잠금으로 워커 간 반영을 직렬화한다. SQLite 에서도 동작하게 UPDATE 를 먼저 한다.
+    result = s.execute(update(InboundMail).where(InboundMail.id == mail_id).values(
+        task_ids=InboundMail.task_ids).execution_options(synchronize_session=False))
+    if not result.rowcount:
+        raise ValueError('메일을 찾을 수 없습니다.')
+    return s.get(InboundMail, mail_id, populate_existing=True)
 
 
-def _mail_history(mail: dict, task_id: int, by: str) -> None:
+def _task_key(title: str) -> str:
+    return hashlib.sha256(' '.join(title.split()).casefold().encode('utf-8')).hexdigest()
+
+
+def create_tasks(mail: dict, items: list[dict], parent_id: int | None, by: str, *, session=None) -> list[int]:
+    """같은 메일에서 이미 만든 제목의 업무는 유지하고, 새 제목만 원문 기록과 함께 추가한다."""
+    with db.transaction(session) as s:
+        m = _lock_mail(s, mail['id'])
+        linked = list(_mail_dict(m)['task_ids'])
+        existing = {t.source_mail_key or _task_key(t.title) for t in s.scalars(select(Task).where(
+            or_(Task.source_mail_id == m.id, Task.id.in_(linked))))}
+        ids = []
+        for it in items:
+            title = str(it.get('title') or '').strip()
+            if not title or _task_key(title) in existing:
+                continue
+            t = store.create_todo(title, task_id=parent_id or None, due_date=str(it.get('due') or '')[:10],
+                                  assignee_name=str(it.get('assignee') or ''), created_by=by,
+                                  source_mail_id=m.id, source_mail_key=_task_key(title), session=s)
+            _mail_history(mail, t['id'], by, session=s)
+            ids.append(t['id'])
+            existing.add(_task_key(title))
+        m.task_ids = ','.join(map(str, dict.fromkeys(linked + ids)))
+        s.flush()
+        return ids
+
+
+def _mail_history(mail: dict, task_id: int, by: str, *, session=None) -> None:
     """메일 원문을 업무의 '요청' 기록으로."""
     content = (f"[받은 메일] {mail['subject']}\n보낸 사람: {mail['sender']}\n날짜: {mail['mail_date']}\n\n"
                f"{mail['body'][:20000]}")
-    store.add_history(task_id, content, '요청', author=sender_name(mail['sender']) or by, title=mail['subject'][:200])
+    store.add_history(task_id, content, '요청', author=sender_name(mail['sender']) or by,
+                      title=mail['subject'][:200], session=session)
 
 
 def _manual_done(m: dict, by: str) -> dict:
@@ -353,41 +376,43 @@ def _manual_done(m: dict, by: str) -> dict:
 def link_task(mail_id: int, task_id: int, by: str) -> bool:
     """가져온 메일을 이미 있는 업무에 연결 — 메일 원문을 그 업무의 '요청' 기록으로 남긴다.
     이미 연결돼 있으면 False."""
-    m = get_mail(mail_id)
-    if m is None:
-        raise ValueError('메일을 찾을 수 없습니다.')
-    if store.get_task(task_id) is None:
-        raise ValueError('업무를 찾을 수 없습니다.')
-    if task_id in m['task_ids']:
-        return False
-    _mail_history(m, task_id, by)
-    _update(mail_id, task_ids=','.join(map(str, m['task_ids'] + [task_id])), **_manual_done(m, by))
-    return True
+    with db.transaction() as s:
+        m = _mail_dict(_lock_mail(s, mail_id))
+        if s.get(Task, task_id) is None:
+            raise ValueError('업무를 찾을 수 없습니다.')
+        if task_id in m['task_ids']:
+            return False
+        _mail_history(m, task_id, by, session=s)
+        _update(mail_id, task_ids=','.join(map(str, m['task_ids'] + [task_id])), session=s, **_manual_done(m, by))
+        return True
 
 
 def create_task_from_mail(mail_id: int, title: str, parent_id: int | None, by: str, due: str = '',
                           assignee: str = '') -> int:
     """가져온 메일로 업무를 직접 하나 만든다 (분류·상태와 상관없이)."""
-    m = get_mail(mail_id)
-    if m is None:
-        raise ValueError('메일을 찾을 수 없습니다.')
-    title = (title or '').strip() or clean_subject(m['subject'])
-    if not title:
-        raise ValueError('업무 이름을 입력하세요.')
-    if parent_id and store.get_task(parent_id) is None:
-        raise ValueError('상위 업무를 찾을 수 없습니다.')
-    ids = create_tasks(m, [{'title': title, 'due': due or '', 'assignee': assignee or ''}], parent_id, by)
-    _update(mail_id, task_ids=','.join(map(str, m['task_ids'] + ids)), **_manual_done(m, by))
-    return ids[0]
+    with db.transaction() as s:
+        m = _mail_dict(_lock_mail(s, mail_id))
+        title = (title or '').strip() or clean_subject(m['subject'])
+        if not title:
+            raise ValueError('업무 이름을 입력하세요.')
+        if parent_id and s.get(Task, parent_id) is None:
+            raise ValueError('상위 업무를 찾을 수 없습니다.')
+        ids = create_tasks(m, [{'title': title, 'due': due or '', 'assignee': assignee or ''}], parent_id, by, session=s)
+        _update(mail_id, session=s, **_manual_done(m, by))
+        if ids:
+            return ids[0]
+        existing = s.scalars(select(Task).where(or_(Task.source_mail_id == mail_id, Task.id.in_(m['task_ids']))))
+        return next(t.id for t in existing if (t.source_mail_key or _task_key(t.title)) == _task_key(title))
 
 
 def unlink_task(mail_id: int, task_id: int) -> None:
     """메일과 업무의 연결만 끊는다 — 업무와 거기 남긴 기록은 그대로."""
-    m = get_mail(mail_id)
-    if m is None:
-        return
-    _update(mail_id, task_ids=','.join(str(t) for t in m['task_ids'] if t != task_id))
-    store.clear_source_mail(task_id, mail_id)
+    with db.transaction() as s:
+        if s.get(InboundMail, mail_id) is None:
+            return
+        m = _mail_dict(_lock_mail(s, mail_id))
+        _update(mail_id, task_ids=','.join(str(t) for t in m['task_ids'] if t != task_id), session=s)
+        store.clear_source_mail(task_id, mail_id, session=s)
 
 
 def process(mail_id: int) -> None:
@@ -460,7 +485,7 @@ def _apply_rule(m: dict, rule: dict) -> None:
         ids = create_tasks(m, tasks, rule['parent_task_id'] or (sug.get('parent_task_id') if thread else None),
                            MAIL_AUTHOR)
         _update(m['id'], status='auto', kind='task', rule_id=rule['id'], reason=f'{reason} — 업무 {len(ids)}건',
-                suggestion=sug, task_ids=','.join(map(str, ids)),
+                suggestion=sug,
                 handled_at=datetime.now().replace(microsecond=0), handled_by=MAIL_AUTHOR)
     else:
         if rule['parent_task_id']:
@@ -471,17 +496,17 @@ def _apply_rule(m: dict, rule: dict) -> None:
 def apply_review(mail_id: int, tasks: list[dict], parent_id: int | None, schedule_rows: list[dict] | None,
                  by: str, absence_rows: list[dict] | None = None) -> dict:
     """확인 화면에서 반영 — 고친 업무 후보로 업무를 만들고, 고친 일정 표·임원 부재 표를 반영한다."""
-    m = get_mail(mail_id)
-    if m is None:
-        raise ValueError('메일을 찾을 수 없습니다.')
-    ids = create_tasks(m, tasks or [], parent_id, by)
-    r = {'added': 0, 'updated': 0, 'same': 0}
-    if schedule_rows:
-        r = schedules.apply_events(schedule_rows, m['schedule_import_id'], by)
-    ab = absences.apply_rows(absence_rows, by, mail_id) if absence_rows else {'added': 0}
-    _update(mail_id, status='done', task_ids=','.join(map(str, m['task_ids'] + ids)),
-            handled_at=datetime.now().replace(microsecond=0), handled_by=by)
-    return {'tasks': len(ids), **r, 'absences': ab['added']}
+    with db.transaction() as s:
+        m = _mail_dict(_lock_mail(s, mail_id))
+        r = {'added': 0, 'updated': 0, 'same': 0}
+        if m['status'] in ('done', 'auto', 'ignored', 'skipped'):
+            return {'tasks': 0, 'existing_tasks': len(m['task_ids']), 'absences': 0, **r}
+        ids = create_tasks(m, tasks or [], parent_id, by, session=s)
+        if schedule_rows:
+            r = schedules.apply_events(schedule_rows, m['schedule_import_id'], by, session=s)
+        ab = absences.apply_rows(absence_rows, by, mail_id, session=s) if absence_rows else {'added': 0}
+        _update(mail_id, status='done', handled_at=datetime.now().replace(microsecond=0), handled_by=by, session=s)
+        return {'tasks': len(ids), 'existing_tasks': len(m['task_ids']), **r, 'absences': ab['added']}
 
 
 def extract_absences(mail_id: int) -> list[dict]:
@@ -534,9 +559,13 @@ def fetch_new(connect=None, process_now: bool = True) -> dict:
         for line in listing:
             num, uid = line.decode('utf-8', 'replace').split(None, 1)
             pairs.append((int(num), uid.strip()))
+        # 이전 버전이 한도 초과분에 남긴 빈 skipped 행은 실제로 읽은 메일이 아니다.
+        deferred_conditions = (InboundMail.status == 'skipped', func.coalesce(InboundMail.subject, '') == '',
+                               func.coalesce(InboundMail.mail_date, '') == '')
         with db.SessionLocal() as s:
             known = set(s.scalars(select(InboundMail.uidl)))
-        todo = [(n, u) for n, u in pairs if u not in known]
+            deferred = dict(s.execute(select(InboundMail.uidl, InboundMail.id).where(*deferred_conditions)).all())
+        todo = [(n, u) for n, u in pairs if u not in known or u in deferred]
         since = (date.today() - timedelta(days=cfg['since_days'])).isoformat() if cfg['since_days'] > 0 else ''
         for num, uid in todo[-cfg['max_per_run']:] if cfg['max_per_run'] > 0 else todo:  # 가장 최근 것들
             _, lines, _ = conn.retr(num)
@@ -544,16 +573,26 @@ def fetch_new(connect=None, process_now: bool = True) -> dict:
             parsed = mail_text.from_bytes(raw)
             old = since and parsed['mail_date'] and parsed['mail_date'] < since
             with db.SessionLocal() as s:
-                m = InboundMail(uidl=uid, message_id=parsed['message_id'][:300], subject=parsed['name'][:500],
-                                sender=parsed['sender'][:300], mail_date=parsed['mail_date'],
-                                body='' if old else parsed['text'], status='skipped' if old else 'review')
-                s.add(m)
+                fields = dict(message_id=parsed['message_id'][:300], subject=parsed['name'][:500],
+                              sender=parsed['sender'][:300], mail_date=parsed['mail_date'],
+                              body='' if old else parsed['text'], status='skipped' if old else 'review')
+                if uid in deferred:
+                    mid = deferred[uid]
+                    result = s.execute(update(InboundMail).where(InboundMail.id == mid, *deferred_conditions)
+                                       .values(**fields))
+                    if not result.rowcount:  # 다른 워커가 이미 복원한 경우
+                        s.rollback()
+                        continue
+                else:
+                    m = InboundMail(uidl=uid, **fields)
+                    s.add(m)
                 try:
                     s.commit()
                 except IntegrityError:  # 다른 프로세스가 방금 같은 메일을 넣었다
                     s.rollback()
                     continue
-                mid = m.id
+                if uid not in deferred:
+                    mid = m.id
             if old:
                 skipped += 1
             else:
@@ -564,15 +603,8 @@ def fetch_new(connect=None, process_now: bool = True) -> dict:
                     log.exception('첨부 저장 실패 %s', mid)
             if cfg['delete']:
                 conn.dele(num)
-        # 처음 연결할 때 너무 오래된 메일까지 받지 않도록, 이번에 못 받은(최대 건수 밖) 옛 메일은 건너뜀으로 기록
-        for num, uid in (todo[:-cfg['max_per_run']] if cfg['max_per_run'] > 0 else []):
-            with db.SessionLocal() as s:
-                s.add(InboundMail(uidl=uid, status='skipped'))
-                try:
-                    s.commit()
-                    skipped += 1
-                except IntegrityError:
-                    s.rollback()
+        # 수집 한도를 넘은 UIDL 은 저장하지 않는다. 다음 실행에서 이어 받고,
+        # MAIL_SINCE_DAYS 보다 오래됐는지는 실제 메일 날짜를 읽은 뒤 판단한다.
     finally:
         try:
             conn.quit()
@@ -649,4 +681,3 @@ def start_poller() -> bool:
 
 
 lock_holder: list = []
-

@@ -183,7 +183,9 @@ def history_card(h: dict, terms: list[str] | None = None, show_task: bool = Fals
     if h['ai_todos']:
         added_todos = added_todos or set()
         body.append(html.Div([
-            html.Div([html.I(className='bi bi-list-check me-1'), 'AI가 찾은 할 일' + (' — + 를 누르면 업무로 추가' if actions else '')],
+            html.Div([html.I(className='bi bi-list-check me-1'), 'AI가 찾은 할 일' + (' — + 를 누르면 업무로 추가' if actions else ''),
+                      html.Span(f" · 기한 기준: {h['ai_reference_date']}", className='ms-1')
+                      if h.get('ai_reference_date') and any(t.get('due') for t in h['ai_todos']) else None],
                      className='text-muted mb-1'),
             *[html.Div([
                 html.I(className='bi bi-check-lg text-success me-1') if t['title'] in added_todos else
