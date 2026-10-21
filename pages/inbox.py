@@ -236,6 +236,8 @@ def render_detail(sel, _):
                   dbc.Badge(kind[0], color=kind[1], className='me-2') if kind else None,
                   html.Span(m['reason'], className='small')]),
         html.Div(['연결된 업무: ', *links], className='small mt-1') if links else None,
+        html.Div('이미 반영한 업무는 유지하며 새 제목의 업무만 추가합니다. 기존 업무 수정은 업무 화면에서 합니다.',
+                 className='small text-muted mt-1') if links and open_ else None,
         html.Div(f"처리: {m['handled_by']} {m['handled_at']}", className='small text-muted mt-1')
         if m['handled_at'] else None,
         dbc.Alert(m['error'], color='danger', className='small py-1 mt-2 mb-0') if m['error'] else None,
@@ -331,7 +333,8 @@ def act(_a, _i, _r, _f, sel, tasks, parent, sched, task_style, sched_style, abs_
     use_sched = sched if sched_style != {'display': 'none'} else []
     use_abs = abs_rows if abs_style != {'display': 'none'} else []
     r = mailbox.apply_review(sel, use_tasks, parent, use_sched, by, absence_rows=use_abs)
-    return (n or 0) + 1, (f"반영 — 업무 {r['tasks']}건, 새 일정 {r['added']}건, 바뀐 일정 {r['updated']}건"
+    return (n or 0) + 1, (f"반영 — 새 업무 {r['tasks']}건, 기존 업무 {r['existing_tasks']}건 유지, "
+                         f"새 일정 {r['added']}건, 바뀐 일정 {r['updated']}건"
                           + (f", 임원 부재 {r['absences']}건" if r['absences'] else '')), True, 'success'
 
 

@@ -8,7 +8,7 @@ from dash import ALL, Input, Output, State, callback, ctx, dcc, html, no_update
 
 from components import todo_ui, ui
 from components.history_form import parse_uploads, people_options, register_form_callbacks, task_options
-from services import auth, enrich, llm, store
+from services import auth, db, enrich, llm, store
 
 
 def _opts(values):
@@ -115,15 +115,15 @@ def edit_history(_e, _c, _s, _r, _d, eid, etype, when, title, summary, keywords,
         h = store.get_history(eid)
         if h is None:
             raise ValueError('이력을 찾을 수 없습니다.')
-        store.update_history(eid, entry_type=etype, occurred_at=when or None, title=title or '',
-                             summary=summary or '', keywords=keywords or '', content=content or '',
-                             person_ids=people or [], task_ids=tasks or [])
-        h = store.get_history(eid)  # 업무를 바꿨으면 새 자료도 바뀐 업무에 붙는다
-        author = auth.current_name()
-        store.attach_links(h['task_id'], eid, store.parse_links(links or ''), author=author)
-        for name, data in parse_uploads(att, att_names):
-            store.add_reference(h['task_id'], 'file', title=name, file_name=name, file_bytes=data, author=author,
-                                history_id=eid)
+        with db.transaction() as s:
+            h = store.update_history(eid, entry_type=etype, occurred_at=when or None, title=title or '',
+                                     summary=summary or '', keywords=keywords or '', content=content or '',
+                                     person_ids=people or [], task_ids=tasks or [], session=s)
+            author = auth.current_name()
+            store.attach_links(h['task_id'], eid, store.parse_links(links or ''), author=author, session=s)
+            for name, data in parse_uploads(att, att_names):
+                store.add_reference(h['task_id'], 'file', title=name, file_name=name, file_bytes=data, author=author,
+                                    history_id=eid, session=s)
     except ValueError as e:
         return (True,) + (nu,) * 7 + (str(e), True) + (nu,) * 10
     if trig == 'he-regen':

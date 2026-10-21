@@ -110,17 +110,153 @@ def test_without_llm_guess_and_old_mail_skipped(monkeypatch):
     monkeypatch.setenv('MAIL_SINCE_DAYS', '30')
     monkeypatch.setenv('MAIL_MAX_PER_RUN', '2')
     pop = FakePOP([
-        _mail('아주 옛 메일', 'a@x', text='x', mid='<0@x>'),  # 최대 건수 밖 → 건너뜀
+        _mail('아주 옛 메일', 'a@x', text='x', date='Mon, 01 Jan 2024 09:00:00 +0900', mid='<0@x>'),
         _mail('옛 메일', 'a@x', text='x', date='Mon, 01 Jan 2024 09:00:00 +0900', mid='<1@x>'),
         _mail('원장님 일정', 'b@x', SCHEDULE_HTML, date=None or 'Fri, 23 Oct 2026 17:10:00 +0900', mid='<2@x>'),
     ])
     monkeypatch.setattr(mailbox, 'date', type('D', (), {'today': staticmethod(lambda: __import__('datetime').date(2026, 10, 25)),
                                                       'fromisoformat': staticmethod(__import__('datetime').date.fromisoformat)}))
     r = mailbox.fetch_new(connect=lambda cfg: pop)
-    assert r == {'new': 1, 'skipped': 2, 'processed': 1}
+    assert r == {'new': 1, 'skipped': 1, 'processed': 1}
+    assert mailbox.fetch_new(connect=lambda cfg: pop) == {'new': 0, 'skipped': 1, 'processed': 0}
     m = mailbox.list_mails()[0]
     assert (m['subject'], m['kind'], m['status']) == ('원장님 일정', 'schedule', 'review')  # 일정표 → 일정 추천
     assert len(mailbox.list_mails()) == 1  # 건너뛴 메일은 목록에 안 보임
+
+
+def test_fetch_limit_defers_fresh_mail_until_next_run(monkeypatch):
+    monkeypatch.setenv('MAIL_MAX_PER_RUN', '2')
+    pop = FakePOP([_mail(f'새 메일 {i}', 'a@x', text=f'원문 {i}', mid=f'<{i}@x>') for i in range(5)])
+    runs = [mailbox.fetch_new(connect=lambda cfg: pop) for _ in range(4)]
+    assert [r['new'] for r in runs] == [2, 2, 1, 0]
+    assert sum(r['skipped'] for r in runs) == 0
+    assert {m['body'].strip() for m in mailbox.list_mails()} == {f'원문 {i}' for i in range(5)}
+
+
+def test_fetch_recovers_legacy_empty_skipped_mail_and_preserves_id():
+    from services.db import InboundMail
+    with db.SessionLocal() as s:
+        stub = InboundMail(uidl='uid-1', status='skipped')
+        s.add(stub)
+        s.commit()
+        original_id = stub.id
+    pop = FakePOP([_mail('누락됐던 메일', 'a@x', text='보존할 원문')])
+    assert mailbox.fetch_new(connect=lambda cfg: pop)['new'] == 1
+    recovered = mailbox.get_mail(original_id)
+    assert recovered['subject'] == '누락됐던 메일' and recovered['body'].strip() == '보존할 원문'
+    assert recovered['status'] == 'review'
+    assert mailbox.fetch_new(connect=lambda cfg: pop)['new'] == 0
+
+
+def test_fetch_does_not_retry_mails_skipped_after_reading():
+    from services.db import InboundMail
+    with db.SessionLocal() as s:
+        s.add(InboundMail(uidl='uid-1', status='skipped', subject='오래된 메일', mail_date='2020-01-01'))
+        s.commit()
+
+    class NoRead(FakePOP):
+        def retr(self, n):
+            pytest.fail('날짜를 확인하고 제외했던 메일은 다시 받지 않음')
+
+    assert mailbox.fetch_new(connect=lambda cfg: NoRead([b'mail']))['new'] == 0
+
+
+def _review_mail():
+    mailbox.fetch_new(connect=lambda cfg: FakePOP([_mail('보고 자료 요청', 'a@x', text='보고서 준비')]))
+    return mailbox.list_mails(['review'])[0]
+
+
+def test_review_double_click_and_reopen_do_not_duplicate_tasks():
+    m = _review_mail()
+    tasks = [{'title': '보고서 준비', 'due': '2026-10-27', 'assignee': ''}]
+    assert mailbox.apply_review(m['id'], tasks, None, None, '담당자')['tasks'] == 1
+    ids = mailbox.get_mail(m['id'])['task_ids']
+    assert mailbox.apply_review(m['id'], tasks, None, None, '담당자')['tasks'] == 0
+    store.update_task(ids[0], title='담당자가 고친 제목')
+    mailbox.reopen(m['id'])
+    result = mailbox.apply_review(m['id'], tasks + [{'title': '검토 요청'}], None, None, '담당자')
+    assert result['tasks'] == 1 and result['existing_tasks'] == 1
+    assert mailbox.get_mail(m['id'])['task_ids'][:1] == ids
+    assert len(store.list_tasks()) == 2
+    assert store.get_task(ids[0])['title'] == '담당자가 고친 제목'
+    assert len(store.search_history(entry_types=['요청'])) == 2
+
+
+def test_concurrent_review_creates_tasks_once():
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Barrier
+    m = _review_mail()
+    gate = Barrier(3)
+
+    def apply(_):
+        gate.wait(timeout=5)
+        return mailbox.apply_review(m['id'], [{'title': '보고서 준비'}], None, None, '담당자')
+
+    with ThreadPoolExecutor(max_workers=3) as pool:
+        results = list(pool.map(apply, range(3)))
+    assert sum(r['tasks'] for r in results) == 1
+    assert len(store.list_tasks()) == 1
+    assert len(mailbox.get_mail(m['id'])['task_ids']) == 1
+
+
+def test_create_tasks_deduplicates_auto_processing_and_legacy_links():
+    m = _review_mail()
+    old = store.create_task('기존 업무')
+    mailbox._update(m['id'], task_ids=str(old['id']))  # source_mail_id 가 없던 예전 데이터
+    tasks = [{'title': '기존 업무'}, {'title': 'New  Task'}, {'title': ' new task '}]
+    assert len(mailbox.create_tasks(m, tasks, None, '자동')) == 1
+    assert mailbox.create_tasks(m, tasks, None, '자동') == []
+    assert len(mailbox.get_mail(m['id'])['task_ids']) == 2
+
+
+def test_manual_task_double_click_and_review_reuse_the_same_task():
+    m = _review_mail()
+    tid = mailbox.create_task_from_mail(m['id'], '보고서 준비', None, '담당자')
+    store.update_task(tid, title='직접 고친 업무 이름')
+    assert mailbox.create_task_from_mail(m['id'], '보고서 준비', None, '담당자') == tid
+    result = mailbox.apply_review(m['id'], [{'title': '보고서 준비'}], None, None, '담당자')
+    assert result['tasks'] == 0 and result['existing_tasks'] == 1
+    assert mailbox.get_mail(m['id'])['task_ids'] == [tid]
+    assert len(store.search_history(entry_types=['요청'])) == 1
+
+
+def test_review_rolls_back_absences_and_tasks_together(monkeypatch):
+    m = _review_mail()
+    store.create_person('김영수')
+    apply = absences.apply_rows
+
+    def fail_after_absence(*args, **kwargs):
+        apply(*args, **kwargs)
+        raise ValueError('부재 반영 실패')
+
+    monkeypatch.setattr(absences, 'apply_rows', fail_after_absence)
+    with pytest.raises(ValueError, match='부재 반영 실패'):
+        mailbox.apply_review(m['id'], [{'title': '보고서 준비'}], None, None, '담당자',
+                             absence_rows=[{'person': '김영수', 'kind': '휴가', 'start_date': '2026-10-27'}])
+    assert absences.list_range('2026-10-01', '2026-10-31') == []
+    assert store.list_tasks() == [] and mailbox.get_mail(m['id'])['task_ids'] == []
+    assert mailbox.get_mail(m['id'])['status'] == 'review'
+
+
+def test_review_rolls_back_tasks_and_schedule_on_failure(monkeypatch):
+    m = _review_mail()
+    apply = schedules.apply_events
+
+    def fail_after_schedule(*args, **kwargs):
+        apply(*args, **kwargs)
+        raise ValueError('일정 반영 실패')
+
+    monkeypatch.setattr(schedules, 'apply_events', fail_after_schedule)
+    tasks = [{'title': '보고서 준비'}]
+    events = [{'date': '2026-10-27', 'title': '보고 회의'}]
+    with pytest.raises(ValueError, match='일정 반영 실패'):
+        mailbox.apply_review(m['id'], tasks, None, events, '담당자')
+    assert store.list_tasks() == [] and store.search_history() == []
+    assert schedules.list_range('2026-10-01', '2026-10-31') == []
+    assert mailbox.get_mail(m['id'])['status'] == 'review'
+    assert mailbox.get_mail(m['id'])['task_ids'] == []
+    monkeypatch.setattr(schedules, 'apply_events', apply)
+    assert mailbox.apply_review(m['id'], tasks, None, events, '담당자')['tasks'] == 1
 
 
 def test_rule_crud_and_matching():

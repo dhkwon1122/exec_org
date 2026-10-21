@@ -760,13 +760,13 @@ def preview(events: list[dict]) -> list[dict]:
     return out
 
 
-def apply_events(events: list[dict], import_id: int | None = None, by: str = '') -> dict:
+def apply_events(events: list[dict], import_id: int | None = None, by: str = '', *, session=None) -> dict:
     """일정 목록을 반영. 'match_id' 가 있는 줄(미리보기에서 사람이 확인한 줄)은 그 일정을 줄 내용대로 고치고,
     없는 줄은 같은 일정을 찾아 정말 바뀐 칸만 고친다(verify_changes) — 같은 일정이 없으면 새로 만든다.
     제목이 날짜·시간뿐인 새 일정(칸이 밀린 줄)은 넣지 않는다(skipped)."""
     added = updated = same = skipped = 0
     taken = set()
-    with db.SessionLocal() as s:
+    with db.transaction(session) as s:
         for e in events:
             ev = clean_event(e)
             if ev is None:
@@ -799,7 +799,7 @@ def apply_events(events: list[dict], import_id: int | None = None, by: str = '')
             if imp is not None:
                 imp.applied_at = datetime.now().replace(microsecond=0)
                 imp.events = json.dumps([clean_event(e) for e in events if clean_event(e)], ensure_ascii=False)
-        s.commit()
+        s.flush()
     return {'added': added, 'updated': updated, 'same': same, 'skipped': skipped}
 
 

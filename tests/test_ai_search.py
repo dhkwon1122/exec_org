@@ -48,7 +48,7 @@ def test_analyze_record_parses_thinking_and_codefence(monkeypatch):
                              {'title': 'B사 견적 요청', 'due': '', 'assignee': ''},
                              {'title': '회의록 공유', 'due': '', 'assignee': ''}]}
     prompt = calls[0]['messages'][1]['content']
-    assert '장비 도입' in prompt and '오늘 날짜:' in prompt
+    assert '장비 도입' in prompt and '기록 기준일:' in prompt
 
 
 def test_llm2_env_fallback(monkeypatch):
@@ -142,3 +142,92 @@ def test_migration_adds_new_columns(tmp_path):
     h = store.list_history(1)[0]
     assert h['content'] == '옛 기록' and h['keywords'] == [] and h['ai_status'] == ''
     assert len(store.search_history('옛')) == 1
+    assert h['ai_token'] == '' and h['ai_reference_date'] == ''
+    token = store.begin_history_ai(h['id'])
+    store.set_history_ai(h['id'], 'done', title='새 요약', token=token, reference_date='2025-01-01')
+    assert store.get_history(h['id'])['ai_reference_date'] == '2025-01-01'
+
+
+@pytest.mark.parametrize('fail', [False, True])
+def test_ai_response_cannot_overwrite_user_edit(monkeypatch, fail):
+    t = store.create_task('업무')
+    h = store.add_history(t['id'], '이전 원문')
+
+    def during_request(*args, **kwargs):
+        store.update_history(h['id'], content='수정한 원문', title='직접 쓴 제목', summary='직접 쓴 요약')
+        if fail:
+            raise llm.LLMError('늦게 도착한 실패')
+        return {'title': '예전 AI 제목', 'summary': '예전 AI 요약', 'keywords': [], 'todos': []}
+
+    monkeypatch.setattr(llm, 'analyze_record', during_request)
+    enrich.enrich_entry(h['id'])
+    got = store.get_history(h['id'])
+    assert (got['content'], got['title'], got['summary']) == ('수정한 원문', '직접 쓴 제목', '직접 쓴 요약')
+    assert got['ai_status'] == '' and got['ai_error'] == ''
+
+
+def test_only_latest_ai_request_can_save(monkeypatch):
+    t = store.create_task('업무')
+    h = store.add_history(t['id'], '원문')
+    old = store.begin_history_ai(h['id'])
+    current = store.begin_history_ai(h['id'])
+    store.set_history_ai(h['id'], 'done', title='최신 제목', token=current)
+    store.set_history_ai(h['id'], 'done', title='예전 제목', token=old)
+    store.set_history_ai(h['id'], 'failed', error='예전 오류', token=old)
+    got = store.get_history(h['id'])
+    assert got['title'] == '최신 제목' and got['ai_status'] == 'done' and got['ai_error'] == ''
+    monkeypatch.setattr(llm, 'analyze_record', lambda *a, **kw: pytest.fail('취소된 작업은 LLM 을 호출하면 안 됨'))
+    enrich.enrich_entry(h['id'], old)
+
+
+def test_queued_request_is_invalidated_by_user_edit(monkeypatch):
+    t = store.create_task('업무')
+    h = store.add_history(t['id'], '원문')
+    jobs = []
+    monkeypatch.setattr(llm, 'is_configured', lambda: True)
+    monkeypatch.setattr(enrich._executor, 'submit', lambda *args: jobs.append(args))
+    enrich.submit(h['id'])
+    store.update_history(h['id'], title='수동 제목')
+    monkeypatch.setattr(llm, 'analyze_record', lambda *a, **kw: pytest.fail('편집 전에 대기 중이던 작업'))
+    jobs[0][0](*jobs[0][1:])
+    assert store.get_history(h['id'])['title'] == '수동 제목'
+
+
+def test_failed_submission_keeps_saved_record_and_allows_retry(monkeypatch):
+    t = store.create_task('업무')
+    h = store.add_history(t['id'], '중요한 기록')
+    monkeypatch.setattr(llm, 'is_configured', lambda: True)
+
+    def reject(*_):
+        raise RuntimeError('executor shutdown')
+
+    monkeypatch.setattr(enrich._executor, 'submit', reject)
+    enrich.submit(h['id'])
+    got = store.get_history(h['id'])
+    assert got['content'] == '중요한 기록' and got['ai_status'] == 'failed'
+    assert 'executor shutdown' in got['ai_error']
+
+
+def test_past_record_and_regeneration_use_event_date(monkeypatch):
+    calls = []
+    _fake_llm(monkeypatch, '{"title":"T", "todos":[{"title":"보고서 제출", "due":"2020-01-10"}]}', calls)
+    t = store.create_task('업무')
+    h = store.add_history(t['id'], '금요일까지 보고서 제출', occurred_at='2020-01-06T10:00')
+    enrich.enrich_entry(h['id'])
+    enrich.enrich_entry(h['id'])
+    for call in calls:
+        prompt = call['messages'][1]['content']
+        assert '기록 기준일: 2020-01-06 (월요일)' in prompt
+        assert '기록 기준일을 기준으로 실제 날짜로 바꾸고' in prompt
+    got = store.get_history(h['id'])
+    assert got['ai_reference_date'] == '2020-01-06' and got['ai_todos'][0]['due'] == '2020-01-10'
+    store.update_history(h['id'], occurred_at='2020-02-03T10:00')
+    assert store.get_history(h['id'])['ai_todos'] == []
+
+
+def test_unspecified_reference_date_defaults_to_today(monkeypatch):
+    from datetime import date
+    calls = []
+    _fake_llm(monkeypatch, '{"title":"T"}', calls)
+    llm.analyze_record('오늘 기록')
+    assert f'기록 기준일: {date.today().isoformat()}' in calls[0]['messages'][1]['content']
