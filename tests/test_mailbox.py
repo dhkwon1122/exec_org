@@ -163,3 +163,61 @@ def test_concurrent_fetch_is_safe(monkeypatch):
         s.commit()
     monkeypatch.setitem(mailbox.fetch_new.__globals__, 'select', stale_select)
     assert mailbox.fetch_new(connect=lambda cfg: pop)['new'] == 0
+
+
+def _tasks():
+    a = store.create_task('2026 임원 평가', tags='평가, MBO', description='임원종합평가·MBO 결과 취합과 보고')
+    b = store.create_task('조직개편 준비', tags='조직')
+    c = store.create_task('끝난 업무: 임원 평가 시스템 교체')
+    store.update_task(c['id'], status='완료')
+    return a, b
+
+
+def test_parent_suggested_by_keywords():
+    a, b = _tasks()
+    pop = FakePOP([_mail('[요청] 임원 평가 MBO 결과 제출', '인사팀 <hr@x.com>',
+                         text='이번 주까지 임원 MBO 평가 결과를 제출해 주세요.', mid='<p1@x>')])
+    mailbox.fetch_new(connect=lambda cfg: pop)
+    sug = mailbox.list_mails()[0]['suggestion']
+    assert sug['parent_task_id'] == a['id'] and '평가' in sug['parent_reason']
+    assert [c['id'] for c in sug['parent_candidates']][0] == a['id']
+    assert all(c['title'] != '끝난 업무: 임원 평가 시스템 교체' for c in sug['parent_candidates'])  # 완료 업무 제외
+
+
+def test_parent_from_same_thread_beats_keywords():
+    a, b = _tasks()
+    first = FakePOP([_mail('조직도 수정 건', 'kim@x.com', text='조직도 수정 부탁', mid='<t1@x>')])
+    mailbox.fetch_new(connect=lambda cfg: first)
+    m = mailbox.list_mails()[0]
+    mailbox.apply_review(m['id'], [{'title': '조직도 수정하기'}], b['id'], None, by='나')
+    reply = FakePOP([_mail('조직도 수정 건', 'kim@x.com', text='', mid='<t1@x>'),
+                     _mail('RE: 조직도 수정 건', 'kim@x.com', text='임원 평가 일정도 같이 반영해 주세요', mid='<t2@x>')])
+    mailbox.fetch_new(connect=lambda cfg: reply)
+    sug = mailbox.list_mails()[0]['suggestion']
+    assert sug['parent_task_id'] == b['id'] and sug['parent_reason'].startswith('같은 메일 스레드')
+
+
+def test_parent_picked_by_ai_and_bad_answer_ignored(monkeypatch):
+    a, b = _tasks()
+    answers = iter([json.dumps({'kind': 'task', 'reason': '요청', 'tasks': [{'title': '개편안 검토하기'}]}),
+                    json.dumps({'parent_id': b['id'], 'reason': '조직 개편 관련 요청'}),
+                    json.dumps({'kind': 'task', 'reason': '요청', 'tasks': [{'title': '평가 자료 보내기'}]}),
+                    json.dumps({'parent_id': 9999, 'reason': '없는 번호'})])
+    monkeypatch.setattr(llm, 'is_configured', lambda: True)
+    monkeypatch.setattr(llm, 'chat', lambda *a, **k: next(answers))
+    pop = FakePOP([_mail('조직 개편안 검토 요청', 'x@x', text='조직 개편안 검토 부탁', mid='<a1@x>'),
+                   _mail('MBO 평가 자료', 'y@x', text='임원 평가 MBO 자료', mid='<a2@x>')])
+    mailbox.fetch_new(connect=lambda cfg: pop)
+    by_subject = {m['subject']: m['suggestion'] for m in mailbox.list_mails()}
+    assert by_subject['조직 개편안 검토 요청']['parent_task_id'] == b['id']
+    assert by_subject['조직 개편안 검토 요청']['parent_reason'] == 'AI: 조직 개편 관련 요청'
+    # AI 가 목록에 없는 번호를 주면 버리고 낱말 점수로
+    assert by_subject['MBO 평가 자료']['parent_task_id'] == a['id']
+
+
+def test_no_parent_when_nothing_matches():
+    _tasks()
+    pop = FakePOP([_mail('점심 메뉴', 'x@x', text='오늘 점심은 김밥', mid='<n@x>')])
+    mailbox.fetch_new(connect=lambda cfg: pop)
+    sug = mailbox.list_mails()[0]['suggestion']
+    assert sug['parent_task_id'] is None and sug['parent_candidates'] == []
