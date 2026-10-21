@@ -23,6 +23,8 @@ logging.getLogger('services.db').setLevel(logging.ERROR)  # '옮기려면 이 �
 from services import db  # noqa: E402
 
 BATCH = 500
+# 자기 자신(상위 업무)이나 나중에 옮길 테이블(이력)을 가리키는 칸 — 행 순서와 상관없이 옮기려고 마지막에 채운다
+DEFERRED = {'tasks': ['parent_id', 'source_history_id']}
 
 
 class MigrateError(RuntimeError):
@@ -49,10 +51,20 @@ def migrate(source_url: str, target_url: str) -> dict[str, int]:
                                + ', '.join(f'{k} {n}건' for k, n in filled.items()))
         tables = db.Base.metadata.sorted_tables  # 외래키 순서 (부모 테이블 먼저)
         with src.connect() as s, dst.begin() as d:
+            later = []  # (테이블, id, {칸: 값}) — 아직 안 옮긴 행을 가리킬 수 있는 외래키는 다 옮긴 뒤에 채운다
             for t in tables:
+                cols = DEFERRED.get(t.name, [])
                 result = s.execute(select(t).order_by(*t.primary_key.columns))
                 while rows := result.mappings().fetchmany(BATCH):
-                    d.execute(t.insert(), [dict(r) for r in rows])
+                    batch = []
+                    for r in rows:
+                        r = dict(r)
+                        if any(r.get(c) is not None for c in cols):
+                            later.append((t, r['id'], {c: r[c] for c in cols}))
+                        batch.append({**r, **{c: None for c in cols}})
+                    d.execute(t.insert(), batch)
+            for t, rid, vals in later:
+                d.execute(t.update().where(t.c.id == rid).values(**vals))
             if dst.dialect.name == 'postgresql':
                 for t in tables:
                     if 'id' in t.c:  # 다음 새 기록의 id 가 옮긴 id 와 겹치지 않게

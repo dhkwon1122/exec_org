@@ -98,7 +98,7 @@ def layout(task_id=None, **_):
                 dbc.Tabs([
                     dbc.Tab([_history_form(), html.Div(id='td-history')], label='이력', tab_id='history'),
                     dbc.Tab([dbc.Card(dbc.CardBody(todo_ui.add_form('tt', with_task=False)), className='mb-3'),
-                             html.Div(id='td-todos')], label='할 일', tab_id='todos', id='td-todo-tab'),
+                             html.Div(id='td-todos')], label='하위 업무', tab_id='todos', id='td-todo-tab'),
                     dbc.Tab([_reference_form(), html.Div(id='td-refs')], label='참고자료', tab_id='refs'),
                     dbc.Tab([_link_form(), html.Div(id='td-links')], label='연결 업무', tab_id='links'),
                 ], id='td-tabs', active_tab='history', className='mb-3'),
@@ -119,7 +119,7 @@ def layout(task_id=None, **_):
 def render(_, _t, _h, tid):
     t = store.get_task(tid)
     if t is None:
-        return dbc.Alert('삭제된 업무입니다.', color='warning'), None, None, None, None, [], [], True, None, '할 일', []
+        return dbc.Alert('삭제된 업무입니다.', color='warning'), None, None, None, None, [], [], True, None, '하위 업무', []
     parent = store.get_task(t['parent_id']) if t['parent_id'] else None
 
     header = dbc.Card(dbc.CardBody([
@@ -138,18 +138,12 @@ def render(_, _t, _h, tid):
         return html.Tr([html.Th(label, className='text-muted fw-normal small', style={'width': '35%'}),
                         html.Td(value or '-', className='small')])
 
-    children = store.child_tasks(tid)
     side = [
         dbc.Card(dbc.CardBody(html.Table([html.Tbody([
             row('담당자', t['owner']), row('시작일', t['start_date']), row('마감일', t['due_date']),
             row('상위 업무', ui.task_link(parent) if parent else None),
             row('등록', t['created_at']), row('최종 수정', t['updated_at']),
         ])], className='table table-sm mb-0')), className='mb-3'),
-        dbc.Card([
-            dbc.CardHeader(f'하위 업무 ({len(children)})', className='small'),
-            dbc.ListGroup([dbc.ListGroupItem([ui.status_badge(c['status']), ui.task_link(c)]) for c in children],
-                          flush=True) if children else dbc.CardBody('없음', className='small text-muted'),
-        ], className='mb-3'),
     ]
     kw = store.keyword_stats(25, task_id=tid)
     if kw:
@@ -205,10 +199,11 @@ def render(_, _t, _h, tid):
     targets = [{'label': f"#{o['id']} {o['title']}", 'value': o['id']}
                for o in store.list_tasks() if o['id'] not in linked_ids]
     todos = store.list_todos(task_id=tid)
-    n_open = sum(not x['done'] for x in todos)
-    todo_view = todo_ui.todo_list(todos, show_task=False, empty='이 업무의 할 일이 없습니다.')
+    n_done = sum(x['done'] for x in todos)
+    todo_view = todo_ui.todo_list(todos, show_task=False,
+                                  empty='하위 업무가 없습니다 — 위에 적고 Enter. 마감·담당을 정하면 "내 업무"와 캘린더에 나옵니다.')
     return (header, side, history, ref_view, link_view, targets, pending, not pending,
-            todo_view, f'할 일 ({n_open})' if n_open else '할 일', todo_ui.member_options())
+            todo_view, f'하위 업무 ({n_done}/{len(todos)})' if todos else '하위 업무', todo_ui.member_options())
 
 
 todo_ui.register_add_callback('tt', task_id_store='td-id')

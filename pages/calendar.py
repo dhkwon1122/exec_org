@@ -1,4 +1,4 @@
-"""캘린더 — 월 단위로 할 일 마감·업무 시작/마감·이력을 날짜별로 본다. 날짜를 누르면 그날 내용."""
+"""캘린더 — 월 단위로 업무 마감·시작과 이력을 날짜별로 본다. 날짜를 누르면 그날 내용."""
 import calendar as pycal
 from datetime import date
 
@@ -30,9 +30,7 @@ def layout(**_):
                                outline=True, size='sm'),
                     dbc.Button('오늘', id='cal-today', color='secondary', outline=True, size='sm', className='ms-2'),
                     html.Div([
-                        html.Span([html.I(className='bi bi-check2-square me-1'), '할 일'], className='me-3'),
-                        html.Span([html.I(className='bi bi-flag-fill text-danger me-1'), '업무 마감'],
-                                  className='me-3'),
+                        html.Span([html.I(className='bi bi-check2-square me-1'), '업무 마감'], className='me-3'),
                         html.Span([html.I(className='bi bi-play-fill text-primary me-1'), '업무 시작'],
                                   className='me-3'),
                         dbc.Badge('n', color='secondary', pill=True, className='me-1'), '이력',
@@ -125,9 +123,9 @@ def _detail(iso: str):
     tasks = [(t, '마감') for t in info.get('tasks_due', [])] + [(t, '시작') for t in info.get('tasks_start', [])]
     return html.Div([
         html.H5(f"{d.month}월 {d.day}일 ({WEEKDAYS[d.weekday()]})", className='mb-3'),
-        html.H6('할 일', className='text-muted'),
-        todo_ui.todo_list(todos, empty='이 날 마감인 할 일이 없습니다.'),
-        html.H6('업무', className='text-muted mt-3'),
+        html.H6('마감 업무', className='text-muted'),
+        todo_ui.todo_list(todos, empty='이 날 마감인 업무가 없습니다.'),
+        html.H6('시작 업무', className='text-muted mt-3'),
         dbc.ListGroup([dbc.ListGroupItem([dbc.Badge(kind, color='danger' if kind == '마감' else 'primary',
                                                     className='me-2'), ui.task_link(t)], className='py-2')
                        for t, kind in tasks]) if tasks else html.Div('없음', className='small text-muted'),

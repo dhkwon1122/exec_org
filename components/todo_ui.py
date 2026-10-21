@@ -1,7 +1,7 @@
-"""할 일 목록 공용 조각.
+"""업무 체크 목록 공용 조각 (예전 '할 일'은 업무로 합쳐졌다 — 하위 업무·내 업무·캘린더가 이 목록을 쓴다).
 
-체크/삭제는 어느 화면에서 하든 이 모듈의 콜백 하나가 처리하고, 앱 전역 Store
-'todo-changed' 값을 올린다. 할 일을 보여주는 화면은 그 Store 를 Input 으로 받아 다시 그린다.
+체크(=완료)/삭제는 어느 화면에서 하든 이 모듈의 콜백 하나가 처리하고, 앱 전역 Store
+'todo-changed' 값을 올린다. 목록을 보여주는 화면은 그 Store 를 Input 으로 받아 다시 그린다.
 """
 from datetime import date, timedelta
 
@@ -35,22 +35,22 @@ def todo_row(t: dict, show_task: bool = True):
     return dbc.ListGroupItem(html.Div([
         dbc.Checkbox(id={'type': 'todo-done', 'id': t['id']}, value=t['done'], className='me-2 mb-0'),
         html.Div([
-            html.Span(t['title'], style=title_style, className='me-2'),
+            dcc.Link(t['title'], href=f"/task/{t['id']}", style=title_style, className='me-2 text-reset'),
             html.Div([
                 due_badge(t['due_date'], t['done']),
                 html.Span([html.I(className='bi bi-person me-1'), t['assignee_name']], className='me-2')
                 if t['assignee_name'] else None,
-                dcc.Link(f"#{t['task_id']} {t['task_title']}", href=f"/task/{t['task_id']}", className='me-2')
-                if show_task and t['task_id'] else None,
+                html.Span(['상위 ', dcc.Link(f"#{t['task_id']} {t['task_title']}", href=f"/task/{t['task_id']}")],
+                          className='me-2 text-muted') if show_task and t['task_id'] else None,
                 html.Span(f"완료 {t['done_at']}", className='text-muted') if t['done'] else None,
             ], className='small'),
         ], className='flex-grow-1'),
         dbc.Button(html.I(className='bi bi-x'), id={'type': 'todo-del', 'id': t['id']}, color='link', size='sm',
-                   className='text-muted p-0', title='삭제'),
+                   className='text-muted p-0', title='삭제') if store.can_delete_quick(t['id']) else None,
     ], className='d-flex align-items-start'), className='py-2')
 
 
-def todo_list(todos: list[dict], show_task: bool = True, empty: str = '할 일이 없습니다.'):
+def todo_list(todos: list[dict], show_task: bool = True, empty: str = '업무가 없습니다.'):
     if not todos:
         return html.Div(empty, className='small text-muted')
     return dbc.ListGroup([todo_row(t, show_task) for t in todos])
@@ -61,13 +61,14 @@ def member_options() -> list[dict]:
 
 
 def add_form(prefix: str, with_task: bool = True):
-    """할 일 추가 폼. with_task=False 면 업무 선택 칸이 없다(업무 상세 화면용)."""
+    """업무 빠른 추가 폼. with_task=False 면 상위 업무 선택 칸이 없다(업무 상세 화면 — 그 업무의 하위 업무로)."""
     return html.Div([
-        dbc.Input(id=f'{prefix}-title', placeholder='할 일 (Enter로 추가)', className='mb-2', n_submit=0),
+        dbc.Input(id=f'{prefix}-title', placeholder='하위 업무 (Enter로 추가)' if not with_task else
+                  '새 업무 (Enter로 추가)', className='mb-2', n_submit=0),
         dbc.Row([
             dbc.Col(dbc.Input(id=f'{prefix}-due', type='date'), xs=6, md=3),
             dbc.Col(dcc.Dropdown(id=f'{prefix}-assignee', placeholder='담당자'), xs=6, md=3),
-            dbc.Col(dcc.Dropdown(id=f'{prefix}-task', placeholder='관련 업무 (선택)'), xs=9, md=4)
+            dbc.Col(dcc.Dropdown(id=f'{prefix}-task', placeholder='상위 업무 (선택)'), xs=9, md=4)
             if with_task else None,
             dbc.Col(dbc.Button('추가', id=f'{prefix}-add', color='primary', className='w-100'), xs=3, md=2),
         ], className='g-2'),
@@ -110,7 +111,10 @@ def _todo_action(_v, _d, n):
     if trig['type'] == 'todo-del':
         if not value:  # 목록이 다시 그려질 때의 빈 트리거
             return no_update
-        store.delete_todo(trig['id'])
+        try:
+            store.delete_todo(trig['id'])
+        except ValueError:  # 그 사이 기록이 붙었으면 지우지 않는다 (버튼도 다시 그리면 사라짐)
+            pass
         return (n or 0) + 1
     # 체크박스: 목록이 다시 그려질 때도 호출되지만 DB 와 같은 값이면 아무것도 바뀌지 않는다
     if store.set_todo_done(trig['id'], bool(value), by=auth.current_name()):

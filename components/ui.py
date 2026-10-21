@@ -148,11 +148,11 @@ def history_card(h: dict, terms: list[str] | None = None, show_task: bool = Fals
     if h['ai_todos']:
         added_todos = added_todos or set()
         body.append(html.Div([
-            html.Div([html.I(className='bi bi-list-check me-1'), 'AI가 찾은 할 일'], className='text-muted mb-1'),
+            html.Div([html.I(className='bi bi-list-check me-1'), 'AI가 찾은 할 일 — + 를 누르면 업무로 추가'], className='text-muted mb-1'),
             *[html.Div([
                 html.I(className='bi bi-check-lg text-success me-1') if t['title'] in added_todos else
                 dbc.Button(html.I(className='bi bi-plus-lg'), id={'type': 'h-todo', 'hid': h['id'], 'idx': i},
-                           color='link', size='sm', className='p-0 me-1', title='할 일로 추가')
+                           color='link', size='sm', className='p-0 me-1', title='업무로 추가 (이 기록의 업무가 있으면 그 하위 업무로)')
                 if actions else html.I(className='bi bi-dot me-1'),
                 html.Span(t['title'], className='me-2'),
                 html.Span(t['due'], className='badge text-bg-light border me-1') if t['due'] else None,

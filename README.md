@@ -30,9 +30,9 @@
 | 참고자료 | 링크 / 파일 업로드(최대 50MB) / 메모. 업무 화면과 전체 자료 검색 화면에서 조회 |
 | 업무 연결 | A→B "선행"으로 연결하면 B 쪽에는 "후속"으로 표시. 양쪽 이력에 모두 기록 |
 | 업무 검색 | 업무 제목·설명·태그뿐 아니라 **이력(원문·AI 요약·키워드)과 참고자료**까지 검색 |
-| 할 일 | 업무별/단독 할 일, 마감일·담당자. `/todos`에서 지난 마감·오늘·7일 이내·이후·날짜 없음으로 묶어 보기. 완료하면 업무 이력에 남음 |
-| AI 할 일 추출 | 원문에서 요청·지시·후속 조치를 찾아 할 일 제안("금요일까지" → 실제 날짜). 버튼 하나로 할 일에 추가 |
-| 캘린더 | `/calendar` 월 달력에 할 일 마감·업무 시작/마감·이력 건수. 날짜를 누르면 그날의 할 일·업무·이력 |
+| 업무 = 할 일 | 할 일을 따로 두지 않고 **업무 하나로** 관리한다. 작은 일은 업무 화면 '하위 업무' 탭에 한 줄로 추가(마감·담당), 체크하면 완료. 하위 업무도 업무라 기록·자료·하위 업무를 가질 수 있고 단계 제한 없이 중첩된다(하위를 상위로 지정하는 고리는 막음). 업무 목록은 최상위 업무만(하위 진행률 `하위 2/5`), 검색하면 하위까지. `/todos`(내 업무)에서 내가 담당인 업무를 지난 마감·오늘·7일 이내·이후·마감 없음으로 묶어 보기. 예전 할 일 데이터는 시작할 때 하위 업무(업무에 속했던 것)·최상위 업무(단독)로 자동으로 옮겨진다 |
+| AI 할 일 추출 | 원문에서 요청·지시·후속 조치를 찾아 제안("금요일까지" → 실제 날짜). 버튼 하나로 업무에 추가 — 기록의 업무가 있으면 그 하위 업무로 |
+| 캘린더 | `/calendar` 월 달력에 업무 마감(체크)·시작·이력 건수. 날짜를 누르면 그날의 업무·이력 |
 | 로그인·권한 | 아래 "로그인과 접근 권한" 참고. 작성자는 로그인한 사용자로 자동 기록 |
 
 ## 실행
@@ -51,7 +51,7 @@ docker compose up -d --build          # http://<서버>:8502
 
 **업무 기록 DB — 이 앱 전용 PostgreSQL(`exec-db`)**
 
-- `docker compose up` 하면 `exec-db`(postgres:16) 컨테이너가 함께 뜨고, 업무 기록·임원 정보·할 일이 모두 여기에 저장된다.
+- `docker compose up` 하면 `exec-db`(postgres:16) 컨테이너가 함께 뜨고, 업무(하위 업무 포함)·기록·임원 정보가 모두 여기에 저장된다.
   People in SAIT DB 와는 별개다(그쪽은 로그인·임원 불러오기에 **읽기만**).
 - 데이터는 도커 볼륨 `exec_pgdata`에 있다. `docker compose down -v` 는 이 볼륨까지 지우니 쓰지 않는다.
 - 포트는 호스트의 `127.0.0.1:5434`(`EXEC_DB_PORT`)에만 열린다 — 서버 안에서 점검·백업용.
@@ -110,7 +110,7 @@ python app.py                # http://localhost:8050
 
 ```
 app.py                  앱 진입점, 네비게이션, 파일 다운로드 라우트(/files/<id>)
-services/db.py          DB 연결·테이블 정의 (tasks, history, references_, task_links, people, history_people, todos)
+services/db.py          DB 연결·테이블 정의 (tasks, history, references_, task_links, people, history_people, person_*; todos 는 예전 데이터 이관용)
                         + 예전 DB 자동 마이그레이션(컬럼 추가, 업무 없는 이력을 위한 NOT NULL 해제)
 services/store.py       CRUD + 자동 이력 기록 + 이력 검색 (화면은 이 모듈의 dict만 사용)
 services/llm.py         OpenAI 호환 LLM 호출, 원문 → 제목·요약·키워드
@@ -119,15 +119,15 @@ services/users.py       사용자 DB(app_users) 조회·비밀번호 확인 — 
 services/auth.py        역할 기반 접속 제한, 로그인 세션, 로그인 시도 제한
 components/ui.py        배지·아이콘·이력 카드·검색어 강조 등 공용 표시 조각
 components/history_form.py  이력 입력 폼 (업무 상세·빠른 기록 공용)
-components/todo_ui.py   할 일 목록·추가 폼, 체크/삭제 공용 콜백
-components/history_actions.py  이력 수정 창·삭제·AI 다시 생성·할 일로 추가 (모든 화면 공용)
+components/todo_ui.py   업무 체크 목록·빠른 추가 폼, 체크/삭제 공용 콜백
+components/history_actions.py  이력 수정 창·삭제·AI 다시 생성·제안을 업무로 추가 (모든 화면 공용)
 pages/home.py           업무 목록·검색·새 업무·빠른 기록·최근 이력
 pages/search.py         이력 검색
 pages/people.py         임원 목록·추가, 최근 동향
 pages/person.py         임원별 기록 모음·동향 기록
-pages/todos.py          할 일
+pages/todos.py          내 업무 (마감일별 체크 목록)
 pages/calendar.py       캘린더
-pages/task_detail.py    업무 상세 (이력 / 할 일 / 참고자료 / 연결 업무 탭, 하위 업무)
+pages/task_detail.py    업무 상세 (이력 / 하위 업무 / 참고자료 / 연결 업무 탭)
 pages/references.py     전체 참고자료 검색
 services/people_sync.py People in SAIT researchers 테이블에서 임원 기본 정보 불러오기 (읽기 전용)
 scripts/                auth_check.py(로그인 진단), sync_people.py(임원 불러오기), create_user.py(로컬 계정), fix_data_ownership.sh, gen_self_signed_cert.sh

@@ -57,10 +57,17 @@ class Task(Base):
     parent_id = Column(Integer, ForeignKey('tasks.id', ondelete='SET NULL'), nullable=True)
     start_date = Column(String(10), default='')  # YYYY-MM-DD
     due_date = Column(String(10), default='')
+    # 예전 '할 일'을 업무로 합치며 들어온 칸 — 담당자(사용자 DB user_id, 이름은 owner), 완료 시각,
+    # 이 업무를 만든 사람, AI 가 이 업무를 제안한 이력
+    assignee_id = Column(String(100), default='')
+    done_at = Column(DateTime, nullable=True)
+    created_by = Column(String(100), default='')
+    source_history_id = Column(Integer, ForeignKey('history.id', ondelete='SET NULL', use_alter=True,
+                                                   name='fk_tasks_source_history'), nullable=True)
     created_at = Column(DateTime, default=_now)
     updated_at = Column(DateTime, default=_now, onupdate=_now)
 
-    history = relationship('HistoryEntry', back_populates='task', cascade='all, delete-orphan',
+    history = relationship('HistoryEntry', back_populates='task', foreign_keys='HistoryEntry.task_id', cascade='all, delete-orphan',
                            passive_deletes=True)
     references = relationship('Reference', back_populates='task', cascade='all, delete-orphan',
                               passive_deletes=True)
@@ -85,7 +92,7 @@ class HistoryEntry(Base):
     ai_error = Column(Text, default='')
     ai_todos = Column(Text, default='')  # AI 가 원문에서 뽑은 할 일 제안 (JSON 배열)
 
-    task = relationship('Task', back_populates='history')
+    task = relationship('Task', back_populates='history', foreign_keys=[task_id])
 
 
 class Reference(Base):
@@ -217,6 +224,8 @@ class PersonAttribute(Base):
 
 
 class Todo(Base):
+    """예전 '할 일' — 지금은 업무(하위 업무)로 합쳐졌다. 예전 DB 에 남은 행은 시작할 때 업무로 옮기고 지운다
+    (_merge_todos_into_tasks). 새로 쓰지 않는다."""
     __tablename__ = 'todos'
 
     id = Column(Integer, primary_key=True)
@@ -253,6 +262,7 @@ def make_engine(url: str | None = None):
             Base.metadata.create_all(engine)
             _add_missing_columns(engine)
             _relax_not_null(engine)
+            _merge_todos_into_tasks(engine)
             break
         except Exception:  # noqa: BLE001
             if attempt == 4:
@@ -280,6 +290,22 @@ def _add_missing_columns(engine):
                     default = ''
                 conn.execute(text(f'ALTER TABLE {table.name} ADD COLUMN {col.name} {coltype}{default}'))
 
+
+
+def _merge_todos_into_tasks(engine):
+    """예전 '할 일'(todos)을 업무로 옮긴다 — 업무에 속했던 할 일은 그 업무의 하위 업무, 단독 할 일은 최상위 업무.
+    완료 여부 → 상태(완료/진행중), 담당자 이름 → owner. 옮긴 행은 todos 에서 지운다(한 트랜잭션)."""
+    with engine.begin() as conn:
+        rows = conn.execute(Todo.__table__.select().order_by(Todo.__table__.c.id)).mappings().all()
+        for r in rows:
+            conn.execute(Task.__table__.insert().values(
+                title=r['title'], parent_id=r['task_id'], due_date=r['due_date'] or '',
+                status='완료' if r['done'] else '진행중', done_at=r['done_at'], owner=r['assignee_name'] or '',
+                assignee_id=r['assignee_id'] or '', created_by=r['created_by'] or '',
+                source_history_id=r['source_history_id'], description='', tags='', start_date='',
+                created_at=r['created_at'] or _now(), updated_at=_now()))
+        if rows:
+            conn.execute(text('DELETE FROM todos'))
 
 
 # 예전 버전에서 NOT NULL 이던 컬럼 중 지금은 비워둘 수 있게 된 것 (임원 동향은 업무가 없다)
