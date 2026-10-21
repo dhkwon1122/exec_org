@@ -269,6 +269,26 @@ class Schedule(Base):
     updated_at = Column(DateTime, default=_now, onupdate=_now)
 
 
+class Absence(Base):
+    """임원 부재 — 휴가·출장·교육 등으로 자리를 비우는 기간. 한 사람당 한 건(여럿이 같이 가는 출장은 사람마다).
+    half: '' 종일, '오전'/'오후' 반차(시작일=종료일일 때)."""
+    __tablename__ = 'absences'
+
+    id = Column(Integer, primary_key=True)
+    person_id = Column(Integer, ForeignKey('people.id', ondelete='CASCADE'), nullable=False, index=True)
+    kind = Column(String(20), default='휴가')
+    start_date = Column(String(10), nullable=False, index=True)  # YYYY-MM-DD
+    end_date = Column(String(10), nullable=False, index=True)
+    half = Column(String(10), default='')
+    place = Column(String(300), default='')  # 출장지·교육 기관 등
+    deputy = Column(String(100), default='')  # 대결자(업무 대행)
+    note = Column(Text, default='')
+    source_mail_id = Column(Integer, nullable=True, index=True)  # 메일에서 뽑아 등록했으면 그 메일 (inbound_mails.id)
+    created_by = Column(String(100), default='')
+    created_at = Column(DateTime, default=_now)
+    updated_at = Column(DateTime, default=_now, onupdate=_now)
+
+
 class ScheduleImport(Base):
     """일정 메일 한 통(붙여넣기·파일) — 원문을 그대로 두고 AI 가 일정 목록으로 정리한 결과를 담는다.
     사람이 확인하고 반영(applied)해야 schedules 에 들어간다."""
@@ -310,6 +330,21 @@ class InboundMail(Base):
     received_at = Column(DateTime, default=_now)
     handled_at = Column(DateTime, nullable=True)
     handled_by = Column(String(100), default='')
+
+
+class MailAttachment(Base):
+    """받은 메일의 첨부 파일. doc_key = 파일 이름에서 날짜·_r1·_v2·최종 같은 꼬리표를 뗀 '같은 문서' 열쇠
+    (services/doc_versions.py) — 같은 열쇠끼리 메일 날짜 순으로 판(버전)을 매긴다."""
+    __tablename__ = 'mail_attachments'
+
+    id = Column(Integer, primary_key=True)
+    mail_id = Column(Integer, ForeignKey('inbound_mails.id', ondelete='CASCADE'), nullable=False, index=True)
+    filename = Column(String(300), nullable=False)
+    file_path = Column(String(500), default='')  # UPLOAD_DIR 기준
+    size = Column(Integer, default=0)
+    sha256 = Column(String(64), default='', index=True)
+    doc_key = Column(String(300), default='', index=True)
+    created_at = Column(DateTime, default=_now)
 
 
 class MailRule(Base):

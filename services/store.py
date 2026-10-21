@@ -981,23 +981,32 @@ def todos_for_history(entry_id: int) -> dict[str, int]:
 
 
 def task_sources(task_id: int) -> dict:
-    """업무를 만든 출처 — {'history': AI 가 할 일을 찾은 메모(이력) | None, 'mail': 받은 메일 | None}.
-    메일 칸이 없던 예전 업무는 받은 메일의 '만든 업무' 목록에서 찾는다."""
+    """업무의 출처 — {'history': AI 가 할 일을 찾은 메모(이력) | None, 'mails': 이 업무와 연결된 받은 메일들,
+    'mail': 그 첫 메일 | None}. 메일마다 'created' = 그 메일로 만든 업무인지(아니면 나중에 연결한 것).
+    메일로 만든 업무는 source_mail_id 로, 나중에 연결한 메일은 받은 메일의 '연결된 업무' 목록으로 찾는다."""
     with db.SessionLocal() as s:
         t = s.get(Task, task_id)
         if t is None:
-            return {'history': None, 'mail': None}
+            return {'history': None, 'mail': None, 'mails': []}
         hid, mid = t.source_history_id, t.source_mail_id
-        if mid is None:
-            for m_id, ids in s.execute(select(InboundMail.id, InboundMail.task_ids)
-                                       .where(InboundMail.task_ids.like(f'%{task_id}%'))):
-                if str(task_id) in (ids or '').split(','):
-                    mid = m_id
-                    break
-        m = s.get(InboundMail, mid) if mid else None
-        mail = {'id': m.id, 'subject': m.subject or '(제목 없음)', 'sender': m.sender or '',
-                'mail_date': m.mail_date or '', 'body': m.body or ''} if m else None
-    return {'history': get_history(hid), 'mail': mail}
+        linked = [m for m in s.scalars(select(InboundMail).where(InboundMail.task_ids.like(f'%{task_id}%'))
+                                       .order_by(InboundMail.id))
+                  if str(task_id) in (m.task_ids or '').split(',')]
+        src = s.get(InboundMail, mid) if mid else None
+        ordered = ([src] if src else []) + [m for m in linked if src is None or m.id != src.id]
+        mails = [{'id': m.id, 'subject': m.subject or '(제목 없음)', 'sender': m.sender or '',
+                  'mail_date': m.mail_date or '', 'body': m.body or '', 'created': src is not None and m.id == src.id}
+                 for m in ordered]
+    return {'history': get_history(hid), 'mails': mails, 'mail': mails[0] if mails else None}
+
+
+def clear_source_mail(task_id: int, mail_id: int) -> None:
+    """메일과 연결을 끊을 때 — 그 메일로 만든 업무였으면 출처 표시도 지운다."""
+    with db.SessionLocal() as s:
+        t = s.get(Task, task_id)
+        if t is not None and t.source_mail_id == mail_id:
+            t.source_mail_id = None
+            s.commit()
 
 
 # ── 캘린더 ────────────────────────────────────────────────────────────

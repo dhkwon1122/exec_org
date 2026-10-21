@@ -3,12 +3,13 @@ import dash
 import dash_bootstrap_components as dbc
 from dash import ALL, Input, Output, State, callback, ctx, dash_table, dcc, html, no_update
 
-from services import auth, mailbox, schedules, store
+from components import absence_ui, doc_ui, ui
+from services import absences, auth, doc_versions, mailbox, schedules, store
 
 dash.register_page(__name__, path='/inbox', name='받은 메일', title='업무 기록 · 받은 메일')
 
 KIND = {'schedule': ('원장님 일정', 'primary'), 'task': ('업무', 'success'), 'both': ('일정+업무', 'info'),
-        'ignore': ('무시', 'secondary')}
+        'absence': ('임원 부재', 'warning'), 'ignore': ('무시', 'secondary')}
 STATUS_COLOR = {'auto': 'success', 'review': 'warning', 'done': 'primary', 'ignored': 'secondary', 'failed': 'danger'}
 FILTERS = [('review', '확인 필요'), ('auto', '자동 반영'), ('done', '반영함'), ('ignored', '무시'), ('all', '전체')]
 
@@ -44,6 +45,35 @@ def layout(mail=None, **_):
             dbc.Col(html.Div(id='ib-list'), lg=5),
             dbc.Col(html.Div([
                 html.Div(id='ib-head'),
+                html.Div(id='ib-attach'),
+                html.Div(id='ib-link-box', style={'display': 'none'}, children=[
+                    dbc.Card(dbc.CardBody([
+                        html.Div([html.I(className='bi bi-link-45deg me-1'), '이 메일과 연결된 업무'],
+                                 className='fw-semibold small mb-1'),
+                        html.Div(id='ib-linked', className='mb-2'),
+                        dbc.Row([
+                            dbc.Col(dcc.Dropdown(id='ib-link-task', placeholder='기존 업무에 연결 — 업무 검색'), md=9),
+                            dbc.Col(dbc.Button('연결', id='ib-link', color='secondary', outline=True,
+                                               className='w-100'), md=3),
+                        ], className='g-2 mb-2'),
+                        html.Details([
+                            html.Summary('이 메일로 새 업무 만들기', className='small'),
+                            html.Div([
+                                dbc.Input(id='ib-new-title', placeholder='업무 이름 (비우면 메일 제목)', className='mb-2'),
+                                dbc.Row([
+                                    dbc.Col(dcc.Dropdown(id='ib-new-parent', placeholder='상위 업무 (선택)'), md=6),
+                                    dbc.Col(dbc.Input(id='ib-new-due', type='date'), md=3),
+                                    dbc.Col(dbc.Button('만들기', id='ib-new-make', color='primary', className='w-100'),
+                                            md=3),
+                                ], className='g-2'),
+                            ], className='mt-2'),
+                        ], id='ib-new-box'),
+                        html.Div('연결하거나 만든 업무에는 메일 원문이 "요청" 기록으로 남고, 업무 화면의 출처에 이 메일이 보입니다.',
+                                 className='small text-muted mt-2'),
+                        dbc.Button([html.I(className='bi bi-person-dash me-1'), '이 메일에서 임원 부재 찾기'],
+                                   id='ib-abs-extract', color='link', size='sm', className='p-0 mt-1'),
+                    ]), className='mt-2'),
+                ]),
                 html.Div(id='ib-task-box', style={'display': 'none'}, children=[
                     html.H6([html.I(className='bi bi-check2-square me-1'), '업무로 만들기'], className='mt-3'),
                     dbc.Row([
@@ -70,6 +100,30 @@ def layout(mail=None, **_):
                                                   {'name': '참석자', 'id': 'attendees'}, {'name': '세부', 'id': 'details'},
                                                   {'name': '검증', 'id': 'note', 'editable': False}],
                                          style_table={'overflowX': 'auto'}, style_cell={**cell, 'fontSize': '0.8rem'}),
+                ]),
+                html.Div(id='ib-abs-box', style={'display': 'none'}, children=[
+                    html.H6([html.I(className='bi bi-person-dash me-1'), '임원 부재'], className='mt-3'),
+                    html.Div(id='ib-abs-note', className='small text-muted mb-1'),
+                    dash_table.DataTable(id='ib-abs', editable=True, row_deletable=True, data=[],
+                                         columns=[{'name': '상태', 'id': 'state_label', 'editable': False},
+                                                  {'name': '임원', 'id': 'person'}, {'name': '종류', 'id': 'kind'},
+                                                  {'name': '시작', 'id': 'start_date'}, {'name': '종료', 'id': 'end_date'},
+                                                  {'name': '반차', 'id': 'half'}, {'name': '장소', 'id': 'place'},
+                                                  {'name': '대결자', 'id': 'deputy'}, {'name': '메모', 'id': 'note'},
+                                                  {'name': '확인', 'id': 'check', 'editable': False}],
+                                         style_table={'overflowX': 'auto'}, style_cell={**cell, 'fontSize': '0.8rem'},
+                                         style_data_conditional=[
+                                             {'if': {'filter_query': '{state} = "unknown"'},
+                                              'backgroundColor': 'rgba(220,53,69,.08)'},
+                                             {'if': {'filter_query': '{state} = "overlap"'},
+                                              'backgroundColor': 'rgba(255,193,7,.12)'},
+                                             {'if': {'filter_query': '{state} = "same"'}, 'color': '#888'}]),
+                    html.Div([
+                        dbc.Button([html.I(className='bi bi-check2 me-1'), '부재 등록'], id='ib-abs-apply',
+                                   color='primary', size='sm', className='me-2'),
+                        html.Span(f"종류: {', '.join(absences.KINDS)} · 반차: 오전/오후 · 임원 이름을 고치면 다시 찾습니다. "
+                                  '이미 있는 부재와 임원을 못 찾은 줄은 건너뜁니다.', className='small text-muted'),
+                    ], className='mt-1 d-flex align-items-center flex-wrap'),
                 ]),
                 html.Div(id='ib-actions', className='mt-3', style={'display': 'none'}, children=[
                     dbc.Button([html.I(className='bi bi-check2 me-1'), '반영'], id='ib-apply', color='primary',
@@ -177,7 +231,7 @@ def render_detail(sel, _):
                             className='me-1'),
                   dbc.Badge(kind[0], color=kind[1], className='me-2') if kind else None,
                   html.Span(m['reason'], className='small')]),
-        html.Div(['만든 업무: ', *links], className='small mt-1') if links else None,
+        html.Div(['연결된 업무: ', *links], className='small mt-1') if links else None,
         html.Div(f"처리: {m['handled_by']} {m['handled_at']}", className='small text-muted mt-1')
         if m['handled_at'] else None,
         dbc.Alert(m['error'], color='danger', className='small py-1 mt-2 mb-0') if m['error'] else None,
@@ -244,9 +298,10 @@ def add_task_row(n, rows):
           Input('ib-apply', 'n_clicks'), Input('ib-ignore', 'n_clicks'), Input('ib-reopen', 'n_clicks'),
           Input('ib-fetch', 'n_clicks'),
           State('ib-sel', 'data'), State('ib-tasks', 'data'), State('ib-parent', 'value'), State('ib-sched', 'data'),
-          State('ib-task-box', 'style'), State('ib-sched-box', 'style'), State('ib-refresh', 'data'),
+          State('ib-task-box', 'style'), State('ib-sched-box', 'style'), State('ib-abs', 'data'),
+          State('ib-abs-box', 'style'), State('ib-refresh', 'data'),
           prevent_initial_call=True)
-def act(_a, _i, _r, _f, sel, tasks, parent, sched, task_style, sched_style, n):
+def act(_a, _i, _r, _f, sel, tasks, parent, sched, task_style, sched_style, abs_rows, abs_style, n):
     trig = ctx.triggered_id
     if not ctx.triggered or not ctx.triggered[0]['value']:
         return no_update, no_update, no_update, no_update
@@ -270,8 +325,113 @@ def act(_a, _i, _r, _f, sel, tasks, parent, sched, task_style, sched_style, n):
         return (n or 0) + 1, no_update, False, no_update
     use_tasks = tasks if task_style != {'display': 'none'} else []
     use_sched = sched if sched_style != {'display': 'none'} else []
-    r = mailbox.apply_review(sel, use_tasks, parent, use_sched, by)
-    return (n or 0) + 1, (f"반영 — 업무 {r['tasks']}건, 새 일정 {r['added']}건, 바뀐 일정 {r['updated']}건"), True, 'success'
+    use_abs = abs_rows if abs_style != {'display': 'none'} else []
+    r = mailbox.apply_review(sel, use_tasks, parent, use_sched, by, absence_rows=use_abs)
+    return (n or 0) + 1, (f"반영 — 업무 {r['tasks']}건, 새 일정 {r['added']}건, 바뀐 일정 {r['updated']}건"
+                          + (f", 임원 부재 {r['absences']}건" if r['absences'] else '')), True, 'success'
+
+
+# ── 업무 직접 연결·만들기 ─────────────────────────────────────────────
+
+@callback(Output('ib-link-box', 'style'), Output('ib-linked', 'children'), Output('ib-link-task', 'options'),
+          Output('ib-link-task', 'value'), Output('ib-new-title', 'value'), Output('ib-new-parent', 'options'),
+          Output('ib-new-parent', 'value'), Output('ib-new-due', 'value'), Output('ib-attach', 'children'),
+          Input('ib-sel', 'data'), Input('ib-refresh', 'data'))
+def render_links(sel, _):
+    m = mailbox.get_mail(sel) if sel else None
+    if m is None:
+        return {'display': 'none'}, None, [], None, '', [], None, None, None
+    tasks = {t['id']: t for t in store.list_tasks()}
+    linked = [tasks[t] for t in m['task_ids'] if t in tasks]
+    view = html.Div([
+        html.Div([
+            ui.status_badge(t['status']), ui.task_link(t), html.Span(className='me-auto'),
+            dbc.Button(html.I(className='bi bi-x'), id={'type': 'ib-unlink', 'id': t['id']}, color='link', size='sm',
+                       className='text-muted p-0', title='연결 끊기 (업무와 기록은 그대로)'),
+        ], className='d-flex align-items-center gap-2 small py-1') for t in linked
+    ]) if linked else html.Div('아직 연결된 업무가 없습니다.', className='small text-muted')
+    opts = [{'label': f"#{t['id']} {t['title']}" + (' (완료)' if t['status'] == '완료' else ''), 'value': t['id']}
+            for t in sorted(tasks.values(), key=lambda t: (t['status'] == '완료', -t['id']))
+            if t['id'] not in m['task_ids']]
+    parent_opts = [o for o in opts if '(완료)' not in o['label']]
+    # 상위 업무 기본값: 받을 때 추천한 상위 업무, 없으면 같은 메일 스레드의 업무 (AI 는 부르지 않음 — 화면이 느려짐)
+    suggested = m['suggestion'].get('parent_task_id') or mailbox._thread_parent(m['subject'], m['id'])[0]
+    docs = doc_versions.for_mails([m['id']])
+    attach = dbc.Card(dbc.CardBody([
+        html.Div([html.I(className='bi bi-paperclip me-1'), f'첨부 파일 {sum(len(g["files"]) for g in docs)}개'],
+                 className='fw-semibold small mb-2'),
+        doc_ui.doc_groups(docs, current_mail=m['id']),
+        html.Div('파일 이름의 날짜·_r1·_v2·최종 같은 꼬리표를 떼고 같은 문서끼리 묶어, 메일 날짜 순으로 판을 매깁니다.',
+                 className='small text-muted mt-2'),
+    ]), className='mt-2') if docs else None
+    return ({}, view, opts, None, mailbox.clean_subject(m['subject']), parent_opts,
+            suggested if suggested in tasks else None, None, attach)
+
+
+@callback(Output('ib-refresh', 'data', allow_duplicate=True), Output('ib-msg', 'children', allow_duplicate=True),
+          Output('ib-msg', 'is_open', allow_duplicate=True), Output('ib-msg', 'color', allow_duplicate=True),
+          Input('ib-link', 'n_clicks'), Input('ib-new-make', 'n_clicks'),
+          Input({'type': 'ib-unlink', 'id': ALL}, 'n_clicks'),
+          State('ib-sel', 'data'), State('ib-link-task', 'value'), State('ib-new-title', 'value'),
+          State('ib-new-parent', 'value'), State('ib-new-due', 'value'), State('ib-refresh', 'data'),
+          prevent_initial_call=True)
+def link_actions(_l, _m, _u, sel, task_id, title, parent, due, n):
+    trig = ctx.triggered_id
+    if not sel or not ctx.triggered or not ctx.triggered[0]['value']:
+        return no_update, no_update, no_update, no_update
+    by = auth.current_name()
+    try:
+        if isinstance(trig, dict):
+            mailbox.unlink_task(sel, trig['id'])
+            return (n or 0) + 1, f"#{trig['id']} 업무와 연결을 끊었습니다 (업무와 기록은 그대로).", True, 'secondary'
+        if trig == 'ib-link':
+            if not task_id:
+                return no_update, '연결할 업무를 고르세요.', True, 'warning'
+            done = mailbox.link_task(sel, int(task_id), by)
+            return ((n or 0) + 1, ['연결했습니다 — 메일 원문을 업무 기록으로 남겼습니다. ',
+                                   dcc.Link('업무 열기', href=f'/task/{task_id}')] if done else '이미 연결된 업무입니다.',
+                    True, 'success' if done else 'info')
+        if trig == 'ib-new-make':
+            tid = mailbox.create_task_from_mail(sel, title or '', int(parent) if parent else None, by, due or '')
+            return (n or 0) + 1, ['업무를 만들었습니다. ', dcc.Link(f'#{tid} 열기', href=f'/task/{tid}')], True, 'success'
+    except ValueError as e:
+        return no_update, str(e), True, 'danger'
+    return no_update, no_update, no_update, no_update
+
+
+# ── 임원 부재 ─────────────────────────────────────────────────────────
+
+@callback(Output('ib-abs-box', 'style'), Output('ib-abs', 'data'), Output('ib-abs-note', 'children'),
+          Input('ib-sel', 'data'), Input('ib-refresh', 'data'))
+def render_abs(sel, _):
+    m = mailbox.get_mail(sel) if sel else None
+    if m is None or ('absences' not in m['suggestion'] and m['kind'] != 'absence'):
+        return {'display': 'none'}, [], ''
+    rows = m['suggestion'].get('absences') or []
+    note = m['suggestion'].get('absence_note', '')
+    if not rows:
+        note = (note + ' ' if note else '') + '부재를 찾지 못했습니다 — 아래 표에 직접 적어도 됩니다.'
+    return {}, absence_ui.table_rows(rows) or [{'person': '', 'kind': '휴가', 'start_date': m['mail_date'], 'end_date': '',
+                                   'half': '', 'place': '', 'deputy': '', 'note': '', 'check': '',
+                                   'state': 'unknown', 'state_label': ''}], note
+
+
+@callback(Output('ib-refresh', 'data', allow_duplicate=True), Output('ib-msg', 'children', allow_duplicate=True),
+          Output('ib-msg', 'is_open', allow_duplicate=True), Output('ib-msg', 'color', allow_duplicate=True),
+          Input('ib-abs-extract', 'n_clicks'), Input('ib-abs-apply', 'n_clicks'),
+          State('ib-sel', 'data'), State('ib-abs', 'data'), State('ib-refresh', 'data'), prevent_initial_call=True)
+def abs_actions(_e, _a, sel, rows, n):
+    if not sel or not ctx.triggered or not ctx.triggered[0]['value']:
+        return no_update, no_update, no_update, no_update
+    if ctx.triggered_id == 'ib-abs-extract':
+        found = mailbox.extract_absences(sel)
+        return ((n or 0) + 1, f'임원 부재 {len(found)}건을 찾았습니다 — 아래 표에서 확인하고 등록하세요.' if found else
+                '임원 부재를 찾지 못했습니다 — 표에 직접 적어서 등록할 수 있습니다.', True, 'info')
+    r = mailbox.apply_absences(sel, rows or [], auth.current_name())
+    msg = [f"임원 부재 {r['added']}건 등록" + (f", 이미 있음 {r['same']}건" if r['same'] else '')
+           + (f", 임원을 못 찾아 건너뜀 {r['unknown']}건" if r['unknown'] else '') + '. ',
+           dcc.Link('부재 달력 보기', href='/calendar?tab=absence')]
+    return (n or 0) + 1, msg, True, 'success' if r['added'] else 'secondary'
 
 
 # ── 규칙 ──────────────────────────────────────────────────────────────

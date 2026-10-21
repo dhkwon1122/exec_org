@@ -233,6 +233,31 @@ def _eml(data: bytes) -> dict:
             'sender': header('from'), 'message_id': header('message-id')}
 
 
+def attachments(data: bytes, max_bytes: int = 30 * 1024 * 1024) -> list[tuple[str, bytes]]:
+    """메일 원본의 첨부 파일 → [(파일 이름, 내용)]. 본문에 박힌 그림(서명 이미지 등)과 max_bytes 보다 큰 파일은 뺀다."""
+    try:
+        msg = email.message_from_bytes(data, policy=email.policy.default)
+    except Exception:  # noqa: BLE001
+        return []
+    out = []
+    for part in msg.walk():
+        if part.is_multipart():
+            continue
+        try:
+            name = part.get_filename()
+        except Exception:  # noqa: BLE001 — 깨진 머리글
+            name = None
+        if not name:
+            continue
+        disp = (part.get_content_disposition() or '').lower()
+        if disp == 'inline' and part.get_content_maintype() == 'image' and part.get('content-id'):
+            continue  # 본문 속 그림
+        payload = part.get_payload(decode=True) or b''
+        if payload and len(payload) <= max_bytes:
+            out.append((str(name).strip().replace('\r', '').replace('\n', ''), payload))
+    return out
+
+
 def from_bytes(data: bytes) -> dict:
     """메일 원본(RFC 822, POP3 로 받은 그대로) → {'name','mail_date','text','sender','message_id'}."""
     return _eml(data)
