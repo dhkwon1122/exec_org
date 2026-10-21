@@ -97,7 +97,7 @@ ANALYZE_USER = """오늘 날짜: {today} ({weekday})
   "title": "이 기록의 주제를 한 줄로 (30자 내외)",
   "summary": "핵심 내용 2~4문장 요약. 결정 사항·요청 사항·후속 조치(누가/언제까지)가 있으면 반드시 포함",
   "keywords": ["검색용 키워드 5~10개"],
-  "todos": [{{"title": "해야 할 일 (동사로 끝나는 한 문장)", "due": "YYYY-MM-DD 또는 빈 문자열", "assignee": "담당자 이름 또는 빈 문자열"}}]
+  "todos": [{{"title": "해야 할 일 (동사로 끝나는 한 문장)", "due": "YYYY-MM-DD 또는 빈 문자열", "assignee": "담당자 이름 (여러 명이면 쉼표로) 또는 빈 문자열"}}]
 }}
 keywords 에는 (1) 사람·조직·제품·과제·문서 같은 고유명사, (2) 핵심 주제어, (3) 원문에 그 단어가 없더라도 나중에 검색할 때 쓸 법한 동의어·상위 개념을 섞어 넣는다. 각 키워드는 짧은 명사구로.
 기록 유형이 '동향'이면 summary 는 "누가 / 무엇을(관심사·발언·움직임) / 우리에게 주는 시사점" 순으로 쓰고, 원문에 출처나 확인 정도(직접 들음·전언·추정)가 있으면 반드시 밝힌다. keywords 에는 관련 임원의 이름과 직위를 넣는다.
@@ -140,5 +140,5 @@ def _clean_todos(raw) -> list[dict]:
         due = str(t.get('due') or '').strip()
         out.append({'title': str(t['title']).strip()[:300],
                     'due': due if re.match(r'^\d{4}-\d{2}-\d{2}$', due) else '',
-                    'assignee': str(t.get('assignee') or '').strip()[:50]})
+                    'assignee': str(t.get('assignee') or '').strip()[:100]})
     return out[:10]

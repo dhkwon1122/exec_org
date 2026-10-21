@@ -40,8 +40,9 @@ def todo_row(t: dict, show_task: bool = True):
             *ui.source_icons(t),
             html.Div([
                 due_badge(t['due_date'], t['done']),
-                html.Span([html.I(className='bi bi-person me-1'), t['assignee_name']], className='me-2')
-                if t['assignee_name'] else None,
+                html.Span([html.I(className='bi bi-people me-1' if len(t['assignees']) > 1 else 'bi bi-person me-1'),
+                           assignee_names(t)], className='me-2')
+                if t['assignees'] else None,
                 html.Span(['상위 ', dcc.Link(f"#{t['task_id']} {t['task_title']}", href=f"/task/{t['task_id']}")],
                           className='me-2 text-muted') if show_task and t['task_id'] else None,
                 html.Span(f"완료 {t['done_at']}", className='text-muted') if t['done'] else None,
@@ -62,6 +63,57 @@ def member_options() -> list[dict]:
     return [{'label': m['name'], 'value': m['user_id']} for m in auth.list_members()]
 
 
+# 담당자 고르기 (여러 명) — 값은 'u:<user_id>'(접속 가능한 사용자) 또는 'n:<이름>'(이름만 적은 담당자)
+
+def assignee_options(current: list[dict] | None = None) -> list[dict]:
+    """사용자 + 예전에 이름으로만 적힌 담당자 + 지금 업무의 담당자."""
+    members = member_options()
+    opts = [{'label': m['label'], 'value': f"u:{m['value']}"} for m in members]
+    member_names = {m['label'] for m in members}
+    names = set(store.all_owners()) | {a['name'] for a in current or [] if not a['user_id']}
+    opts += [{'label': f'{n} (이름만)', 'value': f'n:{n}'} for n in sorted(names - member_names)]
+    known = {o['value'] for o in opts}
+    opts += [{'label': a['name'], 'value': f"u:{a['user_id']}"} for a in current or []
+             if a['user_id'] and f"u:{a['user_id']}" not in known]  # 이제 접속 권한이 없는 사용자
+    return opts
+
+
+def assignee_values(assignees: list[dict]) -> list[str]:
+    return [f"u:{a['user_id']}" if a['user_id'] else f"n:{a['name']}" for a in assignees]
+
+
+def assignees_from(values: list[str] | str | None, extra: str = '', current: list[dict] | None = None) -> list[dict]:
+    """고른 값 + '그 밖의 담당자' 칸(쉼표로 이름) → [{'name', 'user_id'}]. 이름이 사용자와 같으면 그 사용자로."""
+    if isinstance(values, str):
+        values = [values]
+    names = {m['value']: m['label'] for m in member_options()}
+    names.update({a['user_id']: a['name'] for a in current or [] if a['user_id'] and a['user_id'] not in names})
+    by_name = {v: k for k, v in names.items()}
+    out = []
+    for v in values or []:
+        kind, _, val = str(v).partition(':')
+        if kind == 'u' and val:
+            out.append({'name': names.get(val, val), 'user_id': val})
+        elif kind == 'n' and val:
+            out.append({'name': val, 'user_id': by_name.get(val, '')})
+    for n in store.parse_assignees(extra or ''):
+        out.append({'name': n['name'], 'user_id': by_name.get(n['name'], '')})
+    return store.parse_assignees(out)
+
+
+def assignee_picker(prefix: str, extra: bool = True, placeholder: str = '담당자 (여러 명 가능)'):
+    """담당자 여러 명 고르기 + (extra) 사용자 목록에 없는 사람 이름 칸."""
+    return html.Div([
+        dcc.Dropdown(id=f'{prefix}-assignees', multi=True, placeholder=placeholder),
+        dbc.Input(id=f'{prefix}-assignee-extra', placeholder='목록에 없는 담당자 이름 (쉼표로 여러 명)',
+                  size='sm', className='mt-1') if extra else None,
+    ])
+
+
+def assignee_names(t: dict) -> str:
+    return ', '.join(a['name'] for a in t.get('assignees') or []) or t.get('assignee_name') or t.get('owner') or ''
+
+
 def add_form(prefix: str, with_task: bool = True):
     """업무 빠른 추가 폼. with_task=False 면 상위 업무 선택 칸이 없다(업무 상세 화면 — 그 업무의 하위 업무로)."""
     return html.Div([
@@ -69,7 +121,7 @@ def add_form(prefix: str, with_task: bool = True):
                   '새 업무 (Enter로 추가)', className='mb-2', n_submit=0),
         dbc.Row([
             dbc.Col(dbc.Input(id=f'{prefix}-due', type='date'), xs=6, md=3),
-            dbc.Col(dcc.Dropdown(id=f'{prefix}-assignee', placeholder='담당자'), xs=6, md=3),
+            dbc.Col(dcc.Dropdown(id=f'{prefix}-assignee', multi=True, placeholder='담당자 (여러 명)'), xs=6, md=3),
             dbc.Col(dcc.Dropdown(id=f'{prefix}-task', placeholder='상위 업무 (선택)'), xs=9, md=4)
             if with_task else None,
             dbc.Col(dbc.Button('추가', id=f'{prefix}-add', color='primary', className='w-100'), xs=3, md=2),
@@ -89,14 +141,12 @@ def register_add_callback(prefix: str, task_id_store: str | None = None):
               Output(f'{prefix}-error', 'children'), Output(f'{prefix}-error', 'is_open'),
               Input(f'{prefix}-add', 'n_clicks'), Input(f'{prefix}-title', 'n_submit'), *states,
               prevent_initial_call=True)
-    def _add(_c, _s, title, due, assignee_id, task_id, n):
+    def _add(_c, _s, title, due, assignee_values_, task_id, n):
         if not (ctx.triggered and ctx.triggered[0]['value']):
             return no_update, no_update, no_update, no_update
-        names = {o['value']: o['label'] for o in member_options()}
         try:
             store.create_todo(title, task_id=int(task_id) if task_id else None, due_date=due or '',
-                              assignee_id=assignee_id or '', assignee_name=names.get(assignee_id, ''),
-                              created_by=auth.current_name())
+                              assignees=assignees_from(assignee_values_), created_by=auth.current_name())
         except ValueError as e:
             return no_update, no_update, str(e), True
         return (n or 0) + 1, '', '', False

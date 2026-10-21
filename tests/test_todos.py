@@ -152,3 +152,40 @@ def test_task_tree_depth_and_status_filter():
     assert next(r for r in rows if r['task']['title'] == 'B')['n_done'] == 1
     # 진행중만: 완료된 C 는 빠짐
     assert [r['task']['title'] for r in store.task_tree(['진행중'], depth=99)] == ['E', 'A', 'B', 'D']
+
+
+def test_several_assignees():
+    t = store.create_task('보고서', owner='김철수, 이영희')
+    assert [a['name'] for a in t['assignees']] == ['김철수', '이영희'] and t['owner'] == '김철수, 이영희'
+    sub = store.create_todo('자료 취합', task_id=t['id'],
+                            assignees=[{'name': '권동혁', 'user_id': 'dhkwon'}, {'name': '박민수', 'user_id': ''},
+                                       {'name': '권동혁', 'user_id': 'dhkwon'}])
+    assert [(a['name'], a['user_id']) for a in sub['assignees']] == [('권동혁', 'dhkwon'), ('박민수', '')]
+    assert sub['assignee_id'] == 'dhkwon'
+    # 내 업무: user_id 가 같거나, user_id 없이 이름만 같은 담당자
+    assert [x['title'] for x in store.list_todos(assignee_id='dhkwon')] == ['자료 취합']
+    assert {x['title'] for x in store.list_todos(assignee_id='pms', assignee_name='박민수')} == {'자료 취합'}
+    assert {x['title'] for x in store.list_todos(assignee_id='lyh', assignee_name='이영희')} == {'보고서'}
+    assert [x['id'] for x in store.list_tasks(owner='이영희')] == [t['id']]
+    assert {'김철수', '이영희', '권동혁', '박민수'} <= set(store.all_owners())
+    # 바꾸기
+    t = store.update_task(t['id'], assignees=[{'name': '이영희', 'user_id': ''}])
+    assert [a['name'] for a in t['assignees']] == ['이영희'] and store.list_todos(assignee_id='x', assignee_name='김철수') == []
+    store.update_todo(sub['id'], assignee_name='최지훈', assignee_id='choi')
+    assert store.get_task(sub['id'])['assignees'] == [{'name': '최지훈', 'user_id': 'choi'}]
+    t = store.update_task(t['id'], owner='')
+    assert t['assignees'] == [] and t['owner'] == ''
+
+
+def test_old_single_owner_moves_to_assignees(tmp_path):
+    from sqlalchemy import create_engine, text
+    path = tmp_path / 'old.db'
+    db.configure('sqlite:///' + str(path))
+    t = store.create_task('예전 업무')
+    with create_engine(f'sqlite:///{path}').begin() as c:  # 담당자 표가 생기기 전 모양
+        c.execute(text('DELETE FROM task_assignees'))
+        c.execute(text("UPDATE tasks SET owner='김철수/이영희', assignee_id='kim' WHERE id=:i"), {'i': t['id']})
+    db.configure('sqlite:///' + str(path))
+    assert store.get_task(t['id'])['assignees'] == [{'name': '김철수', 'user_id': 'kim'}, {'name': '이영희', 'user_id': ''}]
+    db.configure('sqlite:///' + str(path))  # 다시 시작해도 그대로
+    assert len(store.get_task(t['id'])['assignees']) == 2

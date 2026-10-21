@@ -16,7 +16,7 @@ from sqlalchemy import func, or_, select
 from sqlalchemy.orm import aliased
 
 from services import db
-from services.db import HistoryEntry, HistoryPerson, HistoryTask, InboundMail, Person, PersonCareer, Reference, Task, TaskLink
+from services.db import HistoryEntry, HistoryPerson, HistoryTask, InboundMail, TaskAssignee, Person, PersonCareer, Reference, Task, TaskLink
 
 STATUSES = ['예정', '진행중', '보류', '완료']
 ENTRY_TYPES = ['메모', '피드백', '동향', '회의', '결정', '진행', '이슈', '요청']
@@ -39,10 +39,51 @@ def _task_dict(t: Task) -> dict:
         'id': t.id, 'title': t.title, 'description': t.description or '', 'status': t.status,
         'owner': t.owner or '', 'tags': _tags(t.tags), 'parent_id': t.parent_id,
         'start_date': t.start_date or '', 'due_date': t.due_date or '',
-        'assignee_id': t.assignee_id or '', 'done_at': _dt(t.done_at),
+        'assignee_id': t.assignee_id or '', 'assignees': _assignee_list(t), 'done_at': _dt(t.done_at),
         'source_history_id': t.source_history_id, 'source_mail_id': t.source_mail_id,
         'created_at': _dt(t.created_at), 'updated_at': _dt(t.updated_at),
     }
+
+
+def _assignee_list(t: Task) -> list[dict]:
+    return [{'name': a.name, 'user_id': a.user_id or ''} for a in t.assignee_rows]
+
+
+def parse_assignees(value) -> list[dict]:
+    """담당자 입력 → [{'name', 'user_id'}]. 쉼표·/ 로 이은 이름 글, 이름 목록, dict 목록 모두 받는다.
+    같은 이름은 한 번만."""
+    if value is None:
+        return []
+    if isinstance(value, str):
+        value = re.split(r'[,/;]', value)
+    out, seen = [], set()
+    for v in value:
+        d = {'name': str(v.get('name') or ''), 'user_id': str(v.get('user_id') or '')} if isinstance(v, dict) \
+            else {'name': str(v or ''), 'user_id': ''}
+        d['name'] = d['name'].strip()[:100]
+        if d['name'] and d['name'] not in seen:
+            seen.add(d['name'])
+            out.append(d)
+    return out
+
+
+def _set_assignees(s, t: Task, people: list[dict]) -> None:
+    """담당자 바꾸기 — task_assignees 를 새로 쓰고 owner(이름 이은 글)·assignee_id(첫 user_id)도 맞춘다."""
+    for a in list(t.assignee_rows):
+        t.assignee_rows.remove(a)
+    s.flush()
+    for i, p in enumerate(people):
+        t.assignee_rows.append(TaskAssignee(name=p['name'], user_id=p['user_id'], pos=i))
+    t.owner = ', '.join(p['name'] for p in people)[:100]
+    t.assignee_id = next((p['user_id'] for p in people if p['user_id']), '')
+
+
+def _mine(user_id: str, name: str = ''):
+    """내가 담당자인 업무 조건 — user_id 가 같거나, user_id 없이 이름만 같은 담당자."""
+    cond = TaskAssignee.user_id == user_id
+    if name:
+        cond = or_(cond, (TaskAssignee.user_id == '') & (TaskAssignee.name == name))
+    return Task.id.in_(select(TaskAssignee.task_id).where(cond))
 
 
 def _history_dict(h: HistoryEntry) -> dict:
@@ -94,7 +135,8 @@ def _log(s, task_id: int, entry_type: str, content: str, author: str = ''):
 
 def create_task(title: str, description: str = '', status: str = '진행중', owner: str = '',
                 tags: list[str] | str = '', parent_id: int | None = None,
-                start_date: str = '', due_date: str = '') -> dict:
+                start_date: str = '', due_date: str = '', assignees: list | None = None) -> dict:
+    """assignees: 담당자 [{'name', 'user_id'}] — 없으면 owner(쉼표로 여러 명) 이름으로."""
     title = (title or '').strip()
     if not title:
         raise ValueError('업무 제목을 입력하세요.')
@@ -103,12 +145,14 @@ def create_task(title: str, description: str = '', status: str = '진행중', ow
     if isinstance(tags, list):
         tags = ', '.join(tags)
     with db.SessionLocal() as s:
-        t = Task(title=title, description=description or '', status=status, owner=owner or '',
+        people = parse_assignees(assignees if assignees is not None else owner)
+        t = Task(title=title, description=description or '', status=status, owner='',
                  tags=', '.join(_tags(tags)), parent_id=parent_id or None,
                  start_date=start_date or '', due_date=due_date or '')
         s.add(t)
         s.flush()
-        _log(s, t.id, '상태변경', f'업무 생성 (상태: {status})', owner)
+        _set_assignees(s, t, people)
+        _log(s, t.id, '상태변경', f'업무 생성 (상태: {status})', t.owner)
         s.commit()
         return _task_dict(t)
 
@@ -120,11 +164,14 @@ def get_task(task_id: int) -> dict | None:
 
 
 def update_task(task_id: int, author: str = '', **fields) -> dict:
-    allowed = {'title', 'description', 'status', 'owner', 'tags', 'parent_id', 'start_date', 'due_date'}
+    """assignees([{'name', 'user_id'}]) 나 owner(쉼표로 여러 이름)로 담당자를 바꾼다."""
+    allowed = {'title', 'description', 'status', 'tags', 'parent_id', 'start_date', 'due_date'}
     with db.SessionLocal() as s:
         t = s.get(Task, task_id)
         if t is None:
             raise ValueError('업무를 찾을 수 없습니다.')
+        if 'assignees' in fields or 'owner' in fields:
+            _set_assignees(s, t, parse_assignees(fields['assignees'] if 'assignees' in fields else fields['owner']))
         for k, v in fields.items():
             if k not in allowed:
                 continue
@@ -188,7 +235,7 @@ def list_tasks(query: str = '', status: str | list[str] | None = None, tag: str 
         if status:
             stmt = stmt.where(Task.status.in_([status] if isinstance(status, str) else status))
         if owner:
-            stmt = stmt.where(Task.owner == owner)
+            stmt = stmt.where(Task.id.in_(select(TaskAssignee.task_id).where(TaskAssignee.name == owner)))
         if tag:
             stmt = stmt.where(Task.tags.like(f'%{tag}%'))
         for term in search_terms(query):  # 검색어가 여러 개면 모두 포함(AND)
@@ -263,7 +310,7 @@ def all_tags() -> list[str]:
 
 def all_owners() -> list[str]:
     with db.SessionLocal() as s:
-        return sorted({o for (o,) in s.execute(select(Task.owner)) if o})
+        return sorted({o for (o,) in s.execute(select(TaskAssignee.name).distinct()) if o})
 
 
 def child_tasks(task_id: int) -> list[dict]:
@@ -802,7 +849,7 @@ def _todo_dict(t: Task, parent_title: str | None = None) -> dict:
     return {
         'id': t.id, 'task_id': t.parent_id, 'task_title': parent_title or '', 'title': t.title,
         'status': t.status, 'due_date': t.due_date or '', 'done': done, 'done_at': _dt(t.done_at),
-        'assignee_id': t.assignee_id or '', 'assignee_name': t.owner or '',
+        'assignee_id': t.assignee_id or '', 'assignee_name': t.owner or '', 'assignees': _assignee_list(t),
         'created_by': t.created_by or '', 'source_history_id': t.source_history_id,
         'source_mail_id': t.source_mail_id, 'created_at': _dt(t.created_at),
         'overdue': bool(not done and t.due_date and t.due_date < today),
@@ -811,8 +858,9 @@ def _todo_dict(t: Task, parent_title: str | None = None) -> dict:
 
 def create_todo(title: str, task_id: int | None = None, due_date: str = '', assignee_id: str = '',
                 assignee_name: str = '', created_by: str = '', source_history_id: int | None = None,
-                source_mail_id: int | None = None) -> dict:
-    """체크 항목처럼 업무를 하나 만든다 — task_id 가 있으면 그 업무의 하위 업무."""
+                source_mail_id: int | None = None, assignees: list | None = None) -> dict:
+    """체크 항목처럼 업무를 하나 만든다 — task_id 가 있으면 그 업무의 하위 업무.
+    담당자: assignees([{'name', 'user_id'}]) 또는 assignee_name(쉼표로 여러 명) + assignee_id(한 명일 때)."""
     title = (title or '').strip()
     if not title:
         raise ValueError('업무 내용을 입력하세요.')
@@ -822,29 +870,35 @@ def create_todo(title: str, task_id: int | None = None, due_date: str = '', assi
         if task_id and parent is None:
             raise ValueError('상위 업무를 찾을 수 없습니다.')
         t = Task(title=title, parent_id=task_id or None, due_date=due_date, status='진행중',
-                 owner=assignee_name or '', assignee_id=assignee_id or '', created_by=created_by or '',
+                 owner='', assignee_id='', created_by=created_by or '',
                  source_history_id=source_history_id, source_mail_id=source_mail_id, description='', tags='',
                  start_date='')
         s.add(t)
         s.flush()
+        _set_assignees(s, t, assignees_of(assignees, assignee_name, assignee_id))
         if parent:
             _log(s, parent.id, '할일', f'하위 업무 추가: {title}', created_by)
         s.commit()
         return _todo_dict(t, parent.title if parent else '')
 
 
+def assignees_of(assignees: list | None, assignee_name: str = '', assignee_id: str = '') -> list[dict]:
+    """예전 방식(이름 + user_id 하나)과 새 방식(담당자 목록)을 담당자 목록으로."""
+    if assignees is not None:
+        return parse_assignees(assignees)
+    people = parse_assignees(assignee_name or '')
+    if assignee_id and not people:  # 이름 없이 user_id 만 — id 를 이름 자리에
+        people = [{'name': assignee_id[:100], 'user_id': assignee_id}]
+    elif assignee_id and len(people) == 1:
+        people[0]['user_id'] = assignee_id
+    return people
+
+
 def update_todo(todo_id: int, **fields) -> dict:
     if 'task_id' in fields:
         fields['parent_id'] = fields.pop('task_id')
-    if 'assignee_name' in fields:
-        fields['owner'] = fields.pop('assignee_name')
-    if 'assignee_id' in fields:
-        with db.SessionLocal() as s:
-            t = s.get(Task, todo_id)
-            if t is None:
-                raise ValueError('업무를 찾을 수 없습니다.')
-            t.assignee_id = fields.pop('assignee_id') or ''
-            s.commit()
+    if {'assignee_name', 'assignee_id'} & fields.keys():
+        fields['assignees'] = assignees_of(None, fields.pop('assignee_name', ''), fields.pop('assignee_id', ''))
     if fields:
         update_task(todo_id, **fields)
     with db.SessionLocal() as s:
@@ -889,8 +943,8 @@ def delete_todo(todo_id: int) -> None:
 
 def list_todos(task_id: int | None = None, assignee_id: str | None = None, done: bool | None = None,
                date_from: str = '', date_to: str = '', done_since: str = '', assignee_name: str = '') -> list[dict]:
-    """업무를 체크 목록으로. task_id: 그 업무의 하위 업무만. assignee_id: 내 업무 — 담당 user_id 가 같거나,
-    user_id 없이 담당자 이름(assignee_name)만 적힌 업무.
+    """업무를 체크 목록으로. task_id: 그 업무의 하위 업무만. assignee_id: 내 업무 — 담당자 중에 user_id 가
+    같거나, user_id 없이 이름(assignee_name)만 같은 사람이 있는 업무.
     정렬: 미완료 먼저, 마감일 빠른 순(날짜 없는 것은 뒤), 완료는 최근 완료 순."""
     parent = aliased(Task)
     with db.SessionLocal() as s:
@@ -898,10 +952,7 @@ def list_todos(task_id: int | None = None, assignee_id: str | None = None, done:
         if task_id is not None:
             stmt = stmt.where(Task.parent_id == task_id)
         if assignee_id is not None:
-            mine = Task.assignee_id == assignee_id
-            if assignee_name:
-                mine = or_(mine, (Task.assignee_id == '') & (Task.owner == assignee_name))
-            stmt = stmt.where(mine)
+            stmt = stmt.where(_mine(assignee_id, assignee_name))
         if done is not None:
             stmt = stmt.where((Task.status == '완료') if done else (Task.status != '완료'))
         if date_from:

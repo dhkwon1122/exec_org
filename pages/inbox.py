@@ -54,7 +54,7 @@ def layout(mail=None, **_):
                     html.Div(id='ib-parent-hint', className='small mb-2'),
                     dash_table.DataTable(id='ib-tasks', editable=True, row_deletable=True, data=[],
                                          columns=[{'name': '업무', 'id': 'title'}, {'name': '기한(YYYY-MM-DD)', 'id': 'due'},
-                                                  {'name': '담당', 'id': 'assignee'}],
+                                                  {'name': '담당 (쉼표로 여러 명)', 'id': 'assignee'}],
                                          style_cell=cell),
                     html.Div('메일 원문은 만든 업무마다 "요청" 기록으로 남습니다. 만들지 않을 줄은 × 로 지우세요.',
                              className='small text-muted mt-1'),

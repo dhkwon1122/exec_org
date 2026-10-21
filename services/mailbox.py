@@ -158,7 +158,7 @@ CLASSIFY_SYSTEM = """너는 임원조직 담당자의 메일을 정리하는 비
 - both: 둘 다
 - ignore: 공지·광고·자동 발송·참고용이라 할 일이 없는 메일
 task 나 both 면 해야 할 일을 tasks 에 넣는다(제목은 동사로 끝나는 한 문장, 기한은 YYYY-MM-DD — '금요일까지' 같은
-상대 표현은 메일 날짜 기준, 없으면 빈 문자열, 담당자는 메일에 이름이 있을 때만).
+상대 표현은 메일 날짜 기준, 없으면 빈 문자열, 담당자는 메일에 이름이 있을 때만, 여러 명이면 쉼표로).
 반드시 JSON 만 출력: {"kind": "schedule|task|both|ignore", "reason": "한 줄 근거",
 "tasks": [{"title": "", "due": "", "assignee": ""}]}"""
 
@@ -173,7 +173,7 @@ def _clean_tasks(raw) -> list[dict]:
             due = date.fromisoformat(due).isoformat() if due else ''
         except ValueError:
             due = ''
-        out.append({'title': str(t['title']).strip()[:300], 'due': due, 'assignee': str(t.get('assignee') or '')[:50]})
+        out.append({'title': str(t['title']).strip()[:300], 'due': due, 'assignee': str(t.get('assignee') or '')[:100]})
     return out[:10]
 
 
