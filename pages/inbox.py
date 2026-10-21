@@ -107,12 +107,7 @@ def layout(mail=None, **_):
                     html.H6([html.I(className='bi bi-person-dash me-1'), '임원 부재'], className='mt-3'),
                     html.Div(id='ib-abs-note', className='small text-muted mb-1'),
                     dash_table.DataTable(id='ib-abs', editable=True, row_deletable=True, data=[],
-                                         columns=[{'name': '상태', 'id': 'state_label', 'editable': False},
-                                                  {'name': '임원', 'id': 'person'}, {'name': '종류', 'id': 'kind'},
-                                                  {'name': '시작', 'id': 'start_date'}, {'name': '종료', 'id': 'end_date'},
-                                                  {'name': '반차', 'id': 'half'}, {'name': '장소', 'id': 'place'},
-                                                  {'name': '대결자', 'id': 'deputy'}, {'name': '메모', 'id': 'note'},
-                                                  {'name': '확인', 'id': 'check', 'editable': False}],
+                                         columns=absence_ui.TABLE_COLUMNS,
                                          style_table={'overflowX': 'auto'}, style_cell={**cell, 'fontSize': '0.8rem'},
                                          style_data_conditional=[
                                              {'if': {'filter_query': '{state} = "unknown"'},
@@ -123,7 +118,7 @@ def layout(mail=None, **_):
                     html.Div([
                         dbc.Button([html.I(className='bi bi-check2 me-1'), '부재 등록'], id='ib-abs-apply',
                                    color='primary', size='sm', className='me-2'),
-                        html.Span(f"종류: {', '.join(absences.KINDS)} · 반차: 오전/오후 · 임원 이름을 고치면 다시 찾습니다. "
+                        html.Span(f"종류: {', '.join(absences.KINDS)} · 시간대는 선택(예: 09:00~12:00, 오후) · 임원 이름을 고치면 다시 찾습니다. "
                                   '이미 있는 부재와 임원을 못 찾은 줄은 건너뜁니다.', className='small text-muted'),
                     ], className='mt-1 d-flex align-items-center flex-wrap'),
                 ]),
@@ -415,9 +410,7 @@ def render_abs(sel, _):
     note = m['suggestion'].get('absence_note', '')
     if not rows:
         note = (note + ' ' if note else '') + '부재를 찾지 못했습니다 — 아래 표에 직접 적어도 됩니다.'
-    return {}, absence_ui.table_rows(rows) or [{'person': '', 'kind': '휴가', 'start_date': m['mail_date'], 'end_date': '',
-                                   'half': '', 'place': '', 'deputy': '', 'note': '', 'check': '',
-                                   'state': 'unknown', 'state_label': ''}], note
+    return {}, absence_ui.table_rows(rows) or [absence_ui.blank_row(m['mail_date'])], note
 
 
 @callback(Output('ib-refresh', 'data', allow_duplicate=True), Output('ib-msg', 'children', allow_duplicate=True),

@@ -287,7 +287,7 @@ def test_absence_rule_auto_and_review():
     r = mailbox.apply_review(m['id'], [], None, None, '나', absence_rows=rows)
     assert r['absences'] == 2  # 겹쳐도 사람이 확인했으면 등록, 임원 모름은 건너뜀
     got = absences.list_range('2026-10-01', '2026-10-31')
-    assert [(x['person_name'], x['kind'], x['start_date'], x['end_date'], x['half']) for x in got] == [
+    assert [(x['person_name'], x['kind'], x['start_date'], x['end_date'], x['time_range']) for x in got] == [
         ('김영수', '해외출장', '2026-10-26', '2026-10-30', ''), ('이영희', '교육', '2026-10-27', '2026-10-27', ''),
         ('이영희', '휴가', '2026-10-27', '2026-10-27', '오후')]
     assert got[0]['source_mail_id'] == m['id']
@@ -312,7 +312,7 @@ def test_ai_classifies_absence_and_manual_extract(monkeypatch):
     def fake_chat(system, user, temperature=0.2):
         if '부재' in system and 'absences' in system:
             return json.dumps({'absences': [{'person': '이영희 상무', 'kind': '교육', 'start_date': '2026-11-02',
-                                             'end_date': '2026-11-04', 'place': '인재개발원', 'deputy': '김철수'}]})
+                                             'end_date': '2026-11-04', 'place': '인재개발원', 'content': '리더십 과정'}]})
         return json.dumps({'kind': 'absence', 'reason': '교육 일정 안내', 'tasks': []})
     monkeypatch.setattr(llm, 'is_configured', lambda: True)
     monkeypatch.setattr(llm, 'chat', fake_chat)
