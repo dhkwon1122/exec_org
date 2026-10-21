@@ -84,8 +84,8 @@ def test_import_flow_with_ai_update_and_apply_all(monkeypatch):
     monkeypatch.setattr(llm, 'is_configured', lambda: True)
     monkeypatch.setattr(llm, 'chat', fake_chat)
 
-    m = mail_text.from_pasted(PASTED)
-    first = schedules.create_import(m['name'], m['mail_date'], m['text'])
+    m = mail_text.from_pasted(PASTED.replace('<tr><th>일자</th><th>시간</th><th>내용</th><th>장소</th><th>참석</th></tr>', ''))
+    first = schedules.create_import(m['name'], m['mail_date'], m['text'])  # 제목 행 없는 표 → AI
     schedules.submit_import(first, background=False)
     imp = schedules.get_import(first)
     assert imp['status'] == 'done' and len(imp['events']) == 2
@@ -171,7 +171,7 @@ def test_merged_cells_are_expanded():
 
 
 def test_pasted_table_without_date_cell_gets_previous_date(monkeypatch):
-    pasted = ('보낸 날짜: 2026년 10월 20일 월요일\n제목: 원장님 일정\n일자\t시간\t내용\n'
+    pasted = ('보낸 날짜: 2026년 10월 20일 월요일\n제목: 원장님 일정\n원장님 일정입니다\t\t\n'
               '10/21(화)\t00;00 ~\t일정 1\n\t01;00 ~\t일정 2\n01;30 ~\t일정 3\n감사합니다.\n15:00 회의')
     m = mail_text.from_pasted(pasted)
     filled = schedules.fill_dates(m['text'], m['mail_date']).splitlines()
@@ -189,3 +189,58 @@ def test_pasted_table_without_date_cell_gets_previous_date(monkeypatch):
     assert '2026-10-21 | 01;00 ~ | 일정 2' in seen['user']  # AI 에는 날짜를 채운 표를 준다
     assert '병합' in schedules.PARSE_SYSTEM
     assert schedules.get_import(iid)['raw_text'] == m['text']  # 원문은 그대로 보관
+
+
+HEADER_TABLE = """<table><tr><th>일자</th><th>요일</th><th>시간</th><th>구분</th><th>일정</th><th>장소</th><th>참석자</th>
+<th>비고</th><th>담당</th></tr>
+<tr><td rowspan=2>21일</td><td rowspan=2>화</td><td>00;00 ~</td><td>회의</td><td>일정 1</td><td>원장실</td>
+<td>김영수 부사장</td><td></td><td>비서실</td></tr>
+<tr><td>01;00 ~ 02;00</td><td>보고</td><td>일정 2</td><td>본관</td><td></td><td>자료 준비</td><td></td></tr>
+<tr><td>22일</td><td>수</td><td>종일</td><td></td><td>해외 출장</td><td>미국</td><td></td><td></td><td></td></tr>
+<tr><td>3일</td><td>월</td><td>10:00</td><td></td><td>다음 달 일정</td><td></td><td></td><td></td><td></td></tr></table>
+<p>감사합니다</p>"""
+
+
+def test_header_table_reads_columns_by_name(monkeypatch):
+    called = []
+    monkeypatch.setattr(llm, 'is_configured', lambda: True)
+    monkeypatch.setattr(llm, 'chat', lambda *a, **k: called.append(1) or '{}')
+    iid = schedules.create_import('일정', '2026-10-20', mail_text.html_to_text(HEADER_TABLE))
+    schedules.submit_import(iid, background=False)
+    imp = schedules.get_import(iid)
+    assert called == [] and '제목 행' in imp['error']  # 제목 행이 있으면 AI 없이 열 이름대로
+    assert [(e['date'], e['start_time'], e['end_time'], e['category'], e['title'], e['location'], e['attendees'],
+             e['details']) for e in imp['events']] == [
+        ('2026-10-21', '00:00', '', '회의', '일정 1', '원장실', '김영수 부사장', '비서실'),
+        ('2026-10-21', '01:00', '02:00', '보고', '일정 2', '본관', '', '자료 준비'),
+        ('2026-10-22', '', '', '', '해외 출장', '미국', '', ''),  # 종일
+        ('2026-11-03', '10:00', '', '', '다음 달 일정', '', '', '')]  # '3일' — 날이 줄면 다음 달
+
+
+def test_header_table_pasted_with_missing_merged_cell():
+    text = mail_text.from_pasted('일시\t내용\t장소\n10/21(화) 09:00~10:00\t회의\t본관\n'
+                                 '일자\t시간\t행사명\t장소\t참석\n10월 22일\t14:00\t강연\t코엑스\t원장님\n'
+                                 '15:00~16:00\t면담\t원장실\t')['text']
+    ev = schedules.table_parse(text, '2026-10-20')
+    assert [(e['date'], e['start_time'], e['end_time'], e['title'], e['location'], e['attendees']) for e in ev] == [
+        ('2026-10-21', '09:00', '10:00', '회의', '본관', ''),  # 일시 한 칸
+        ('2026-10-22', '14:00', '', '강연', '코엑스', '원장님'),
+        ('2026-10-22', '15:00', '16:00', '면담', '원장실', '')]  # 날짜 칸이 빠진 행은 앞을 비워 맞춤
+
+
+def test_bulk_delete_and_undo_import():
+    iid = schedules.create_import('일정', '2026-10-20', mail_text.html_to_text(HEADER_TABLE))
+    schedules.submit_import(iid, background=False)
+    schedules.apply_events(schedules.get_import(iid)['events'], iid)
+    manual = schedules.save({'date': '2026-10-21', 'start_time': '18:00', 'title': '직접 넣은 만찬'})
+    assert [i['n_events'] for i in schedules.list_imports()] == [4]
+    # 메일로 들어간 일정만 지우고 메일은 '확인 전'으로
+    assert schedules.delete_by_import(iid) == 4
+    imp = schedules.list_imports()[0]
+    assert imp['n_events'] == 0 and not imp['applied'] and imp['status'] == 'done'
+    assert [e['title'] for e in schedules.list_range('2026-10-01', '2026-11-30')] == ['직접 넣은 만찬']
+    schedules.apply_all_pending()  # 다시 반영 가능
+    ids = [e['id'] for e in schedules.list_range('2026-10-21', '2026-10-21')]
+    assert schedules.delete_many(ids) == 3 and schedules.delete_many([]) == 0
+    assert [e['title'] for e in schedules.list_range('2026-10-01', '2026-11-30')] == ['해외 출장', '다음 달 일정']
+    assert manual['id'] in ids
