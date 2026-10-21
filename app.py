@@ -15,11 +15,12 @@ from urllib.parse import urlencode, urlparse
 import dash
 import dash_bootstrap_components as dbc
 import flask
-from dash import dcc, html
+from dash import Input, Output, State, callback, ctx, dcc, html
 from flask.sessions import SecureCookieSessionInterface
 
 import components.todo_ui  # noqa: F401  업무 체크/삭제 공용 콜백 등록
 from services import mailbox
+from components.record_tools import layout as record_tools_layout
 from components.history_actions import history_edit_modal  # 이력 수정·삭제 공용 콜백 등록
 from services import auth, doc_versions, store, users
 from services.db import DATA_DIR
@@ -242,6 +243,8 @@ _NAV = [  # (이름, 주소, 아이콘, 주소 맞춤)
     ('임원', '/people', 'bi-people', 'partial'),
     ('이력 검색', '/search', 'bi-search', 'exact'),
     ('참고자료', '/references', 'bi-folder2', 'exact'),
+    ('북마크', '/bookmarks', 'bi-bookmark', 'exact'),
+    ('휴지통', '/trash', 'bi-trash3', 'exact'),
 ]
 
 
@@ -256,12 +259,14 @@ def _sidebar():
     links = []
     for label, href, icon, active in _NAV:
         count = html.Span(review, className='nav-count hot', title='확인할 메일') if href == '/inbox' and review else None
-        links.append(dbc.NavLink([html.I(className=f'bi {icon}'), html.Span(label), count], href=href,
+        links.append(dbc.NavLink([html.I(className=f'bi {icon}', **{'aria-hidden': 'true'}), html.Span(label), count], href=href,
                                  active=active))
     return html.Aside([
         html.A([html.Span(html.I(className='bi bi-check2'), className='app-brand-mark'), html.Span('업무 기록')],
                href='/', className='app-brand'),
-        dbc.Nav(links, vertical=True, className='app-nav'),
+        html.Button([html.I(className='bi bi-list me-1'), '메뉴'], id='nav-toggle',
+                   className='btn btn-outline-secondary mobile-nav-toggle', **{'aria-label': '전체 메뉴', 'aria-expanded': 'false'}),
+        dbc.Collapse(dbc.Nav(links, vertical=True, className='app-nav'), id='nav-collapse', className='nav-collapse'),
         html.Div([
             html.Span(name[:1] or '?', className='avatar'),
             html.Span(name, className='user-name'),
@@ -275,12 +280,19 @@ def serve_layout():
     return html.Div([
         dcc.Store(id='todo-changed', data=0),  # 업무 체크/추가/삭제 시 증가 (components/todo_ui.py)
         dcc.Store(id='history-changed', data=0),  # 이력 수정/삭제 시 증가 (components/history_actions.py)
-        history_edit_modal(),
+        history_edit_modal(), record_tools_layout(), dcc.Location(id='app-location', refresh=False),
         html.Div([
             _sidebar(),
             html.Main(dbc.Container(dash.page_container, fluid=True), className='app-main'),
         ], className='app-shell'),
     ])
+
+
+@callback(Output('nav-collapse', 'is_open'), Output('nav-toggle', 'aria-expanded'),
+          Input('nav-toggle', 'n_clicks'), Input('app-location', 'pathname'), State('nav-collapse', 'is_open'))
+def toggle_nav(clicks, path, opened):
+    value = not opened if ctx.triggered_id == 'nav-toggle' and clicks else False
+    return value, str(value).lower()
 
 
 app.layout = serve_layout

@@ -40,6 +40,8 @@ def _ok(result):
 def test_everything_requires_login(client):
     assert client.get('/').status_code == 302
     assert client.get('/search').headers['Location'].endswith('/login')
+    for path in ('/bookmarks', '/trash', '/history/1'):
+        assert client.get(path).headers['Location'].endswith('/login')
     assert client.get('/files/1').status_code == 302
     assert client.post('/_dash-update-component', json={}).status_code == 401
     assert client.get('/_dash-layout').status_code == 401

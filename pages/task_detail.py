@@ -35,7 +35,7 @@ def _edit_modal():
             dbc.Alert(id='ed-error', color='danger', is_open=False, className='mt-3 mb-0'),
         ]),
         dbc.ModalFooter([
-            dbc.Button('삭제', id='ed-delete', color='danger', outline=True, className='me-auto'),
+            dbc.Button('휴지통으로 이동', id='ed-delete', color='danger', outline=True, className='me-auto'),
             dbc.Button('취소', id='ed-cancel', color='secondary', outline=True),
             dbc.Button('저장', id='ed-save', color='primary'),
         ]),
@@ -93,7 +93,7 @@ def _source_modals(tid: int, src: dict, open_kind: str | None):
             else html.Span(className='me-auto')
         out.append(dbc.Modal([
             dbc.ModalHeader(dbc.ModalTitle([html.I(className='bi bi-stars me-2'), 'AI 요약에서 찾은 할 일 — 원래 메모'])),
-            dbc.ModalBody(dbc.ListGroup([ui.history_card(h, show_task=True, actions=False,
+            dbc.ModalBody(dbc.ListGroup([ui.history_card(h, show_task=True, actions=False, view='source',
                                                          added_todos=store.todos_for_history(h['id']))])),
             dbc.ModalFooter([go, dbc.Button('닫기', id='td-src-history-close', color='secondary', outline=True)]),
         ], id='td-src-history', is_open=open_kind == 'history', size='lg', scrollable=True))
@@ -160,7 +160,7 @@ def layout(task_id=None, src=None, **_):
         dbc.Row([
             dbc.Col([
                 dbc.Tabs([
-                    dbc.Tab([_history_form(tid), html.Div(id='td-history')], label='이력', tab_id='history'),
+                    dbc.Tab([html.Details([html.Summary('기록 추가', className='composer-toggle'), _history_form(tid)], className='record-composer mb-3'), html.Div(id='td-history')], label='이력', tab_id='history'),
                     dbc.Tab([dbc.Card(dbc.CardBody(todo_ui.add_form('tt', with_task=False)), className='mb-3'),
                              html.Div(id='td-todos')], label='하위 업무', tab_id='todos', id='td-todo-tab'),
                     dbc.Tab([_reference_form(), html.Div(id='td-refs')], label='참고자료', tab_id='refs'),
@@ -220,11 +220,7 @@ def render(_, _t, _h, tid):
         ]))
 
     hist = store.list_history(tid)
-    history = dbc.ListGroup([
-        ui.history_card(h, added_todos=store.todos_for_history(h['id']) if h['ai_todos'] else None,
-                        context_task_id=tid)
-        for h in hist]) if hist else \
-        html.Div('이력이 없습니다.', className='text-muted small')
+    history = ui.history_stream(hist, context_task_id=tid) if hist else html.Div('이력이 없습니다.', className='text-muted small')
     pending = sorted(h['id'] for h in hist if h['ai_status'] == 'pending')
 
     refs = store.list_references(task_id=tid)
@@ -337,8 +333,8 @@ def edit_task(n_open, _c, _s, _d, tid, title, desc, assignees, extra, tags, star
     if trig == 'ed-cancel':
         return (False,) + (nu,) * 8 + ('', False, nu, nu, nu, nu)
     if trig == 'ed-delete':
-        store.delete_task(tid)
-        return (False,) + (nu,) * 8 + ('', False, nu, '/', nu, nu)
+        store.delete_task(tid, actor=author)
+        return (False,) + (nu,) * 8 + ('', False, nu, '/trash', nu, nu)
     try:
         current = store.get_task(tid)['assignees']
         store.update_task(tid, author=author or '', title=title, description=desc or '',
