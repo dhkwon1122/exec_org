@@ -13,9 +13,10 @@ import uuid
 from datetime import date, datetime, timedelta
 
 from sqlalchemy import func, or_, select
+from sqlalchemy.orm import aliased
 
 from services import db
-from services.db import HistoryEntry, HistoryPerson, Person, PersonCareer, Reference, Task, TaskLink, Todo
+from services.db import HistoryEntry, HistoryPerson, Person, PersonCareer, Reference, Task, TaskLink
 
 STATUSES = ['예정', '진행중', '보류', '완료']
 ENTRY_TYPES = ['메모', '피드백', '동향', '회의', '결정', '진행', '이슈', '요청']
@@ -38,6 +39,7 @@ def _task_dict(t: Task) -> dict:
         'id': t.id, 'title': t.title, 'description': t.description or '', 'status': t.status,
         'owner': t.owner or '', 'tags': _tags(t.tags), 'parent_id': t.parent_id,
         'start_date': t.start_date or '', 'due_date': t.due_date or '',
+        'assignee_id': t.assignee_id or '', 'done_at': _dt(t.done_at),
         'created_at': _dt(t.created_at), 'updated_at': _dt(t.updated_at),
     }
 
@@ -132,12 +134,20 @@ def update_task(task_id: int, author: str = '', **fields) -> dict:
                     raise ValueError(f'알 수 없는 상태: {v}')
                 if v != t.status:
                     _log(s, t.id, '상태변경', f'{t.status} → {v}', author)
+                    t.done_at = datetime.now().replace(microsecond=0) if v == '완료' else None
             if k == 'tags':
                 v = ', '.join(v) if isinstance(v, list) else ', '.join(_tags(v))
             if k == 'parent_id':
                 v = v or None
                 if v == t.id:
                     raise ValueError('자기 자신을 상위 업무로 지정할 수 없습니다.')
+                up, seen = v, set()
+                while up and up not in seen:  # 하위 업무를 상위로 두면 고리가 생긴다
+                    seen.add(up)
+                    if up == t.id:
+                        raise ValueError('이 업무의 하위 업무를 상위 업무로 지정할 수 없습니다.')
+                    p = s.get(Task, up)
+                    up = p.parent_id if p else None
             setattr(t, k, v if v is not None or k == 'parent_id' else '')
         s.commit()
         return _task_dict(t)
@@ -156,10 +166,12 @@ def delete_task(task_id: int) -> None:
 
 
 def list_tasks(query: str = '', status: str | list[str] | None = None, tag: str = '',
-               owner: str = '') -> list[dict]:
-    """제목·설명·태그·이력 내용·참고자료 제목/메모까지 검색한다."""
+               owner: str = '', top_level: bool = False) -> list[dict]:
+    """제목·설명·태그·이력 내용·참고자료 제목/메모까지 검색한다. top_level: 상위 업무가 없는 업무만."""
     with db.SessionLocal() as s:
         stmt = select(Task)
+        if top_level:
+            stmt = stmt.where(Task.parent_id.is_(None))
         if status:
             stmt = stmt.where(Task.status.in_([status] if isinstance(status, str) else status))
         if owner:
@@ -179,6 +191,19 @@ def list_tasks(query: str = '', status: str | list[str] | None = None, tag: str 
         if tag:  # LIKE 는 부분일치라 정확한 태그만 남긴다
             tasks = [t for t in tasks if tag in t['tags']]
         return tasks
+
+
+def child_progress(task_ids: list[int]) -> dict[int, tuple[int, int]]:
+    """업무별 바로 아래 하위 업무 (완료 수, 전체 수)."""
+    if not task_ids:
+        return {}
+    out: dict[int, list[int]] = {}
+    with db.SessionLocal() as s:
+        for pid, status in s.execute(select(Task.parent_id, Task.status).where(Task.parent_id.in_(task_ids))):
+            c = out.setdefault(pid, [0, 0])
+            c[0] += status == '완료'
+            c[1] += 1
+    return {k: (v[0], v[1]) for k, v in out.items()}
 
 
 def all_tags() -> list[str]:
@@ -645,95 +670,123 @@ def _check_date(v: str) -> str:
     return v
 
 
-def _todo_dict(t: Todo, task_title: str | None = None) -> dict:
+# ── 하위 업무(체크리스트) ──────────────────────────────────────────────
+# 예전 '할 일'은 업무로 합쳐졌다. 아래 함수들은 업무를 '마감·담당·완료가 있는 체크 항목'으로 다루는
+# 얇은 층 — 업무 상세의 하위 업무 목록, '내 업무' 화면, 캘린더, AI 제안 추가가 쓴다.
+# (task_id = 상위 업무, done = 상태 '완료')
+
+def _todo_dict(t: Task, parent_title: str | None = None) -> dict:
     today = date.today().isoformat()
+    done = t.status == '완료'
     return {
-        'id': t.id, 'task_id': t.task_id, 'task_title': task_title or '', 'title': t.title,
-        'due_date': t.due_date or '', 'done': bool(t.done), 'done_at': _dt(t.done_at),
-        'assignee_id': t.assignee_id or '', 'assignee_name': t.assignee_name or '',
+        'id': t.id, 'task_id': t.parent_id, 'task_title': parent_title or '', 'title': t.title,
+        'status': t.status, 'due_date': t.due_date or '', 'done': done, 'done_at': _dt(t.done_at),
+        'assignee_id': t.assignee_id or '', 'assignee_name': t.owner or '',
         'created_by': t.created_by or '', 'source_history_id': t.source_history_id,
         'created_at': _dt(t.created_at),
-        'overdue': bool(not t.done and t.due_date and t.due_date < today),
+        'overdue': bool(not done and t.due_date and t.due_date < today),
     }
 
 
 def create_todo(title: str, task_id: int | None = None, due_date: str = '', assignee_id: str = '',
                 assignee_name: str = '', created_by: str = '', source_history_id: int | None = None) -> dict:
+    """체크 항목처럼 업무를 하나 만든다 — task_id 가 있으면 그 업무의 하위 업무."""
     title = (title or '').strip()
     if not title:
-        raise ValueError('할 일 내용을 입력하세요.')
+        raise ValueError('업무 내용을 입력하세요.')
     due_date = _check_date(due_date)
     with db.SessionLocal() as s:
-        task = s.get(Task, task_id) if task_id else None
-        if task_id and task is None:
-            raise ValueError('업무를 찾을 수 없습니다.')
-        t = Todo(title=title, task_id=task_id or None, due_date=due_date, assignee_id=assignee_id or '',
-                 assignee_name=assignee_name or '', created_by=created_by or '', source_history_id=source_history_id)
+        parent = s.get(Task, task_id) if task_id else None
+        if task_id and parent is None:
+            raise ValueError('상위 업무를 찾을 수 없습니다.')
+        t = Task(title=title, parent_id=task_id or None, due_date=due_date, status='진행중',
+                 owner=assignee_name or '', assignee_id=assignee_id or '', created_by=created_by or '',
+                 source_history_id=source_history_id, description='', tags='', start_date='')
         s.add(t)
+        s.flush()
+        if parent:
+            _log(s, parent.id, '할일', f'하위 업무 추가: {title}', created_by)
         s.commit()
-        return _todo_dict(t, task.title if task else '')
+        return _todo_dict(t, parent.title if parent else '')
 
 
 def update_todo(todo_id: int, **fields) -> dict:
+    if 'task_id' in fields:
+        fields['parent_id'] = fields.pop('task_id')
+    if 'assignee_name' in fields:
+        fields['owner'] = fields.pop('assignee_name')
+    if 'assignee_id' in fields:
+        with db.SessionLocal() as s:
+            t = s.get(Task, todo_id)
+            if t is None:
+                raise ValueError('업무를 찾을 수 없습니다.')
+            t.assignee_id = fields.pop('assignee_id') or ''
+            s.commit()
+    if fields:
+        update_task(todo_id, **fields)
     with db.SessionLocal() as s:
-        t = s.get(Todo, todo_id)
-        if t is None:
-            raise ValueError('할 일을 찾을 수 없습니다.')
-        if 'title' in fields:
-            if not (fields['title'] or '').strip():
-                raise ValueError('할 일 내용을 입력하세요.')
-            t.title = fields['title'].strip()
-        if 'due_date' in fields:
-            t.due_date = _check_date(fields['due_date'])
-        if 'task_id' in fields:
-            t.task_id = fields['task_id'] or None
-        if 'assignee_id' in fields:
-            t.assignee_id = fields['assignee_id'] or ''
-            t.assignee_name = fields.get('assignee_name') or ''
-        s.commit()
-        task = s.get(Task, t.task_id) if t.task_id else None
-        return _todo_dict(t, task.title if task else '')
+        t = s.get(Task, todo_id)
+        parent = s.get(Task, t.parent_id) if t.parent_id else None
+        return _todo_dict(t, parent.title if parent else '')
 
 
 def set_todo_done(todo_id: int, done: bool, by: str = '') -> bool:
-    """완료/완료 취소. 업무에 속한 할 일이면 그 업무 이력에도 남긴다. 바뀌었으면 True."""
+    """체크/체크 해제 = 상태 완료/진행중. 상위 업무가 있으면 그 이력에도 남긴다. 바뀌었으면 True."""
     with db.SessionLocal() as s:
-        t = s.get(Todo, todo_id)
-        if t is None or bool(t.done) == bool(done):
+        t = s.get(Task, todo_id)
+        if t is None or (t.status == '완료') == bool(done):
             return False
-        t.done = bool(done)
+        new = '완료' if done else '진행중'
+        _log(s, t.id, '상태변경', f'{t.status} → {new}', by)
+        t.status = new
         t.done_at = datetime.now().replace(microsecond=0) if done else None
-        if t.task_id:
-            _log(s, t.task_id, '할일', f"{'완료' if done else '완료 취소'}: {t.title}", by)
+        if t.parent_id:
+            _log(s, t.parent_id, '할일', f"{'완료' if done else '완료 취소'}: {t.title}", by)
         s.commit()
         return True
 
 
-def delete_todo(todo_id: int) -> None:
+def can_delete_quick(task_id: int) -> bool:
+    """체크 목록에서 바로 지워도 되는 업무인지 — 하위 업무·직접 쓴 기록·참고자료가 없을 때만."""
     with db.SessionLocal() as s:
-        t = s.get(Todo, todo_id)
-        if t:
-            s.delete(t)
-            s.commit()
+        if s.scalar(select(func.count()).select_from(Task).where(Task.parent_id == task_id)):
+            return False
+        if s.scalar(select(func.count()).select_from(HistoryEntry).where(
+                HistoryEntry.task_id == task_id, HistoryEntry.entry_type.notin_(AUTO_ENTRY_TYPES))):
+            return False
+        return not s.scalar(select(func.count()).select_from(Reference).where(Reference.task_id == task_id))
+
+
+def delete_todo(todo_id: int) -> None:
+    """체크 목록에서 지우기 — 기록·자료·하위 업무가 있는 업무는 업무 화면에서 지워야 한다."""
+    if not can_delete_quick(todo_id):
+        raise ValueError('기록·참고자료·하위 업무가 있는 업무는 업무 화면에서 삭제하세요.')
+    delete_task(todo_id)
 
 
 def list_todos(task_id: int | None = None, assignee_id: str | None = None, done: bool | None = None,
-               date_from: str = '', date_to: str = '', done_since: str = '') -> list[dict]:
-    """정렬: 미완료 먼저, 마감일 빠른 순(날짜 없는 것은 뒤), 완료는 최근 완료 순."""
+               date_from: str = '', date_to: str = '', done_since: str = '', assignee_name: str = '') -> list[dict]:
+    """업무를 체크 목록으로. task_id: 그 업무의 하위 업무만. assignee_id: 내 업무 — 담당 user_id 가 같거나,
+    user_id 없이 담당자 이름(assignee_name)만 적힌 업무.
+    정렬: 미완료 먼저, 마감일 빠른 순(날짜 없는 것은 뒤), 완료는 최근 완료 순."""
+    parent = aliased(Task)
     with db.SessionLocal() as s:
-        stmt = select(Todo, Task.title).outerjoin(Task, Task.id == Todo.task_id)
+        stmt = select(Task, parent.title).outerjoin(parent, parent.id == Task.parent_id)
         if task_id is not None:
-            stmt = stmt.where(Todo.task_id == task_id)
+            stmt = stmt.where(Task.parent_id == task_id)
         if assignee_id is not None:
-            stmt = stmt.where(Todo.assignee_id == assignee_id)
+            mine = Task.assignee_id == assignee_id
+            if assignee_name:
+                mine = or_(mine, (Task.assignee_id == '') & (Task.owner == assignee_name))
+            stmt = stmt.where(mine)
         if done is not None:
-            stmt = stmt.where(Todo.done == done)
+            stmt = stmt.where((Task.status == '완료') if done else (Task.status != '완료'))
         if date_from:
-            stmt = stmt.where(Todo.due_date >= date_from)
+            stmt = stmt.where(Task.due_date >= date_from)
         if date_to:
-            stmt = stmt.where(Todo.due_date <= date_to, Todo.due_date != '')
+            stmt = stmt.where(Task.due_date <= date_to, Task.due_date != '')
         if done_since:
-            stmt = stmt.where(or_(Todo.done.is_(False), Todo.done_at >= datetime.fromisoformat(done_since)))
+            stmt = stmt.where(or_(Task.status != '완료', Task.done_at >= datetime.fromisoformat(done_since)))
         rows = [_todo_dict(t, title) for t, title in s.execute(stmt)]
     open_ = sorted([r for r in rows if not r['done']], key=lambda r: (r['due_date'] == '', r['due_date'], r['id']))
     closed = sorted([r for r in rows if r['done']], key=lambda r: r['done_at'], reverse=True)
@@ -741,8 +794,9 @@ def list_todos(task_id: int | None = None, assignee_id: str | None = None, done:
 
 
 def todo_titles_for_history(entry_id: int) -> set[str]:
+    """이 이력의 AI 제안으로 이미 만든 업무 제목들."""
     with db.SessionLocal() as s:
-        return set(s.scalars(select(Todo.title).where(Todo.source_history_id == entry_id)))
+        return set(s.scalars(select(Task.title).where(Task.source_history_id == entry_id)))
 
 
 # ── 캘린더 ────────────────────────────────────────────────────────────
@@ -753,18 +807,16 @@ def month_range(year: int, month: int) -> tuple[str, str]:
 
 
 def calendar_month(year: int, month: int) -> dict[str, dict]:
-    """{'YYYY-MM-DD': {'todos': [...], 'tasks_due': [...], 'tasks_start': [...], 'history': n}}"""
+    """{'YYYY-MM-DD': {'todos': [마감인 업무], 'tasks_due': [] (예전 호환), 'tasks_start': [...], 'history': n}}"""
     first, last = month_range(year, month)
     days: dict[str, dict] = {}
 
     def day(d):
         return days.setdefault(d, {'todos': [], 'tasks_due': [], 'tasks_start': [], 'history': 0})
 
-    for t in list_todos(date_from=first, date_to=last):
+    for t in list_todos(date_from=first, date_to=last):  # 마감인 업무 (체크 목록)
         day(t['due_date'])['todos'].append(t)
     with db.SessionLocal() as s:
-        for t in s.scalars(select(Task).where(Task.due_date >= first, Task.due_date <= last)):
-            day(t.due_date)['tasks_due'].append(_task_dict(t))
         for t in s.scalars(select(Task).where(Task.start_date >= first, Task.start_date <= last)):
             day(t.start_date)['tasks_start'].append(_task_dict(t))
         start = datetime.fromisoformat(first)

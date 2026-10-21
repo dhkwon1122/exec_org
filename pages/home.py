@@ -58,7 +58,7 @@ def layout(**_):
             ], lg=8),
             dbc.Col([
                 dbc.Card([
-                    dbc.CardHeader(html.Div([html.I(className='bi bi-list-check me-1'), '내 할 일 (7일 이내·지난 마감)',
+                    dbc.CardHeader(html.Div([html.I(className='bi bi-list-check me-1'), '내 업무 (7일 이내·지난 마감)',
                                              dcc.Link('전체', href='/todos', className='ms-auto small')],
                                             className='d-flex'), className='small'),
                     html.Div(id='home-todos'),
@@ -82,11 +82,14 @@ def layout(**_):
 @callback(Output('task-list', 'children'), Output('recent-history', 'children'), Output('f-tag', 'options'),
           Input('q', 'value'), Input('f-status', 'value'), Input('f-tag', 'value'), Input('home-refresh', 'data'))
 def render_list(q, statuses, tag, _):
-    tasks = store.list_tasks(query=q or '', status=statuses or None, tag=tag or '')
+    # 검색하지 않을 때는 최상위 업무만 — 하위 업무는 진행률로 보여 주고 업무 화면에서 연다
+    tasks = store.list_tasks(query=q or '', status=statuses or None, tag=tag or '', top_level=not q and not tag)
+    progress = store.child_progress([t['id'] for t in tasks])
     if tasks:
         items = []
         for t in tasks:
-            meta = [m for m in [t['owner'] and f"담당 {t['owner']}",
+            done, total = progress.get(t['id'], (0, 0))
+            meta = [m for m in [total and f"하위 {done}/{total}", t['owner'] and f"담당 {t['owner']}",
                                 t['due_date'] and f"마감 {t['due_date']}",
                                 f"수정 {t['updated_at']}"] if m]
             items.append(dbc.ListGroupItem([
@@ -117,9 +120,10 @@ def render_list(q, statuses, tag, _):
 def render_my_todos(_, _r):
     me = (auth.current_user() or {}).get('user_id', '')
     soon = (date.today() + timedelta(days=7)).isoformat()
-    todos = [t for t in store.list_todos(assignee_id=me, done=False) if t['due_date'] and t['due_date'] <= soon]
+    todos = [t for t in store.list_todos(assignee_id=me, done=False, assignee_name=auth.current_name())
+             if t['due_date'] and t['due_date'] <= soon]
     if not todos:
-        return html.Div('급한 할 일이 없습니다.', className='small text-muted p-3')
+        return html.Div('급한 업무가 없습니다.', className='small text-muted p-3')
     return dbc.ListGroup([todo_ui.todo_row(t) for t in todos[:8]], flush=True)
 
 

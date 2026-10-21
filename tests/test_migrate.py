@@ -33,7 +33,7 @@ def test_migrate_copies_everything_with_ids(src_db, tmp_path):
     db.configure(dst)  # 옮긴 DB 로 앱이 그대로 동작
     assert store.get_task(t['id'])['title'] == '조직개편 준비'
     assert [h['entry_type'] for h in store.search_history('', person_id=kim['id'])] == ['동향', '피드백']
-    assert store.list_todos()[0]['done'] is True
+    assert store.list_todos(task_id=t['id'])[0]['done'] is True
     new = store.add_history(None, '새 동향', '동향', person_ids=[kim['id']])
     assert new['id'] > max(h['id'] for h in store.search_history('', limit=50) if h['id'] != new['id'])
 
