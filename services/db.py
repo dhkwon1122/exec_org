@@ -13,6 +13,9 @@ PostgreSQL(exec-db). 없으면(개발·테스트) 프로젝트 안의 SQLite 파
 - task_links     : 업무 ↔ 업무 연결 (관련/선행/후속/파생)
 - people         : 임원 (이름·직위·소속·별칭). 동향 기록의 대상
 - person_career  : 임원 경력 이력 (People in SAIT 직급·소속 변천, 인사발령 — 누적)
+- person_highlights  : 임원 주요 이력 (발령이력을 정리·정제한 핵심 경력)
+- person_evaluations : 임원 평가 이력 (연도·종류별 — 임원종합평가, MBO 등)
+- person_attributes  : 임원 추가 항목 (엑셀 업로드로 생긴 이름-값)
 - history_people : 이력 ↔ 임원 연결 (한 이력에 여러 임원). 업무 없이 임원에만 연결된 이력(동향)도 있다
 - todos          : 할 일 (업무에 속하거나 단독). 이력 원문에서 AI 가 뽑은 제안을 추가할 수 있음
 """
@@ -170,6 +173,47 @@ class PersonCareer(Base):
     assignment = Column(String(100), default='')  # 직책
     source_key = Column(String(300), nullable=False)
     created_at = Column(DateTime, default=_now)
+
+
+class PersonHighlight(Base):
+    """임원 주요 이력 — 발령이력·경력 이력을 사람이(또는 AI 초안을 고쳐) 정리한 핵심 경력 한 줄씩.
+    source: manual(직접 입력·수정) / ai(AI 초안 그대로) / rule(규칙 초안) / excel(엑셀 일괄 업로드)."""
+    __tablename__ = 'person_highlights'
+
+    id = Column(Integer, primary_key=True)
+    person_id = Column(Integer, ForeignKey('people.id', ondelete='CASCADE'), nullable=False, index=True)
+    date = Column(String(10), default='')  # YYYY / YYYY.MM / YYYY.MM.DD
+    text = Column(String(500), nullable=False)
+    sort = Column(Integer, default=0)
+    source = Column(String(20), default='manual')
+    updated_at = Column(DateTime, default=_now, onupdate=_now)
+
+
+class PersonEvaluation(Base):
+    """임원 평가 이력 — 해마다 임원종합평가·MBO 등. 종류(kind)는 자유 문자열이라 엑셀에서 새 평가가 오면 그대로 생긴다."""
+    __tablename__ = 'person_evaluations'
+    __table_args__ = (UniqueConstraint('person_id', 'year', 'kind', name='uq_person_eval'),)
+
+    id = Column(Integer, primary_key=True)
+    person_id = Column(Integer, ForeignKey('people.id', ondelete='CASCADE'), nullable=False, index=True)
+    year = Column(Integer, nullable=False)
+    kind = Column(String(50), nullable=False)
+    grade = Column(String(50), default='')
+    note = Column(Text, default='')
+    source = Column(String(20), default='manual')
+    updated_at = Column(DateTime, default=_now, onupdate=_now)
+
+
+class PersonAttribute(Base):
+    """임원 추가 항목 — 엑셀 업로드에서 기존 칸과 맞지 않는 제목이 오면 이 이름으로 새 항목을 만들어 담는다."""
+    __tablename__ = 'person_attributes'
+    __table_args__ = (UniqueConstraint('person_id', 'name', name='uq_person_attr'),)
+
+    id = Column(Integer, primary_key=True)
+    person_id = Column(Integer, ForeignKey('people.id', ondelete='CASCADE'), nullable=False, index=True)
+    name = Column(String(100), nullable=False)
+    value = Column(Text, default='')
+    updated_at = Column(DateTime, default=_now, onupdate=_now)
 
 
 class Todo(Base):
