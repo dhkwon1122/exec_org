@@ -77,13 +77,68 @@ def _link_form():
     ]), className='mb-3')
 
 
-def layout(task_id=None, **_):
+def _source_modals(tid: int, src: dict, open_kind: str | None):
+    """업무를 만든 출처(AI 가 할 일을 찾은 메모, 받은 메일)를 보는 창."""
+    out = []
+    h = src['history']
+    if h:
+        go = dcc.Link([html.I(className='bi bi-box-arrow-up-right me-1'), f"그 메모가 있는 업무 #{h['task_id']} 열기"],
+                      href=f"/task/{h['task_id']}", className='small me-auto') if h['task_id'] and h['task_id'] != tid \
+            else html.Span(className='me-auto')
+        out.append(dbc.Modal([
+            dbc.ModalHeader(dbc.ModalTitle([html.I(className='bi bi-stars me-2'), 'AI 요약에서 찾은 할 일 — 원래 메모'])),
+            dbc.ModalBody(dbc.ListGroup([ui.history_card(h, show_task=True, actions=False,
+                                                         added_todos=store.todos_for_history(h['id']))])),
+            dbc.ModalFooter([go, dbc.Button('닫기', id='td-src-history-close', color='secondary', outline=True)]),
+        ], id='td-src-history', is_open=open_kind == 'history', size='lg', scrollable=True))
+    m = src['mail']
+    if m:
+        out.append(dbc.Modal([
+            dbc.ModalHeader(dbc.ModalTitle([html.I(className='bi bi-envelope me-2'), m['subject']])),
+            dbc.ModalBody([
+                html.Div(f"보낸 사람 {m['sender']} · {m['mail_date']}", className='small text-muted mb-2'),
+                html.Pre(m['body'], className='small mb-0',
+                         style={'whiteSpace': 'pre-wrap', 'fontFamily': 'inherit'}),
+            ]),
+            dbc.ModalFooter([
+                dcc.Link([html.I(className='bi bi-box-arrow-up-right me-1'), '받은 메일 화면에서 열기'],
+                         href=f"/inbox?mail={m['id']}", className='small me-auto'),
+                dbc.Button('닫기', id='td-src-mail-close', color='secondary', outline=True),
+            ]),
+        ], id='td-src-mail', is_open=open_kind == 'mail', size='lg', scrollable=True))
+    return out
+
+
+def _source_card(src: dict):
+    if not src['history'] and not src['mail']:
+        return None
+    items = []
+    if src['history']:
+        h = src['history']
+        items.append(dbc.ListGroupItem([
+            html.Div([html.I(className='bi bi-stars me-1'), 'AI 요약에서 찾은 할 일'], className='small text-muted'),
+            html.Div(h['title'] or h['content'][:60], className='small fw-semibold text-truncate'),
+            html.Div(' · '.join(x for x in [h['occurred_at'], h['author']] if x), className='small text-muted'),
+        ], id='td-src-history-open', action=True, n_clicks=0))
+    if src['mail']:
+        m = src['mail']
+        items.append(dbc.ListGroupItem([
+            html.Div([html.I(className='bi bi-envelope me-1'), '받은 메일에서 만든 업무'], className='small text-muted'),
+            html.Div(m['subject'], className='small fw-semibold text-truncate'),
+            html.Div(f"{m['sender']} · {m['mail_date']}", className='small text-muted text-truncate'),
+        ], id='td-src-mail-open', action=True, n_clicks=0))
+    return dbc.Card([dbc.CardHeader([html.I(className='bi bi-link-45deg me-1'), '출처'], className='small'),
+                     dbc.ListGroup(items, flush=True)], className='mb-3')
+
+
+def layout(task_id=None, src=None, **_):
     try:
         tid = int(task_id)
     except (TypeError, ValueError):
         tid = None
     if tid is None or store.get_task(tid) is None:
         return dbc.Alert(['업무를 찾을 수 없습니다. ', dcc.Link('목록으로', href='/')], color='warning')
+    sources = store.task_sources(tid)
 
     return html.Div([
         dcc.Store(id='td-id', data=tid),
@@ -92,6 +147,7 @@ def layout(task_id=None, **_):
         dcc.Interval(id='td-poll', interval=3000, disabled=True),
         dcc.Location(id='td-redirect', refresh='callback-nav'),
         _edit_modal(),
+        *_source_modals(tid, sources, src),
         html.Div(id='td-header', className='mb-3'),
         dbc.Row([
             dbc.Col([
@@ -103,7 +159,7 @@ def layout(task_id=None, **_):
                     dbc.Tab([_link_form(), html.Div(id='td-links')], label='연결 업무', tab_id='links'),
                 ], id='td-tabs', active_tab='history', className='mb-3'),
             ], lg=8),
-            dbc.Col(html.Div(id='td-side'), lg=4),
+            dbc.Col([_source_card(sources), html.Div(id='td-side')], lg=4),
         ]),
     ])
 
@@ -157,7 +213,7 @@ def render(_, _t, _h, tid):
 
     hist = store.list_history(tid)
     history = dbc.ListGroup([
-        ui.history_card(h, added_todos=store.todo_titles_for_history(h['id']) if h['ai_todos'] else None)
+        ui.history_card(h, added_todos=store.todos_for_history(h['id']) if h['ai_todos'] else None)
         for h in hist]) if hist else \
         html.Div('이력이 없습니다.', className='text-muted small')
     pending = sorted(h['id'] for h in hist if h['ai_status'] == 'pending')
@@ -360,3 +416,14 @@ def add_link(_, tid, target, rel, note, n):
     except ValueError as e:
         return no_update, no_update, no_update, str(e), True
     return (n or 0) + 1, None, '', '', False
+
+
+# ── 출처 보기 ─────────────────────────────────────────────────────────
+
+for _kind in ('history', 'mail'):
+    @callback(Output(f'td-src-{_kind}', 'is_open'), Input(f'td-src-{_kind}-open', 'n_clicks'),
+              Input(f'td-src-{_kind}-close', 'n_clicks'), prevent_initial_call=True)
+    def _toggle_source(_o, _c, _kind=_kind):
+        if not ctx.triggered or not ctx.triggered[0]['value']:
+            return no_update
+        return ctx.triggered_id == f'td-src-{_kind}-open'

@@ -16,7 +16,7 @@ from sqlalchemy import func, or_, select
 from sqlalchemy.orm import aliased
 
 from services import db
-from services.db import HistoryEntry, HistoryPerson, Person, PersonCareer, Reference, Task, TaskLink
+from services.db import HistoryEntry, HistoryPerson, InboundMail, Person, PersonCareer, Reference, Task, TaskLink
 
 STATUSES = ['예정', '진행중', '보류', '완료']
 ENTRY_TYPES = ['메모', '피드백', '동향', '회의', '결정', '진행', '이슈', '요청']
@@ -40,6 +40,7 @@ def _task_dict(t: Task) -> dict:
         'owner': t.owner or '', 'tags': _tags(t.tags), 'parent_id': t.parent_id,
         'start_date': t.start_date or '', 'due_date': t.due_date or '',
         'assignee_id': t.assignee_id or '', 'done_at': _dt(t.done_at),
+        'source_history_id': t.source_history_id, 'source_mail_id': t.source_mail_id,
         'created_at': _dt(t.created_at), 'updated_at': _dt(t.updated_at),
     }
 
@@ -715,13 +716,14 @@ def _todo_dict(t: Task, parent_title: str | None = None) -> dict:
         'status': t.status, 'due_date': t.due_date or '', 'done': done, 'done_at': _dt(t.done_at),
         'assignee_id': t.assignee_id or '', 'assignee_name': t.owner or '',
         'created_by': t.created_by or '', 'source_history_id': t.source_history_id,
-        'created_at': _dt(t.created_at),
+        'source_mail_id': t.source_mail_id, 'created_at': _dt(t.created_at),
         'overdue': bool(not done and t.due_date and t.due_date < today),
     }
 
 
 def create_todo(title: str, task_id: int | None = None, due_date: str = '', assignee_id: str = '',
-                assignee_name: str = '', created_by: str = '', source_history_id: int | None = None) -> dict:
+                assignee_name: str = '', created_by: str = '', source_history_id: int | None = None,
+                source_mail_id: int | None = None) -> dict:
     """체크 항목처럼 업무를 하나 만든다 — task_id 가 있으면 그 업무의 하위 업무."""
     title = (title or '').strip()
     if not title:
@@ -733,7 +735,8 @@ def create_todo(title: str, task_id: int | None = None, due_date: str = '', assi
             raise ValueError('상위 업무를 찾을 수 없습니다.')
         t = Task(title=title, parent_id=task_id or None, due_date=due_date, status='진행중',
                  owner=assignee_name or '', assignee_id=assignee_id or '', created_by=created_by or '',
-                 source_history_id=source_history_id, description='', tags='', start_date='')
+                 source_history_id=source_history_id, source_mail_id=source_mail_id, description='', tags='',
+                 start_date='')
         s.add(t)
         s.flush()
         if parent:
@@ -827,8 +830,35 @@ def list_todos(task_id: int | None = None, assignee_id: str | None = None, done:
 
 def todo_titles_for_history(entry_id: int) -> set[str]:
     """이 이력의 AI 제안으로 이미 만든 업무 제목들."""
+    return set(todos_for_history(entry_id))
+
+
+def todos_for_history(entry_id: int) -> dict[str, int]:
+    """이 이력의 AI 제안으로 만든 업무 — {제목: 업무 id} (같은 제목이 여럿이면 먼저 만든 것)."""
     with db.SessionLocal() as s:
-        return set(s.scalars(select(Task.title).where(Task.source_history_id == entry_id)))
+        rows = s.execute(select(Task.title, Task.id).where(Task.source_history_id == entry_id)
+                         .order_by(Task.id.desc()))
+        return dict(rows.all())
+
+
+def task_sources(task_id: int) -> dict:
+    """업무를 만든 출처 — {'history': AI 가 할 일을 찾은 메모(이력) | None, 'mail': 받은 메일 | None}.
+    메일 칸이 없던 예전 업무는 받은 메일의 '만든 업무' 목록에서 찾는다."""
+    with db.SessionLocal() as s:
+        t = s.get(Task, task_id)
+        if t is None:
+            return {'history': None, 'mail': None}
+        hid, mid = t.source_history_id, t.source_mail_id
+        if mid is None:
+            for m_id, ids in s.execute(select(InboundMail.id, InboundMail.task_ids)
+                                       .where(InboundMail.task_ids.like(f'%{task_id}%'))):
+                if str(task_id) in (ids or '').split(','):
+                    mid = m_id
+                    break
+        m = s.get(InboundMail, mid) if mid else None
+        mail = {'id': m.id, 'subject': m.subject or '(제목 없음)', 'sender': m.sender or '',
+                'mail_date': m.mail_date or '', 'body': m.body or ''} if m else None
+    return {'history': get_history(hid), 'mail': mail}
 
 
 # ── 캘린더 ────────────────────────────────────────────────────────────

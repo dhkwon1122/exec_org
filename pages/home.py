@@ -104,6 +104,7 @@ def _task_row(t: dict, level: int = 0, n_children: int = 0, n_done: int = 0, n_h
                 dcc.Link(f"#{t['id']} {t['title']}", href=f"/task/{t['id']}",
                          className='text-decoration-none fw-semibold' + (' text-muted' if done else ''),
                          style={'textDecoration': 'line-through'} if done else None),
+                html.Span(ui.source_icons(t), className='ms-1'),
                 html.Span(f' · 상위 {parent_title}', className='small text-muted') if parent_title else None,
             ]),
             html.Div(t['description'][:140] + ('…' if len(t['description']) > 140 else ''),

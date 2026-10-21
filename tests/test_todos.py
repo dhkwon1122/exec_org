@@ -116,8 +116,12 @@ def test_ai_todo_suggestions_roundtrip():
     h = store.add_history(t['id'], '원문')
     store.set_history_ai(h['id'], 'done', todos=[{'title': '보고서 수정', 'due': '2026-10-24', 'assignee': ''}])
     assert store.get_history(h['id'])['ai_todos'][0]['title'] == '보고서 수정'
-    store.create_todo('보고서 수정', task_id=t['id'], source_history_id=h['id'])
+    sub = store.create_todo('보고서 수정', task_id=t['id'], source_history_id=h['id'])
     assert store.todo_titles_for_history(h['id']) == {'보고서 수정'}
+    assert store.todos_for_history(h['id']) == {'보고서 수정': sub['id']}
+    src = store.task_sources(sub['id'])  # 업무 → AI 가 할 일을 찾은 메모
+    assert src['history']['id'] == h['id'] and src['history']['content'] == '원문' and src['mail'] is None
+    assert store.get_task(sub['id'])['source_history_id'] == h['id']
 
 
 def test_calendar_month():

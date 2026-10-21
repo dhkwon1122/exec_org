@@ -8,6 +8,7 @@ from datetime import date, timedelta
 import dash_bootstrap_components as dbc
 from dash import ALL, Input, Output, State, callback, ctx, dcc, html, no_update
 
+from components import ui
 from services import auth, store
 
 
@@ -36,6 +37,7 @@ def todo_row(t: dict, show_task: bool = True):
         dbc.Checkbox(id={'type': 'todo-done', 'id': t['id']}, value=t['done'], className='me-2 mb-0'),
         html.Div([
             dcc.Link(t['title'], href=f"/task/{t['id']}", style=title_style, className='me-2 text-reset'),
+            *ui.source_icons(t),
             html.Div([
                 due_badge(t['due_date'], t['done']),
                 html.Span([html.I(className='bi bi-person me-1'), t['assignee_name']], className='me-2')

@@ -98,7 +98,10 @@ def test_unmatched_mail_gets_ai_recommendation_then_review(monkeypatch):
     assert r['tasks'] == 1 and r['added'] == 1
     m = mailbox.get_mail(m['id'])
     assert m['status'] == 'done' and m['handled_by'] == '권동혁'
-    assert store.get_task(m['task_ids'][0])['due_date'] == '2026-10-27'
+    t = store.get_task(m['task_ids'][0])
+    assert t['due_date'] == '2026-10-27' and t['source_mail_id'] == m['id']
+    src = store.task_sources(t['id'])  # 업무 → 출처 메일
+    assert src['mail']['id'] == m['id'] and '자료 준비' in src['mail']['body'] and src['history'] is None
     mailbox.reopen(m['id'])
     assert mailbox.get_mail(m['id'])['status'] == 'review'
 
@@ -221,3 +224,15 @@ def test_no_parent_when_nothing_matches():
     mailbox.fetch_new(connect=lambda cfg: pop)
     sug = mailbox.list_mails()[0]['suggestion']
     assert sug['parent_task_id'] is None and sug['parent_candidates'] == []
+
+
+def test_old_task_finds_source_mail_from_task_ids():
+    """메일 칸이 생기기 전에 만든 업무도 받은 메일의 '만든 업무' 목록으로 출처를 찾는다."""
+    mailbox.fetch_new(connect=lambda cfg: FakePOP([_mail('자료 요청', 'kim@x.com', text='자료 부탁')]))
+    m = mailbox.list_mails()[0]
+    other = store.create_task('다른 업무')
+    t = store.create_task('예전 업무')
+    mailbox._update(m['id'], task_ids=f"1{t['id']},{t['id']}")  # 앞 id 는 다른 숫자로 시작 — 부분 일치는 무시
+    assert store.task_sources(t['id'])['mail']['id'] == m['id']
+    assert store.task_sources(other['id']) == {'history': None, 'mail': None}
+

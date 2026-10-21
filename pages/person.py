@@ -132,7 +132,7 @@ def render(_, _h, _t, pid):
 
     hist = store.search_history('', person_id=pid, limit=500)
     timeline = dbc.ListGroup([
-        ui.history_card(h, show_task=True, added_todos=store.todo_titles_for_history(h['id']) if h['ai_todos'] else None)
+        ui.history_card(h, show_task=True, added_todos=store.todos_for_history(h['id']) if h['ai_todos'] else None)
         for h in hist]) if hist else html.Div('이 임원과 연결된 기록이 없습니다.', className='text-muted small')
     n_trend = sum(h['entry_type'] == '동향' for h in hist)
     count = f'기록 {len(hist)}건 (동향 {n_trend}건)' if hist else ''

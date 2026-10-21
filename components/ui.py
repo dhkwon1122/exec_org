@@ -114,9 +114,22 @@ def people_chips(people: list[dict], terms: list[str] | None = None):
         for p in people], className='mb-1')
 
 
+def source_icons(t: dict):
+    """AI 요약·받은 메일에서 만든 업무 표시 — 누르면 업무 화면에서 그 메모/메일을 연다."""
+    out = []
+    if t.get('source_history_id'):
+        out.append(dcc.Link(html.I(className='bi bi-stars'), href=f"/task/{t['id']}?src=history",
+                            className='text-info me-1', title='AI 요약에서 찾은 할 일 — 원래 메모 보기'))
+    if t.get('source_mail_id'):
+        out.append(dcc.Link(html.I(className='bi bi-envelope'), href=f"/task/{t['id']}?src=mail",
+                            className='text-info me-1', title='받은 메일에서 만든 업무 — 메일 보기'))
+    return out
+
+
 def history_card(h: dict, terms: list[str] | None = None, show_task: bool = False, actions: bool = True,
-                 added_todos: set[str] | None = None):
-    """이력 한 건. 원문은 그대로 보존하고, AI 정리본(제목·요약·키워드)이 있으면 위에 보여준다."""
+                 added_todos: set[str] | dict[str, int] | None = None):
+    """이력 한 건. 원문은 그대로 보존하고, AI 정리본(제목·요약·키워드)이 있으면 위에 보여준다.
+    added_todos 가 {제목: 업무 id} 면 이미 업무로 만든 AI 할 일은 그 업무로 가는 링크가 된다."""
     auto = h['entry_type'] in AUTO_TYPES
     header = [
         html.I(className=f"bi {ENTRY_ICON.get(h['entry_type'], 'bi-dot')} me-2"),
@@ -148,12 +161,16 @@ def history_card(h: dict, terms: list[str] | None = None, show_task: bool = Fals
     if h['ai_todos']:
         added_todos = added_todos or set()
         body.append(html.Div([
-            html.Div([html.I(className='bi bi-list-check me-1'), 'AI가 찾은 할 일 — + 를 누르면 업무로 추가'], className='text-muted mb-1'),
+            html.Div([html.I(className='bi bi-list-check me-1'), 'AI가 찾은 할 일' + (' — + 를 누르면 업무로 추가' if actions else '')],
+                     className='text-muted mb-1'),
             *[html.Div([
                 html.I(className='bi bi-check-lg text-success me-1') if t['title'] in added_todos else
                 dbc.Button(html.I(className='bi bi-plus-lg'), id={'type': 'h-todo', 'hid': h['id'], 'idx': i},
                            color='link', size='sm', className='p-0 me-1', title='업무로 추가 (이 기록의 업무가 있으면 그 하위 업무로)')
                 if actions else html.I(className='bi bi-dot me-1'),
+                dcc.Link(t['title'], href=f"/task/{added_todos[t['title']]}", className='me-2',
+                         title='이 할 일로 만든 업무 열기')
+                if isinstance(added_todos, dict) and t['title'] in added_todos else
                 html.Span(t['title'], className='me-2'),
                 html.Span(t['due'], className='badge text-bg-light border me-1') if t['due'] else None,
                 html.Span(t['assignee'], className='text-muted') if t['assignee'] else None,

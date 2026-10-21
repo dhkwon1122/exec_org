@@ -18,15 +18,19 @@ def _task_options():
             for t in store.list_tasks(status=['예정', '진행중', '보류'])]
 
 
-def layout(**_):
+def layout(mail=None, **_):
+    try:
+        mail = int(mail) if mail else None  # 업무의 '출처' 링크(/inbox?mail=…)로 들어오면 그 메일을 바로 연다
+    except ValueError:
+        mail = None
     cell = {'textAlign': 'left', 'fontSize': '0.85rem', 'fontFamily': 'inherit', 'whiteSpace': 'normal',
             'height': 'auto'}
     return html.Div([
-        dcc.Store(id='ib-sel'),
+        dcc.Store(id='ib-sel', data=mail),
         dcc.Store(id='ib-refresh', data=0),
         html.Div([
             html.H4([html.I(className='bi bi-envelope me-2'), '받은 메일'], className='mb-0 me-3'),
-            dbc.RadioItems(id='ib-filter', value='review', inline=True, className='d-flex',
+            dbc.RadioItems(id='ib-filter', value='all' if mail else 'review', inline=True, className='d-flex',
                            inputClassName='btn-check', labelClassName='btn btn-sm btn-outline-secondary me-1',
                            labelCheckedClassName='active', options=[]),
             html.Div(id='ib-status', className='small text-muted ms-auto me-2'),
