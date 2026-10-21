@@ -295,3 +295,30 @@ def test_block_format_inside_table_cells():
     assert [(e['start_time'], e['title'], e['location'], e['attendees']) for e in ev] == [
         ('08:00', '주간 임원 간담회', '본관동 7층 대회의실', '플랫폼장(7), staff팀장(2)'),
         ('14:00', 'AI센터 현황 보고', '원장실', '')]
+
+
+@pytest.mark.parametrize('text', [
+    # 표 3칸 (시간+일정과 참석자가 한 칸, 장소 칸 따로)
+    mail_text.html_to_text('<table><tr><td>26.10.21(수)</td><td>08;00-10;00 주간 임원 간담회<br>* 참석자 : 플랫폼장(7), '
+                           'staff팀장(2)</td><td>본관동 7층 대회의실</td></tr></table>'),
+    # 표 4칸 (참석자 칸 따로)
+    mail_text.html_to_text('<table><tr><td>26.10.21(수)</td><td>08;00-10;00 주간 임원 간담회</td><td>* 참석자 : 플랫폼장(7), '
+                           'staff팀장(2)</td><td>본관동 7층 대회의실</td></tr></table>'),
+    # 표를 복사해 붙여넣음 — 줄바꿈 있는 칸은 큰따옴표로 감싸여 여러 줄
+    mail_text.from_pasted('26.10.21(수)\t"08;00-10;00 주간 임원 간담회\n* 참석자 : 플랫폼장(7), staff팀장(2)"\t'
+                          '본관동 7층 대회의실')['text'],
+    # 줄 단위 글
+    mail_text.from_pasted('26.10.21(수)\n 08;00-10;00 주간 임원 간담회\n* 참석자 : 플랫폼장(7), staff팀장(2) \n'
+                          '본관동 7층 대회의실')['text'],
+])
+def test_same_schedule_in_every_layout(text):
+    iid = schedules.create_import('x', '2026-10-20', text)
+    schedules.submit_import(iid, background=False)
+    assert [(e['date'], e['start_time'], e['end_time'], e['title'], e['location'], e['attendees'])
+            for e in schedules.get_import(iid)['events']] == [
+        ('2026-10-21', '08:00', '10:00', '주간 임원 간담회', '본관동 7층 대회의실', '플랫폼장(7), staff팀장(2)')]
+
+
+def test_pasted_quoted_cells_do_not_swallow_prose():
+    t = mail_text.from_pasted('a\t"b\nc"\td\n그는 "따옴표 하나 있는 문장\n끝')['text']
+    assert t.splitlines() == ['a | b / c | d', '그는 "따옴표 하나 있는 문장', '끝']
