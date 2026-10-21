@@ -30,10 +30,10 @@ from datetime import datetime
 from dotenv import load_dotenv
 from sqlalchemy import (
     Boolean, Column, DateTime, ForeignKey, Integer, String, Text, UniqueConstraint, create_engine, event, inspect,
-    text,
+    select, text,
 )
 from sqlalchemy import MetaData
-from sqlalchemy.orm import declarative_base, relationship, sessionmaker
+from sqlalchemy.orm import Session, declarative_base, relationship, sessionmaker, with_loader_criteria
 
 load_dotenv()
 
@@ -71,6 +71,8 @@ class Task(Base):
     source_mail_key = Column(String(64), default='')  # 생성 당시 후보의 식별값 — 제목을 고쳐도 중복 반영 방지
     created_at = Column(DateTime, default=_now)
     updated_at = Column(DateTime, default=_now, onupdate=_now)
+    deleted_at = Column(DateTime, nullable=True)
+    deleted_by = Column(String(100), default='')
 
     history = relationship('HistoryEntry', back_populates='task', foreign_keys='HistoryEntry.task_id', cascade='all, delete-orphan',
                            passive_deletes=True)
@@ -111,8 +113,30 @@ class HistoryEntry(Base):
     ai_todos = Column(Text, default='')  # AI 가 원문에서 뽑은 할 일 제안 (JSON 배열)
     ai_token = Column(String(32), default='')  # 사용자 수정·새 요청마다 변경해 오래된 AI 응답을 차단
     ai_reference_date = Column(String(10), default='')  # 상대 기한을 해석할 때 사용한 기록 기준일
+    edit_version = Column(Integer, default=0)
+    deleted_at = Column(DateTime, nullable=True)
+    deleted_by = Column(String(100), default='')
+    deleted_with_task = Column(Integer, nullable=True)  # 업무 복원 시 함께 되돌릴 기록만 구분
 
     task = relationship('Task', back_populates='history', foreign_keys=[task_id])
+
+
+class HistoryRevision(Base):
+    __tablename__ = 'history_revisions'
+    id = Column(Integer, primary_key=True)
+    history_id = Column(Integer, ForeignKey('history.id', ondelete='CASCADE'), nullable=False, index=True)
+    snapshot = Column(Text, nullable=False)
+    actor = Column(String(100), default='')
+    actor_id = Column(String(100), default='')
+    action = Column(String(30), default='수정')
+    created_at = Column(DateTime, default=_now)
+
+
+class HistoryBookmark(Base):
+    __tablename__ = 'history_bookmarks'
+    history_id = Column(Integer, ForeignKey('history.id', ondelete='CASCADE'), primary_key=True)
+    user_id = Column(String(100), primary_key=True)
+    created_at = Column(DateTime, default=_now)
 
 
 class Reference(Base):
@@ -534,7 +558,31 @@ def _legacy_sqlite_notice(engine):
 
 engine = make_engine()
 _legacy_sqlite_notice(engine)
-SessionLocal = sessionmaker(bind=engine, expire_on_commit=False, future=True)
+class AppSession(Session):
+    """휴지통 항목은 명시적으로 요청한 세션에서만 조회한다."""
+
+
+SessionLocal = sessionmaker(bind=engine, class_=AppSession, expire_on_commit=False, future=True)
+
+
+@event.listens_for(AppSession, 'do_orm_execute')
+def _hide_trashed(state):
+    if not state.is_select or state.session.info.get('include_deleted') or state.execution_options.get('include_deleted'):
+        return
+    # 일반 목록뿐 아니라 검색의 하위 쿼리·집계·첨부 다운로드에도 같은 규칙을 적용한다.
+    tasks = Task.__table__.c
+    history = HistoryEntry.__table__.c
+    active_tasks = select(tasks.id).where(tasks.deleted_at.is_(None))
+    active_history = select(history.id).where(history.deleted_at.is_(None))
+    state.statement = state.statement.options(
+        with_loader_criteria(Task, lambda cls: cls.deleted_at.is_(None), include_aliases=True),
+        with_loader_criteria(HistoryEntry, lambda cls: cls.deleted_at.is_(None), include_aliases=True),
+        with_loader_criteria(Reference,
+            (Reference.task_id.is_(None) | Reference.task_id.in_(active_tasks)) &
+            (Reference.history_id.is_(None) | Reference.history_id.in_(active_history)), include_aliases=True),
+        with_loader_criteria(TaskLink,
+            TaskLink.src_id.in_(active_tasks) & TaskLink.dst_id.in_(active_tasks), include_aliases=True),
+    )
 
 
 @contextmanager

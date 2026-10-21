@@ -82,16 +82,16 @@ def layout(person_id=None, **_):
             dbc.ModalFooter([dbc.Button('취소', id='ev-cancel', color='secondary', outline=True),
                              dbc.Button('저장', id='ev-save', color='primary')]),
         ], id='ev-modal', is_open=False, size='lg'),
-        html.Div(id='pp-profile', className='mb-3'),
+        html.Details([html.Summary('임원 프로필 · 평가 · 경력', className='composer-toggle'), html.Div(id='pp-profile')], className='mb-3'),
         dbc.Row([
             dbc.Col([
-                dbc.Card(dbc.CardBody([
+                html.Details([html.Summary('이 임원에 대해 기록 추가', className='composer-toggle'), dbc.Card(dbc.CardBody([
                     html.Div([html.I(className='bi bi-binoculars me-1'), '이 임원에 대해 기록'],
                              className='fw-semibold mb-2'),
                     dcc.Dropdown(id='pp-task', multi=True, className='mb-2',
                                  placeholder='관련 업무 — 여러 업무에 걸치면 모두 (동향이면 비워 두세요)'),
                     *form,
-                ]), className='mb-3'),
+                ]), className='mt-2')], className='record-composer mb-3'),
                 html.Div(id='pp-count', className='small text-muted mb-2'),
                 html.Div(id='pp-history'),
             ], lg=8),
@@ -134,9 +134,7 @@ def render(_, _h, _t, pid):
     ]))
 
     hist = store.search_history('', person_id=pid, limit=500)
-    timeline = dbc.ListGroup([
-        ui.history_card(h, show_task=True, added_todos=store.todos_for_history(h['id']) if h['ai_todos'] else None)
-        for h in hist]) if hist else html.Div('이 임원과 연결된 기록이 없습니다.', className='text-muted small')
+    timeline = ui.history_stream(hist, show_task=True) if hist else html.Div('이 임원과 연결된 기록이 없습니다.', className='text-muted small')
     n_trend = sum(h['entry_type'] == '동향' for h in hist)
     count = f'기록 {len(hist)}건 (동향 {n_trend}건)' if hist else ''
 

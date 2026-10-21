@@ -64,13 +64,17 @@ def test_attach_links_skips_duplicates_and_validates_entry():
         store.add_reference(b['id'], 'link', url='https://x.example', history_id=h['id'])
 
 
-def test_deleting_history_keeps_its_material_as_task_reference():
+def test_trashing_history_preserves_its_material_for_restore():
     t = store.create_task('a')
     h = store.add_history(t['id'], 'x')
     store.attach_links(t['id'], h['id'], [{'title': '근거', 'url': 'https://x.example'}])
     store.delete_history(h['id'])
     refs = store.list_references(task_id=t['id'])
-    assert [(r['title'], r['history_id']) for r in refs] == [('근거', None)]
+    assert refs == []
+    from services import records
+    records.restore('history', h['id'])
+    refs = store.list_references(task_id=t['id'])
+    assert [(r['title'], r['history_id']) for r in refs] == [('근거', h['id'])]
 
 
 def test_templates_cover_entry_types():

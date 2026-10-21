@@ -1,9 +1,11 @@
 """여러 화면에서 같이 쓰는 표시용 조각."""
 import re
+import flask
 from urllib.parse import quote
 
 import dash_bootstrap_components as dbc
 from dash import dcc, html
+from services import auth, records, store
 
 STATUS_COLOR = {'예정': 'secondary', '진행중': 'primary', '보류': 'warning', '완료': 'success'}
 ENTRY_ICON = {
@@ -52,6 +54,17 @@ def ref_target(ref: dict):
 
 
 AUTO_TYPES = ('상태변경', '연결', '자료', '할일')
+
+
+def history_stream(rows, **kwargs):
+    regular = [history_card(h, added_todos=store.todos_for_history(h['id']) if h['ai_todos'] else None, **kwargs)
+               for h in rows if h['entry_type'] not in AUTO_TYPES]
+    automatic = [history_card(h, **kwargs) for h in rows if h['entry_type'] in AUTO_TYPES]
+    return html.Div([
+        dbc.ListGroup(regular) if regular else html.P('직접 작성한 기록이 없습니다.', className='text-muted small'),
+        html.Details([html.Summary(f'자동 기록 {len(automatic)}건', className='composer-toggle'),
+                      dbc.ListGroup(automatic)], className='mt-3') if automatic else None,
+    ])
 
 
 def unc_path(path: str):
@@ -132,7 +145,8 @@ def source_icons(t: dict):
 
 
 def history_card(h: dict, terms: list[str] | None = None, show_task: bool = False, actions: bool = True,
-                 added_todos: set[str] | dict[str, int] | None = None, context_task_id: int | None = None):
+                 added_todos: set[str] | dict[str, int] | None = None, context_task_id: int | None = None,
+                 view: str = 'main'):
     """이력 한 건. 원문은 그대로 보존하고, AI 정리본(제목·요약·키워드)이 있으면 위에 보여준다.
     added_todos 가 {제목: 업무 id} 면 이미 업무로 만든 AI 할 일은 그 업무로 가는 링크가 된다.
     context_task_id: 업무 화면에서 그릴 때 그 업무 — 여러 업무에 걸친 기록이면 나머지 업무를 보여 주고,
@@ -158,6 +172,20 @@ def history_card(h: dict, terms: list[str] | None = None, show_task: bool = Fals
             *[dcc.Link(f"#{t['id']} {t['title']}", href=f"/task/{t['id']}", className='me-2') for t in others],
         ], className='small text-muted text-truncate me-2'))
     header.append(html.Span(className='me-auto'))
+    user = auth.current_user() or {}
+    saved = set()
+    if flask.has_request_context():
+        if not hasattr(flask.g, 'record_bookmarks'):
+            flask.g.record_bookmarks = records.bookmark_ids(user.get('user_id', ''))
+        saved = flask.g.record_bookmarks
+    header.append(html.Button(html.I(className='bi bi-bookmark-fill' if h['id'] in saved else 'bi bi-bookmark'),
+        id={'type': 'record-bookmark', 'id': h['id'], 'view': view},
+        className='btn btn-link record-tool', title='북마크 해제' if h['id'] in saved else '북마크',
+        **{'aria-label': '북마크 해제' if h['id'] in saved else '북마크', 'aria-pressed': str(h['id'] in saved).lower()}))
+    menu = [dbc.DropdownMenuItem('기록 열기', href=f"/history/{h['id']}"),
+            dbc.DropdownMenuItem('직접 링크 복사', id={'type': 'record-copy', 'id': h['id'], 'view': view})]
+    if view != 'source':
+        menu.append(dbc.DropdownMenuItem('수정 이력', id={'type': 'record-revisions', 'id': h['id'], 'view': view}))
     shared = context_task_id is not None and len(all_tasks) > 1
     if actions and shared:
         header.append(dbc.Button(html.I(className='bi bi-box-arrow-right'),
@@ -165,19 +193,22 @@ def history_card(h: dict, terms: list[str] | None = None, show_task: bool = Fals
                                  size='sm', className='text-muted p-0 me-2',
                                  title='이 업무에서 빼기 (다른 업무에는 그대로 남음)'))
     if actions and not auto:
-        header.append(dbc.Button(html.I(className='bi bi-pencil'), id={'type': 'h-edit', 'id': h['id']},
-                                 color='link', size='sm', className='text-muted p-0 me-2', title='수정'))
+        menu.append(dbc.DropdownMenuItem('수정', id={'type': 'h-edit', 'id': h['id']}))
     if actions:
-        header.append(dbc.Button(html.I(className='bi bi-x'), id={'type': 'h-del', 'id': h['id']}, color='link',
-                                 size='sm', className='text-muted p-0', title='삭제'))
+        menu.append(dbc.DropdownMenuItem('휴지통으로 이동', id={'type': 'record-trash', 'id': h['id'], 'view': view},
+                                        className='text-danger'))
+    header.append(dbc.DropdownMenu(menu, label=html.Span([html.I(className='bi bi-three-dots', **{'aria-hidden': 'true'}),
+                                                     html.Span('기록 메뉴', className='visually-hidden')]),
+        toggleClassName='record-tool', color='link', caret=False, align_end=True,
+        toggle_style={'textDecoration': 'none'}))
 
     body = []
     if h.get('people'):
         body.append(people_chips(h['people'], terms))
     if h['title']:
-        body.append(html.Div(highlight(h['title'], terms), className='fw-semibold'))
+        body.append(dcc.Link(highlight(h['title'], terms), href=f"/history/{h['id']}", className='record-title'))
     if h['summary']:
-        body.append(html.Div(highlight(h['summary'], terms, True), className='small'))
+        body.append(html.Div(highlight(h['summary'], terms, True), className='record-summary'))
     if h['keywords']:
         body.append(keyword_chips(h['keywords'], terms))
     if h['ai_todos']:
@@ -224,4 +255,5 @@ def history_card(h: dict, terms: list[str] | None = None, show_task: bool = Fals
     if h.get('refs'):  # 관련 자료는 항상 내용 뒤에
         body.append(history_refs(h['refs'], terms))
 
-    return dbc.ListGroupItem([html.Div(header, className='d-flex align-items-center flex-wrap mb-1'), *body])
+    return dbc.ListGroupItem([html.Div(header, className='record-meta d-flex align-items-center flex-wrap mb-2'), *body],
+                             className='record-card' + (' record-auto' if auto else ''))

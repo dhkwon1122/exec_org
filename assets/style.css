@@ -291,6 +291,64 @@ body {
 }
 
 /* ── 임원 부재 달력 (components/absence_ui.py) ───────────────── */
+.card, .list-group-item { background-color: var(--app-surface); }
+.record-card { padding: 18px 20px; line-height: 1.65; overflow-wrap: anywhere; }
+.record-title { display: block; font-size: 1.06rem; font-weight: 650; color: var(--app-text); margin-bottom: 6px; }
+.record-summary { font-size: .94rem; line-height: 1.75; }
+.record-meta { font-size: .84rem; color: #626b79; gap: 2px; }
+.record-meta .small { font-size: inherit; }
+.record-meta { position: relative; padding-right: 88px; min-height: 44px; }
+.record-meta > .record-tool { position: absolute; top: 0; right: 44px; }
+.record-meta > .dropdown { position: absolute; top: 0; right: 0; }
+.record-tool { min-width: 34px; min-height: 34px; padding: 5px 8px; opacity: 1 !important; }
+.record-card .dropdown-menu { font-size: .9rem; box-shadow: var(--app-shadow); }
+.record-card .dropdown-item { padding: 10px 16px; }
+.composer-toggle { padding: 10px 0; font-weight: 600; color: var(--app-accent); }
+.record-composer > .card { margin-top: 10px; }
+.revision-text { white-space: pre-wrap; overflow-wrap: anywhere; font: inherit; font-size: .9rem;
+  padding: 12px; background: #f7f8fa; border-radius: 8px; }
+.diff-add { color: #156b40; background: #e7f6ee; }
+.diff-remove { color: #9a2525; background: #fdecec; }
+.copy-feedback > span { position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%);
+  background: #252b38; color: white; border-radius: 10px; padding: 12px 18px; z-index: 1110; max-width: 90vw;
+  animation: feedback-hide 5s forwards; pointer-events: none; }
+@keyframes feedback-hide { 0%,85% { opacity: 1; } 100% { opacity: 0; visibility: hidden; } }
+.mobile-nav-toggle, .mobile-record-action, .people-mobile { display: none; }
+.nav-collapse { display: block !important; }
+.app-sidebar .nav-collapse { flex: 1; }
+.people-table { min-width: 950px; }
+.people-table td:first-child { white-space: nowrap; min-width: 120px; background: white; }
+#home-quick-record { scroll-margin-top: 85px; }
+@media (max-width: 991.98px) {
+  .app-sidebar { display: flex; flex-wrap: wrap; overflow: visible; padding: 8px 16px; gap: 8px; }
+  .app-brand span:last-child { display: inline; }
+  .mobile-nav-toggle { display: inline-flex; margin-left: auto; min-height: 44px; align-items: center; }
+  .app-sidebar .nav-collapse { display: none !important; order: 5; flex: 0 0 100%; }
+  .app-sidebar .nav-collapse.show { display: block !important; max-height: 65vh; overflow-y: auto; }
+  .app-nav { flex-direction: column !important; }
+  .app-nav .nav-link { padding: 12px; }
+  .app-user { margin: 0; padding: 0; }
+  .app-user .avatar { display: none; }
+  .mobile-record-action { display: inline-flex; position: fixed; bottom: 18px; right: 18px; z-index: 1010;
+    padding: 12px 18px; box-shadow: 0 4px 18px #3a6df044; }
+  .app-main { padding-bottom: 90px; }
+}
+@media (max-width: 767.98px) {
+  .record-card { padding: 16px; }
+  .record-tool { min-width: 44px; min-height: 44px; }
+  .people-desktop { display: none; }
+  .people-mobile { display: block; }
+  .modal-footer { gap: 6px; }
+  .modal-footer .btn { min-height: 44px; }
+  .page-head { flex-wrap: wrap; }
+}
+.record-card:focus-within { outline: 2px solid #adc2fa; outline-offset: -2px; }
+.modal-open #record-toast, .modal-open .copy-feedback { display: none !important; }
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation-duration: .01ms !important; transition-duration: .01ms !important; }
+  .copy-feedback > span { animation-duration: 5s !important; }
+}
+
 .ab-grid { background: var(--app-surface); border: 1px solid var(--app-border); border-radius: var(--app-radius);
   overflow: hidden; box-shadow: var(--app-shadow); }
 .ab-week { display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); }
@@ -314,3 +372,5 @@ body {
   .ab-cell { min-height: 64px; }
   .ab-chip { font-size: .66rem; padding: 0 3px; }
 }
+
+.people-table td:first-child, .people-table th:first-child { position: sticky; left: 0; z-index: 1; background: white; }
