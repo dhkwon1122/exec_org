@@ -8,7 +8,7 @@ from dash import ALL, Input, Output, State, callback, ctx, dcc, html, no_update
 from components import todo_ui, ui
 from components.history_form import (decode_text_upload, history_form, register_form_callbacks, save_history,
                                      task_options)
-from services import auth, store
+from services import auth, mailbox, store
 
 dash.register_page(__name__, path_template='/task/<task_id>', name='업무 상세', title='업무 기록 · 상세')
 
@@ -97,26 +97,28 @@ def _source_modals(tid: int, src: dict, open_kind: str | None):
                                                          added_todos=store.todos_for_history(h['id']))])),
             dbc.ModalFooter([go, dbc.Button('닫기', id='td-src-history-close', color='secondary', outline=True)]),
         ], id='td-src-history', is_open=open_kind == 'history', size='lg', scrollable=True))
-    m = src['mail']
-    if m:
+    if src['mails']:
+        m = src['mails'][0]
         out.append(dbc.Modal([
-            dbc.ModalHeader(dbc.ModalTitle([html.I(className='bi bi-envelope me-2'), m['subject']])),
-            dbc.ModalBody([
-                html.Div(f"보낸 사람 {m['sender']} · {m['mail_date']}", className='small text-muted mb-2'),
-                html.Pre(m['body'], className='small mb-0',
-                         style={'whiteSpace': 'pre-wrap', 'fontFamily': 'inherit'}),
-            ]),
+            dbc.ModalHeader(dbc.ModalTitle([html.I(className='bi bi-envelope me-2'),
+                                            html.Span(m['subject'], id='td-src-mail-title')])),
+            dbc.ModalBody(_mail_body(m), id='td-src-mail-body'),
             dbc.ModalFooter([
                 dcc.Link([html.I(className='bi bi-box-arrow-up-right me-1'), '받은 메일 화면에서 열기'],
-                         href=f"/inbox?mail={m['id']}", className='small me-auto'),
+                         href=f"/inbox?mail={m['id']}", id='td-src-mail-link', className='small me-auto'),
                 dbc.Button('닫기', id='td-src-mail-close', color='secondary', outline=True),
             ]),
         ], id='td-src-mail', is_open=open_kind == 'mail', size='lg', scrollable=True))
     return out
 
 
+def _mail_body(m: dict):
+    return [html.Div(f"보낸 사람 {m['sender']} · {m['mail_date']}", className='small text-muted mb-2'),
+            html.Pre(m['body'], className='small mb-0', style={'whiteSpace': 'pre-wrap', 'fontFamily': 'inherit'})]
+
+
 def _source_card(src: dict):
-    if not src['history'] and not src['mail']:
+    if not src['history'] and not src['mails']:
         return None
     items = []
     if src['history']:
@@ -126,13 +128,13 @@ def _source_card(src: dict):
             html.Div(h['title'] or h['content'][:60], className='small fw-semibold text-truncate'),
             html.Div(' · '.join(x for x in [h['occurred_at'], h['author']] if x), className='small text-muted'),
         ], id='td-src-history-open', action=True, n_clicks=0))
-    if src['mail']:
-        m = src['mail']
+    for m in src['mails']:
         items.append(dbc.ListGroupItem([
-            html.Div([html.I(className='bi bi-envelope me-1'), '받은 메일에서 만든 업무'], className='small text-muted'),
+            html.Div([html.I(className='bi bi-envelope me-1'),
+                      '받은 메일에서 만든 업무' if m['created'] else '연결된 메일'], className='small text-muted'),
             html.Div(m['subject'], className='small fw-semibold text-truncate'),
             html.Div(f"{m['sender']} · {m['mail_date']}", className='small text-muted text-truncate'),
-        ], id='td-src-mail-open', action=True, n_clicks=0))
+        ], id={'type': 'td-src-mail-open', 'id': m['id']}, action=True, n_clicks=0))
     return dbc.Card([dbc.CardHeader([html.I(className='bi bi-link-45deg me-1'), '출처'], className='small'),
                      dbc.ListGroup(items, flush=True)], className='mb-3')
 
@@ -434,10 +436,25 @@ def add_link(_, tid, target, rel, note, n):
 
 # ── 출처 보기 ─────────────────────────────────────────────────────────
 
-for _kind in ('history', 'mail'):
-    @callback(Output(f'td-src-{_kind}', 'is_open'), Input(f'td-src-{_kind}-open', 'n_clicks'),
-              Input(f'td-src-{_kind}-close', 'n_clicks'), prevent_initial_call=True)
-    def _toggle_source(_o, _c, _kind=_kind):
-        if not ctx.triggered or not ctx.triggered[0]['value']:
-            return no_update
-        return ctx.triggered_id == f'td-src-{_kind}-open'
+@callback(Output('td-src-history', 'is_open'), Input('td-src-history-open', 'n_clicks'),
+          Input('td-src-history-close', 'n_clicks'), prevent_initial_call=True)
+def _toggle_history_source(_o, _c):
+    if not ctx.triggered or not ctx.triggered[0]['value']:
+        return no_update
+    return ctx.triggered_id == 'td-src-history-open'
+
+
+@callback(Output('td-src-mail', 'is_open'), Output('td-src-mail-title', 'children'),
+          Output('td-src-mail-body', 'children'), Output('td-src-mail-link', 'href'),
+          Input({'type': 'td-src-mail-open', 'id': ALL}, 'n_clicks'), Input('td-src-mail-close', 'n_clicks'),
+          prevent_initial_call=True)
+def _toggle_mail_source(_o, _c):
+    """출처 카드의 메일을 누르면 그 메일을 창에 보여 준다 (연결된 메일이 여럿일 수 있음)."""
+    if not ctx.triggered or not ctx.triggered[0]['value']:
+        return no_update, no_update, no_update, no_update
+    if ctx.triggered_id == 'td-src-mail-close':
+        return False, no_update, no_update, no_update
+    m = mailbox.get_mail(ctx.triggered_id['id'])
+    if m is None:
+        return no_update, no_update, no_update, no_update
+    return True, m['subject'], _mail_body(m), f"/inbox?mail={m['id']}"

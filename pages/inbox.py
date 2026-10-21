@@ -3,6 +3,7 @@ import dash
 import dash_bootstrap_components as dbc
 from dash import ALL, Input, Output, State, callback, ctx, dash_table, dcc, html, no_update
 
+from components import ui
 from services import auth, mailbox, schedules, store
 
 dash.register_page(__name__, path='/inbox', name='받은 메일', title='업무 기록 · 받은 메일')
@@ -44,6 +45,32 @@ def layout(mail=None, **_):
             dbc.Col(html.Div(id='ib-list'), lg=5),
             dbc.Col(html.Div([
                 html.Div(id='ib-head'),
+                html.Div(id='ib-link-box', style={'display': 'none'}, children=[
+                    dbc.Card(dbc.CardBody([
+                        html.Div([html.I(className='bi bi-link-45deg me-1'), '이 메일과 연결된 업무'],
+                                 className='fw-semibold small mb-1'),
+                        html.Div(id='ib-linked', className='mb-2'),
+                        dbc.Row([
+                            dbc.Col(dcc.Dropdown(id='ib-link-task', placeholder='기존 업무에 연결 — 업무 검색'), md=9),
+                            dbc.Col(dbc.Button('연결', id='ib-link', color='secondary', outline=True,
+                                               className='w-100'), md=3),
+                        ], className='g-2 mb-2'),
+                        html.Details([
+                            html.Summary('이 메일로 새 업무 만들기', className='small'),
+                            html.Div([
+                                dbc.Input(id='ib-new-title', placeholder='업무 이름 (비우면 메일 제목)', className='mb-2'),
+                                dbc.Row([
+                                    dbc.Col(dcc.Dropdown(id='ib-new-parent', placeholder='상위 업무 (선택)'), md=6),
+                                    dbc.Col(dbc.Input(id='ib-new-due', type='date'), md=3),
+                                    dbc.Col(dbc.Button('만들기', id='ib-new-make', color='primary', className='w-100'),
+                                            md=3),
+                                ], className='g-2'),
+                            ], className='mt-2'),
+                        ], id='ib-new-box'),
+                        html.Div('연결하거나 만든 업무에는 메일 원문이 "요청" 기록으로 남고, 업무 화면의 출처에 이 메일이 보입니다.',
+                                 className='small text-muted mt-2'),
+                    ]), className='mt-2'),
+                ]),
                 html.Div(id='ib-task-box', style={'display': 'none'}, children=[
                     html.H6([html.I(className='bi bi-check2-square me-1'), '업무로 만들기'], className='mt-3'),
                     dbc.Row([
@@ -177,7 +204,7 @@ def render_detail(sel, _):
                             className='me-1'),
                   dbc.Badge(kind[0], color=kind[1], className='me-2') if kind else None,
                   html.Span(m['reason'], className='small')]),
-        html.Div(['만든 업무: ', *links], className='small mt-1') if links else None,
+        html.Div(['연결된 업무: ', *links], className='small mt-1') if links else None,
         html.Div(f"처리: {m['handled_by']} {m['handled_at']}", className='small text-muted mt-1')
         if m['handled_at'] else None,
         dbc.Alert(m['error'], color='danger', className='small py-1 mt-2 mb-0') if m['error'] else None,
@@ -272,6 +299,66 @@ def act(_a, _i, _r, _f, sel, tasks, parent, sched, task_style, sched_style, n):
     use_sched = sched if sched_style != {'display': 'none'} else []
     r = mailbox.apply_review(sel, use_tasks, parent, use_sched, by)
     return (n or 0) + 1, (f"반영 — 업무 {r['tasks']}건, 새 일정 {r['added']}건, 바뀐 일정 {r['updated']}건"), True, 'success'
+
+
+# ── 업무 직접 연결·만들기 ─────────────────────────────────────────────
+
+@callback(Output('ib-link-box', 'style'), Output('ib-linked', 'children'), Output('ib-link-task', 'options'),
+          Output('ib-link-task', 'value'), Output('ib-new-title', 'value'), Output('ib-new-parent', 'options'),
+          Output('ib-new-parent', 'value'), Output('ib-new-due', 'value'),
+          Input('ib-sel', 'data'), Input('ib-refresh', 'data'))
+def render_links(sel, _):
+    m = mailbox.get_mail(sel) if sel else None
+    if m is None:
+        return {'display': 'none'}, None, [], None, '', [], None, None
+    tasks = {t['id']: t for t in store.list_tasks()}
+    linked = [tasks[t] for t in m['task_ids'] if t in tasks]
+    view = html.Div([
+        html.Div([
+            ui.status_badge(t['status']), ui.task_link(t), html.Span(className='me-auto'),
+            dbc.Button(html.I(className='bi bi-x'), id={'type': 'ib-unlink', 'id': t['id']}, color='link', size='sm',
+                       className='text-muted p-0', title='연결 끊기 (업무와 기록은 그대로)'),
+        ], className='d-flex align-items-center gap-2 small py-1') for t in linked
+    ]) if linked else html.Div('아직 연결된 업무가 없습니다.', className='small text-muted')
+    opts = [{'label': f"#{t['id']} {t['title']}" + (' (완료)' if t['status'] == '완료' else ''), 'value': t['id']}
+            for t in sorted(tasks.values(), key=lambda t: (t['status'] == '완료', -t['id']))
+            if t['id'] not in m['task_ids']]
+    parent_opts = [o for o in opts if '(완료)' not in o['label']]
+    # 상위 업무 기본값: 받을 때 추천한 상위 업무, 없으면 같은 메일 스레드의 업무 (AI 는 부르지 않음 — 화면이 느려짐)
+    suggested = m['suggestion'].get('parent_task_id') or mailbox._thread_parent(m['subject'], m['id'])[0]
+    return ({}, view, opts, None, mailbox.clean_subject(m['subject']), parent_opts,
+            suggested if suggested in tasks else None, None)
+
+
+@callback(Output('ib-refresh', 'data', allow_duplicate=True), Output('ib-msg', 'children', allow_duplicate=True),
+          Output('ib-msg', 'is_open', allow_duplicate=True), Output('ib-msg', 'color', allow_duplicate=True),
+          Input('ib-link', 'n_clicks'), Input('ib-new-make', 'n_clicks'),
+          Input({'type': 'ib-unlink', 'id': ALL}, 'n_clicks'),
+          State('ib-sel', 'data'), State('ib-link-task', 'value'), State('ib-new-title', 'value'),
+          State('ib-new-parent', 'value'), State('ib-new-due', 'value'), State('ib-refresh', 'data'),
+          prevent_initial_call=True)
+def link_actions(_l, _m, _u, sel, task_id, title, parent, due, n):
+    trig = ctx.triggered_id
+    if not sel or not ctx.triggered or not ctx.triggered[0]['value']:
+        return no_update, no_update, no_update, no_update
+    by = auth.current_name()
+    try:
+        if isinstance(trig, dict):
+            mailbox.unlink_task(sel, trig['id'])
+            return (n or 0) + 1, f"#{trig['id']} 업무와 연결을 끊었습니다 (업무와 기록은 그대로).", True, 'secondary'
+        if trig == 'ib-link':
+            if not task_id:
+                return no_update, '연결할 업무를 고르세요.', True, 'warning'
+            done = mailbox.link_task(sel, int(task_id), by)
+            return ((n or 0) + 1, ['연결했습니다 — 메일 원문을 업무 기록으로 남겼습니다. ',
+                                   dcc.Link('업무 열기', href=f'/task/{task_id}')] if done else '이미 연결된 업무입니다.',
+                    True, 'success' if done else 'info')
+        if trig == 'ib-new-make':
+            tid = mailbox.create_task_from_mail(sel, title or '', int(parent) if parent else None, by, due or '')
+            return (n or 0) + 1, ['업무를 만들었습니다. ', dcc.Link(f'#{tid} 열기', href=f'/task/{tid}')], True, 'success'
+    except ValueError as e:
+        return no_update, str(e), True, 'danger'
+    return no_update, no_update, no_update, no_update
 
 
 # ── 규칙 ──────────────────────────────────────────────────────────────

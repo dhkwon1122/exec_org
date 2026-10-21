@@ -218,6 +218,11 @@ _STOP = {'요청', '관련', '자료', '회신', '검토', '부탁', '드립니�
          '업무', '진행', '보고', '협조', '문의', '전달', '참고', '사항', '내용', '일정', '회의', '이번', '다음', '해당', '대한'}
 
 
+def clean_subject(subject: str) -> str:
+    """RE:/FW:/[머리말] 을 뗀 제목 — 메일로 업무를 만들 때 기본 업무 이름."""
+    return re.sub(r'\s+', ' ', _SUBJ_PREFIX.sub('', subject or '')).strip()
+
+
 def norm_subject(subject: str) -> str:
     return re.sub(r'\s+', ' ', _SUBJ_PREFIX.sub('', subject or '')).strip().lower()
 
@@ -321,12 +326,64 @@ def create_tasks(mail: dict, items: list[dict], parent_id: int | None, by: str) 
         t = store.create_todo(title, task_id=parent_id or None, due_date=str(it.get('due') or '')[:10],
                               assignee_name=str(it.get('assignee') or ''), created_by=by,
                               source_mail_id=mail.get('id'))
-        content = (f"[받은 메일] {mail['subject']}\n보낸 사람: {mail['sender']}\n날짜: {mail['mail_date']}\n\n"
-                   f"{mail['body'][:20000]}")
-        store.add_history(t['id'], content, '요청', author=sender_name(mail['sender']) or by,
-                          title=mail['subject'][:200])
+        _mail_history(mail, t['id'], by)
         ids.append(t['id'])
     return ids
+
+
+def _mail_history(mail: dict, task_id: int, by: str) -> None:
+    """메일 원문을 업무의 '요청' 기록으로."""
+    content = (f"[받은 메일] {mail['subject']}\n보낸 사람: {mail['sender']}\n날짜: {mail['mail_date']}\n\n"
+               f"{mail['body'][:20000]}")
+    store.add_history(task_id, content, '요청', author=sender_name(mail['sender']) or by, title=mail['subject'][:200])
+
+
+def _manual_done(m: dict, by: str) -> dict:
+    """사람이 업무를 직접 만들거나 연결하면 — 무시·실패했던 메일은 '반영함'으로 (확인 필요는 그대로 둬서
+    남은 일정 추천 등을 마저 처리할 수 있게)."""
+    if m['status'] in ('ignored', 'failed', 'skipped'):
+        return {'status': 'done', 'handled_at': datetime.now().replace(microsecond=0), 'handled_by': by}
+    return {}
+
+
+def link_task(mail_id: int, task_id: int, by: str) -> bool:
+    """가져온 메일을 이미 있는 업무에 연결 — 메일 원문을 그 업무의 '요청' 기록으로 남긴다.
+    이미 연결돼 있으면 False."""
+    m = get_mail(mail_id)
+    if m is None:
+        raise ValueError('메일을 찾을 수 없습니다.')
+    if store.get_task(task_id) is None:
+        raise ValueError('업무를 찾을 수 없습니다.')
+    if task_id in m['task_ids']:
+        return False
+    _mail_history(m, task_id, by)
+    _update(mail_id, task_ids=','.join(map(str, m['task_ids'] + [task_id])), **_manual_done(m, by))
+    return True
+
+
+def create_task_from_mail(mail_id: int, title: str, parent_id: int | None, by: str, due: str = '',
+                          assignee: str = '') -> int:
+    """가져온 메일로 업무를 직접 하나 만든다 (분류·상태와 상관없이)."""
+    m = get_mail(mail_id)
+    if m is None:
+        raise ValueError('메일을 찾을 수 없습니다.')
+    title = (title or '').strip() or clean_subject(m['subject'])
+    if not title:
+        raise ValueError('업무 이름을 입력하세요.')
+    if parent_id and store.get_task(parent_id) is None:
+        raise ValueError('상위 업무를 찾을 수 없습니다.')
+    ids = create_tasks(m, [{'title': title, 'due': due or '', 'assignee': assignee or ''}], parent_id, by)
+    _update(mail_id, task_ids=','.join(map(str, m['task_ids'] + ids)), **_manual_done(m, by))
+    return ids[0]
+
+
+def unlink_task(mail_id: int, task_id: int) -> None:
+    """메일과 업무의 연결만 끊는다 — 업무와 거기 남긴 기록은 그대로."""
+    m = get_mail(mail_id)
+    if m is None:
+        return
+    _update(mail_id, task_ids=','.join(str(t) for t in m['task_ids'] if t != task_id))
+    store.clear_source_mail(task_id, mail_id)
 
 
 def process(mail_id: int) -> None:

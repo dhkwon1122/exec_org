@@ -234,5 +234,34 @@ def test_old_task_finds_source_mail_from_task_ids():
     t = store.create_task('예전 업무')
     mailbox._update(m['id'], task_ids=f"1{t['id']},{t['id']}")  # 앞 id 는 다른 숫자로 시작 — 부분 일치는 무시
     assert store.task_sources(t['id'])['mail']['id'] == m['id']
-    assert store.task_sources(other['id']) == {'history': None, 'mail': None}
+    assert store.task_sources(other['id']) == {'history': None, 'mail': None, 'mails': []}
 
+
+
+def test_link_or_create_task_from_any_mail():
+    mailbox.fetch_new(connect=lambda cfg: FakePOP([_mail('RE: [공지] 임원 평가 자료 송부', '김팀장 <kim@x.com>',
+                                                         text='평가 자료 보냅니다.')]))
+    m = mailbox.list_mails()[0]
+    mailbox.ignore(m['id'], '나')  # 무시했던 메일도 나중에 업무와 엮을 수 있다
+    t = store.create_task('2026 임원 평가')
+    assert mailbox.link_task(m['id'], t['id'], '나') is True
+    assert mailbox.link_task(m['id'], t['id'], '나') is False  # 두 번 연결하지 않음
+    m = mailbox.get_mail(m['id'])
+    assert m['task_ids'] == [t['id']] and m['status'] == 'done'
+    hist = [h for h in store.list_history(t['id']) if h['entry_type'] == '요청']
+    assert len(hist) == 1 and '평가 자료 보냅니다' in hist[0]['content']
+    src = store.task_sources(t['id'])
+    assert [(x['id'], x['created']) for x in src['mails']] == [(m['id'], False)]  # 나중에 연결한 메일
+    # 새 업무 만들기 — 이름을 비우면 머리말을 뗀 메일 제목
+    new_id = mailbox.create_task_from_mail(m['id'], '', t['id'], '나', due='2026-10-30')
+    new = store.get_task(new_id)
+    assert (new['title'], new['parent_id'], new['due_date'], new['source_mail_id']) == (
+        '임원 평가 자료 송부', t['id'], '2026-10-30', m['id'])
+    assert mailbox.get_mail(m['id'])['task_ids'] == [t['id'], new_id]
+    assert store.task_sources(new_id)['mails'][0]['created'] is True
+    # 연결 끊기 — 업무와 기록은 그대로
+    mailbox.unlink_task(m['id'], new_id)
+    assert mailbox.get_mail(m['id'])['task_ids'] == [t['id']]
+    assert store.get_task(new_id)['source_mail_id'] is None and store.task_sources(new_id)['mails'] == []
+    with pytest.raises(ValueError):
+        mailbox.link_task(m['id'], 9999, '나')
