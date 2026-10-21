@@ -13,44 +13,110 @@ from html.parser import HTMLParser
 
 
 class _HTMLText(HTMLParser):
-    """HTML → 글자. 표는 행 단위 'a | b | c', 블록 요소는 줄바꿈."""
-    BLOCK = {'p', 'div', 'br', 'li', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'table', 'tr', 'ul', 'ol'}
+    """HTML → 글자. 표는 행 단위 'a | b | c', 블록 요소는 줄바꿈.
+
+    병합된 칸(rowspan)은 아래 행에도 같은 값을 채워 넣는다 — 비서실 일정표처럼 날짜 칸이 여러 행에 걸쳐 병합돼
+    있으면 HTML 의 아래 행에는 날짜 칸 자체가 없어 열이 밀리고, AI 가 그 행의 날짜를 모르게 되기 때문.
+    가로 병합(colspan)은 값을 한 번만 쓰고 나머지 칸은 비운다. 표 안의 표는 바깥 칸의 글자로 넣는다."""
+    BLOCK = {'p', 'div', 'br', 'li', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'ul', 'ol'}
 
     def __init__(self):
         super().__init__(convert_charrefs=True)
-        self.out, self.row, self.cell, self.in_cell, self.skip = [], None, [], False, 0
+        self.out, self.tables, self.skip = [], [], 0
+
+    def _cell(self):
+        return self.tables[-1]['cell'] if self.tables else None
+
+    @staticmethod
+    def _span(attrs, name) -> int:
+        try:
+            return max(1, min(50, int(dict(attrs).get(name) or 1)))
+        except ValueError:
+            return 1
 
     def handle_starttag(self, tag, attrs):
         if tag in ('style', 'script', 'head'):
             self.skip += 1
-        elif tag == 'tr':
-            self.row = []
-        elif tag in ('td', 'th'):
-            self.in_cell, self.cell = True, []
-        elif tag == 'br' and self.in_cell:
-            self.cell.append(' / ')
-        elif tag in self.BLOCK and not self.in_cell:
+        elif tag == 'table':
+            self.tables.append({'rows': [], 'row': None, 'cell': None, 'span': (1, 1)})
+        elif tag == 'tr' and self.tables:
+            self.tables[-1]['row'] = []
+        elif tag in ('td', 'th') and self.tables:
+            t = self.tables[-1]
+            if t['row'] is None:  # <tr> 없이 바로 칸
+                t['row'] = []
+            t['cell'], t['span'] = [], (self._span(attrs, 'rowspan'), self._span(attrs, 'colspan'))
+        elif tag in ('br', 'p', 'div', 'li') and self._cell() is not None:
+            self._cell().append('\x1f')  # 칸 안 줄바꿈 — 나중에 ' / ' 로
+        elif tag in self.BLOCK:
             self.out.append('\n')
 
     def handle_endtag(self, tag):
         if tag in ('style', 'script', 'head'):
             self.skip = max(0, self.skip - 1)
-        elif tag in ('td', 'th'):
-            text = re.sub(r'\s+', ' ', ''.join(self.cell)).strip(' /')
-            if self.row is not None:
-                self.row.append(text)
-            self.in_cell = False
-        elif tag == 'tr':
-            if self.row and any(self.row):
-                self.out.append('\n' + ' | '.join(self.row) + '\n')
-            self.row = None
-        elif tag in self.BLOCK and not self.in_cell:
+        elif tag in ('td', 'th') and self.tables and self.tables[-1]['cell'] is not None:
+            t = self.tables[-1]
+            text = re.sub(r'[^\S\x1f]+', ' ', ''.join(t['cell'])).strip(' \x1f')
+            text = re.sub(r'\s*\x1f[\s\x1f]*', ' / ', text)
+            t['row'].append((text, *t['span']))
+            t['cell'] = None
+        elif tag == 'tr' and self.tables and self.tables[-1]['row'] is not None:
+            t = self.tables[-1]
+            t['rows'].append(t['row'])
+            t['row'] = None
+        elif tag == 'table' and self.tables:
+            t = self.tables.pop()
+            if t['row']:
+                t['rows'].append(t['row'])
+            lines = [' | '.join(r) for r in expand_spans(t['rows']) if any(r)]
+            outer = self._cell()
+            if outer is not None:
+                outer.append('\x1f'.join(lines))
+            else:
+                self.out.append('\n' + '\n'.join(lines) + '\n')
+        elif tag in self.BLOCK and self._cell() is None:
             self.out.append('\n')
 
     def handle_data(self, data):
         if self.skip:
             return
-        (self.cell if self.in_cell else self.out).append(data)
+        cell = self._cell()
+        (cell if cell is not None else self.out).append(data)
+
+
+def expand_spans(rows: list[list[tuple[str, int, int]]]) -> list[list[str]]:
+    """(글자, rowspan, colspan) 칸으로 된 행들 → 병합을 풀어 칸 위치가 맞는 표. 세로 병합은 아래 행에도 같은 값."""
+    grid, pending = [], {}  # 열 → [글자, 남은 행 수]
+    for row in rows:
+        out, col = [], 0
+
+        def fill():
+            nonlocal col
+            while col in pending:
+                text, left = pending[col]
+                out.append(text)
+                if left <= 1:
+                    del pending[col]
+                else:
+                    pending[col][1] = left - 1
+                col += 1
+
+        for text, rs, cs in row:
+            fill()
+            for k in range(cs):
+                out.append(text if k == 0 else '')
+                if rs > 1:
+                    pending[col + k] = [text if k == 0 else '', rs - 1]
+            col += cs
+        fill()
+        while pending and col <= max(pending):  # 행 끝 뒤쪽의 병합 칸
+            if col in pending:
+                fill()
+            else:
+                out.append('')
+                col += 1
+        grid.append(out)
+    return grid
 
 
 def html_to_text(html: str) -> str:
@@ -95,10 +161,13 @@ def _subject_of(text: str) -> str:
 
 
 def from_pasted(text: str) -> dict:
-    """붙여넣은 글 — HTML 로 붙었으면 표를 살려 글자로, 아니면 그대로."""
+    """붙여넣은 글 — HTML 로 붙었으면 표를 살려 글자로, 아니면 그대로(표에서 복사한 탭은 ' | ' 로)."""
     text = text or ''
     if re.search(r'<(table|tr|td|div|p|br)\b', text, re.I):
         text = html_to_text(text)
+    else:
+        text = '\n'.join(' | '.join(c.strip() for c in ln.split('\t')) if '\t' in ln else ln
+                         for ln in text.replace('\r\n', '\n').split('\n'))
     return {'name': _subject_of(text) or '붙여넣은 일정', 'mail_date': _header_date(text), 'text': text.strip()}
 
 
