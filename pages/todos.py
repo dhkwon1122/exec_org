@@ -5,7 +5,7 @@ import dash
 import dash_bootstrap_components as dbc
 from dash import Input, Output, callback, html
 
-from components import todo_ui
+from components import todo_ui, ui
 from services import auth, store
 
 dash.register_page(__name__, path='/todos', name='내 업무', title='업무 기록 · 내 업무')
@@ -13,6 +13,7 @@ dash.register_page(__name__, path='/todos', name='내 업무', title='업무 기
 
 def layout(**_):
     return html.Div([
+        ui.page_head('내 업무', '마감일별로 모아 보기'),
         dbc.Card(dbc.CardBody(todo_ui.add_form('tp')), className='mb-3'),
         html.Div([
             dbc.RadioItems(id='tp-scope', value='mine', inline=True, className='me-4',

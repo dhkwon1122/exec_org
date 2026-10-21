@@ -16,10 +16,10 @@ MAX_ITEMS = 3
 
 
 def layout(tab=None, **_):
-    return dbc.Tabs([
+    return html.Div([ui.page_head('캘린더'), dbc.Tabs([
         dbc.Tab(_work_layout(), label='업무 캘린더', tab_id='work', className='pt-3'),
         dbc.Tab(director_ui.layout(), label='원장님 일정', tab_id='director', className='pt-3'),
-    ], id='cal-tabs', active_tab='director' if tab == 'director' else 'work')
+    ], id='cal-tabs', active_tab='director' if tab == 'director' else 'work')])
 
 
 def _work_layout():

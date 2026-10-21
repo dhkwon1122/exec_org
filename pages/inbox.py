@@ -29,7 +29,7 @@ def layout(mail=None, **_):
         dcc.Store(id='ib-sel', data=mail),
         dcc.Store(id='ib-refresh', data=0),
         html.Div([
-            html.H4([html.I(className='bi bi-envelope me-2'), '받은 메일'], className='mb-0 me-3'),
+            html.H3('받은 메일', className='mb-0 me-3', style={'fontSize': '1.6rem', 'fontWeight': 750}),
             dbc.RadioItems(id='ib-filter', value='all' if mail else 'review', inline=True, className='d-flex',
                            inputClassName='btn-check', labelClassName='btn btn-sm btn-outline-secondary me-1',
                            labelCheckedClassName='active', options=[]),
