@@ -11,7 +11,7 @@ from datetime import date
 import dash_bootstrap_components as dbc
 from dash import ALL, Input, Output, State, callback, ctx, dash_table, dcc, html, no_update
 
-from services import absences, auth, store
+from services import absences, auth, outbox, store
 
 WEEKDAYS = ['월', '화', '수', '목', '금', '토', '일']
 KIND_COLOR = {'휴가': '#16a34a', '출장': '#2563eb', '해외출장': '#7c3aed', '교육': '#d97706', '외부 일정': '#db2777',
@@ -65,6 +65,8 @@ def layout():
                          className='ms-auto', style={'minWidth': '200px'}),
             dbc.Input(id='ab-q', type='search', debounce=True, placeholder='이름·장소·대결자 검색', size='sm',
                       style={'maxWidth': '200px'}),
+            dbc.Button([html.I(className='bi bi-send me-1'), '부재 현황 메일'], id='ab-mail', color='secondary',
+                       outline=True, size='sm', title='고른 날짜가 있는 주(월~일)의 부재 현황을 표로'),
             dbc.Button([html.I(className='bi bi-envelope-paper me-1'), '메일로 등록'], id='ab-imp-open',
                        color='secondary', outline=True, size='sm'),
             dbc.Button([html.I(className='bi bi-plus-lg me-1'), '부재 등록'], id='ab-add', color='primary', size='sm'),
@@ -353,3 +355,13 @@ def import_mail(_o, _c, _r, _a, text, mail_date, rows, n):
            + (f", 임원을 못 찾아 건너뜀 {r['unknown']}건" if r['unknown'] else ''))
     return nu, table_rows([x for x in rows or [] if x.get('person')]), nu, msg, True, \
         'success' if r['added'] else 'secondary', (n or 0) + 1
+
+
+@callback(Output('mail-draft', 'data', allow_duplicate=True), Input('ab-mail', 'n_clicks'), State('ab-day', 'data'),
+          prevent_initial_call=True)
+def mail_absences(n, day):
+    """고른 날짜가 있는 주(월~일)의 임원 부재 현황을 메일로."""
+    if not n:
+        return no_update
+    lo, hi = absences.week_of(date.fromisoformat(day))
+    return outbox.draft_absence(lo, hi)

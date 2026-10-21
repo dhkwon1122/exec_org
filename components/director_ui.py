@@ -11,7 +11,7 @@ from datetime import date, timedelta
 import dash_bootstrap_components as dbc
 from dash import ALL, Input, Output, State, callback, ctx, dash_table, dcc, html, no_update
 
-from services import auth, llm, mail_text, schedules, store
+from services import auth, llm, mail_text, outbox, schedules, store
 
 WEEKDAYS = ['월', '화', '수', '목', '금', '토', '일']
 HOUR_PX = 44
@@ -60,6 +60,8 @@ def layout():
                                     {'label': '목록', 'value': 'list'}]),
             dbc.Input(id='dr-q', type='search', debounce=True, placeholder='일정 검색 (제목·장소·참석자·내용)',
                       size='sm', className='ms-auto me-2', style={'maxWidth': '260px'}),
+            dbc.Button([html.I(className='bi bi-send me-1'), '메일 보내기'], id='dr-mail', color='secondary',
+                       outline=True, size='sm', className='me-2', title='지금 보고 있는 주(월 보기면 그달) 일정을 표로'),
             dbc.Button([html.I(className='bi bi-envelope-paper me-1'), '메일로 가져오기'], id='dr-imp-open',
                        color='secondary', outline=True, size='sm', className='me-2'),
             dbc.Button([html.I(className='bi bi-plus-lg me-1'), '일정 추가'], id='dr-add', color='primary', size='sm'),
@@ -542,3 +544,13 @@ def show_preview(sel, _list, shown):
                                style={'whiteSpace': 'pre-wrap', 'maxHeight': '30vh', 'overflowY': 'auto'})]),
     ], className='mb-2')
     return {}, head, rows, key
+
+
+@callback(Output('mail-draft', 'data', allow_duplicate=True), Input('dr-mail', 'n_clicks'),
+          State('dr-view', 'value'), State('dr-anchor', 'data'), prevent_initial_call=True)
+def mail_schedule(n, view, anchor):
+    """보고 있는 주(월·목록 보기면 그달 1일~말일)의 원장님 일정을 메일로."""
+    if not n:
+        return no_update
+    lo, hi = _range('week' if view == 'week' else 'list', date.fromisoformat(anchor))
+    return outbox.draft_schedule(lo.isoformat(), hi.isoformat())

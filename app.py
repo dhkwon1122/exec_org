@@ -21,6 +21,7 @@ from flask.sessions import SecureCookieSessionInterface
 import components.todo_ui  # noqa: F401  업무 체크/삭제 공용 콜백 등록
 from services import mailbox
 from components.history_actions import history_edit_modal  # 이력 수정·삭제 공용 콜백 등록
+from components.mail_ui import compose_modal  # 메일 보내기 창 (화면은 'mail-draft' 에 초안을 넣어 연다)
 from services import auth, doc_versions, store, users
 from services.db import DATA_DIR
 
@@ -276,6 +277,8 @@ def serve_layout():
         dcc.Store(id='todo-changed', data=0),  # 업무 체크/추가/삭제 시 증가 (components/todo_ui.py)
         dcc.Store(id='history-changed', data=0),  # 이력 수정/삭제 시 증가 (components/history_actions.py)
         history_edit_modal(),
+        dcc.Store(id='mail-draft'),
+        compose_modal(),
         html.Div([
             _sidebar(),
             html.Main(dbc.Container(dash.page_container, fluid=True), className='app-main'),

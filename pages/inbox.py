@@ -4,7 +4,7 @@ import dash_bootstrap_components as dbc
 from dash import ALL, Input, Output, State, callback, ctx, dash_table, dcc, html, no_update
 
 from components import absence_ui, doc_ui, ui
-from services import absences, auth, doc_versions, mailbox, schedules, store
+from services import absences, auth, doc_versions, mailbox, outbox, schedules, store
 
 dash.register_page(__name__, path='/inbox', name='받은 메일', title='업무 기록 · 받은 메일')
 
@@ -37,6 +37,8 @@ def layout(mail=None, **_):
             html.Div(id='ib-status', className='small text-muted ms-auto me-2'),
             dbc.Button([html.I(className='bi bi-arrow-repeat me-1'), '지금 가져오기'], id='ib-fetch', size='sm',
                        color='secondary', outline=True, className='me-2'),
+            dcc.Link(dbc.Button([html.I(className='bi bi-send me-1'), '보낸 메일'], size='sm', color='secondary',
+                                outline=True, className='me-2'), href='/outbox'),
             dbc.Button([html.I(className='bi bi-funnel me-1'), '분류 규칙'], id='ib-rules-open', size='sm',
                        color='secondary', outline=True),
         ], className='d-flex align-items-center flex-wrap gap-1 mb-3'),
@@ -130,6 +132,8 @@ def layout(mail=None, **_):
                                className='me-2'),
                     dbc.Button('무시', id='ib-ignore', color='secondary', outline=True, className='me-2'),
                     dbc.Button('다시 확인 필요로', id='ib-reopen', color='secondary', outline=True, className='me-2'),
+                    dbc.Button([html.I(className='bi bi-reply me-1'), '회신'], id='ib-reply', color='secondary',
+                               outline=True, className='me-2'),
                     dbc.Button([html.I(className='bi bi-funnel me-1'), '이 보낸 사람으로 규칙 만들기'], id='ib-mkrule',
                                color='link', size='sm'),
                 ]),
@@ -482,3 +486,12 @@ def rules(_o, _m, _a, _d, sel, field, pattern, action, auto, parent, name):
     elif isinstance(trig, dict):
         mailbox.delete_rule(trig['id'])
     return True, _rules_view(), _task_options(), '', False, pat_out, field_out, action_out
+
+
+@callback(Output('mail-draft', 'data', allow_duplicate=True), Input('ib-reply', 'n_clicks'), State('ib-sel', 'data'),
+          prevent_initial_call=True)
+def reply(n, sel):
+    """회신 — 받는 사람은 보낸 사람, 원문 인용, 원문 첨부를 골라 다시 보낼 수 있다."""
+    if not n or not sel:
+        return no_update
+    return outbox.draft_reply(sel)
