@@ -191,3 +191,18 @@ def test_import_page_path_wins_over_person_template():
     assert page['module'] == 'pages.people_import'
     page, vars_ = _path_to_page('people/3')
     assert page['module'] == 'pages.person' and vars_ == {'person_id': '3'}
+
+
+def test_excluded_columns_are_not_uploaded():
+    kim = _person('김영수', 'E001')
+    table = {'headers': ['사번', '25MBO', '24 임원종합평가', '취미', '입사일'],
+             'rows': [['E001', 'A', 'S', '등산', '1995-03-01']]}
+    targets = [x['target'] for x in excel_import.suggest_mapping(table['headers'], table['rows'], use_ai=False)]
+    final = excel_import.exclude_columns(targets, [True, True, False, False, True])
+    assert final == ['key:source_id', 'eval:MBO:2025', 'ignore', 'ignore', 'field:hire_date']
+    r = excel_import.run(table, final, apply=True)
+    assert '추가 항목 · 취미' not in r['changes'] and '평가 · 2024 임원종합평가' not in r['changes']
+    assert profile.evaluation_table(kim['id'])[1] == [{'year': 2025, 'MBO': 'A'}]  # 뺀 평가 열은 안 들어감
+    assert profile.list_attributes(kim['id']) == [] and '취미' not in profile.attribute_names()  # 새 항목도 안 생김
+    assert store.get_person(kim['id'])['hire_date'] == '1995-03-01'
+    assert excel_import.exclude_columns(['a', 'b'], None) == ['a', 'b']

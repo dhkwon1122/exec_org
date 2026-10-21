@@ -59,6 +59,8 @@ def _mapping_table(table: dict, mapping: list[dict]):
     for m in mapping:
         label, color = _SOURCE.get(m['source'], ('', 'light'))
         rows.append(html.Tr([
+            html.Td(dbc.Checkbox(id={'type': 'imp-use', 'index': m['index']}, value=m['target'] != 'ignore',
+                                 className='mb-0'), title='체크를 풀면 이 열은 올리지 않습니다'),
             html.Td(html.B(m['header'])),
             html.Td(', '.join(m['samples']) or '-', className='small text-muted', style={'maxWidth': '260px'}),
             html.Td(dcc.Dropdown(id={'type': 'imp-target', 'index': m['index']}, options=opts, value=m['target'],
@@ -66,9 +68,19 @@ def _mapping_table(table: dict, mapping: list[dict]):
             html.Td([dbc.Badge(label, color=color, className='me-1'), html.Span(m['reason'], className='small')]),
         ]))
     return html.Div([
-        html.Div(f"{len(table['rows'])}행 · {len(table['headers'])}열을 읽었습니다. 열마다 넣을 칸을 확인하세요.",
-                 className='small text-muted mb-1'),
-        dbc.Table([html.Thead(html.Tr([html.Th('엑셀 제목'), html.Th('예시 값'), html.Th('넣을 칸'), html.Th('판단')])),
+        html.Div(f"{len(table['rows'])}행 · {len(table['headers'])}열을 읽었습니다. 열마다 넣을 칸을 확인하고, "
+                 "올리지 않을 열은 왼쪽 체크를 푸세요.", className='small text-muted mb-1'),
+        html.Div([
+            dbc.Button('전체 선택', id='imp-use-all', size='sm', color='secondary', outline=True, className='me-1'),
+            dbc.Button('전체 해제', id='imp-use-none', size='sm', color='secondary', outline=True, className='me-1'),
+            dbc.Button('추가 항목 열만 해제', id='imp-use-noattr', size='sm', color='secondary', outline=True,
+                       className='me-1', title="기존 칸에 맞지 않아 '추가 항목'으로 새로 만들 열"),
+            dbc.Button('평가 열만 선택', id='imp-use-eval', size='sm', color='secondary', outline=True,
+                       className='me-2', title='사번·성명과 평가 열만 남기기'),
+            html.Span(id='imp-use-count', className='small text-muted'),
+        ], className='d-flex align-items-center flex-wrap gap-1 mb-2'),
+        dbc.Table([html.Thead(html.Tr([html.Th('올림'), html.Th('엑셀 제목'), html.Th('예시 값'), html.Th('넣을 칸'),
+                                       html.Th('판단')])),
                    html.Tbody(rows)], size='sm', hover=True, responsive=True, className='align-middle small'),
     ])
 
@@ -110,21 +122,52 @@ def _summary(r: dict, applied: bool):
 
 @callback(Output('imp-result', 'children', allow_duplicate=True), Output('imp-apply', 'disabled', allow_duplicate=True),
           Input('imp-preview', 'n_clicks'), Input('imp-apply', 'n_clicks'),
-          State('imp-table', 'data'), State({'type': 'imp-target', 'index': ALL}, 'value'), State('imp-create', 'value'),
+          State('imp-table', 'data'), State({'type': 'imp-target', 'index': ALL}, 'value'),
+          State({'type': 'imp-use', 'index': ALL}, 'value'), State('imp-create', 'value'),
           prevent_initial_call=True)
-def preview_or_apply(_p, _a, table, targets, create):
+def preview_or_apply(_p, _a, table, targets, use, create):
     if not table or ctx.triggered_id not in ('imp-preview', 'imp-apply') or not ctx.triggered[0]['value']:
         return no_update, no_update
     apply = ctx.triggered_id == 'imp-apply'
+    final = excel_import.exclude_columns(targets, use)
     try:
-        r = excel_import.run(table, list(targets), create_missing=bool(create), apply=apply, by=auth.current_name())
+        r = excel_import.run(table, final, create_missing=bool(create), apply=apply, by=auth.current_name())
     except excel_import.ImportError_ as e:
         return dbc.Alert(str(e), color='danger'), True
-    return _summary(r, apply), apply  # 반영 뒤에는 다시 미리보기해야 반영 가능
+    skipped = [h for h, t, u in zip(table['headers'], targets, use) if not u and t != 'ignore']
+    out = _summary(r, apply)
+    if skipped:
+        out.children.insert(1, html.Div('올리지 않은 열: ' + ', '.join(skipped), className='small text-muted'))
+    return out, apply  # 반영 뒤에는 다시 미리보기해야 반영 가능
 
 
 @callback(Output('imp-apply', 'disabled', allow_duplicate=True),
-          Input({'type': 'imp-target', 'index': ALL}, 'value'), Input('imp-create', 'value'),
-          prevent_initial_call=True)
+          Input({'type': 'imp-target', 'index': ALL}, 'value'), Input({'type': 'imp-use', 'index': ALL}, 'value'),
+          Input('imp-create', 'value'), prevent_initial_call=True)
 def mapping_changed(*_):
-    return True  # 매칭을 바꾸면 미리보기를 다시 해야 반영할 수 있다
+    return True  # 매칭이나 올릴 열을 바꾸면 미리보기를 다시 해야 반영할 수 있다
+
+
+@callback(Output({'type': 'imp-use', 'index': ALL}, 'value'),
+          Input('imp-use-all', 'n_clicks'), Input('imp-use-none', 'n_clicks'), Input('imp-use-noattr', 'n_clicks'),
+          Input('imp-use-eval', 'n_clicks'),
+          State({'type': 'imp-use', 'index': ALL}, 'value'), State({'type': 'imp-target', 'index': ALL}, 'value'),
+          prevent_initial_call=True)
+def bulk_select(_a, _n, _x, _e, use, targets):
+    trig = ctx.triggered_id
+    if not ctx.triggered or not ctx.triggered[0]['value']:
+        return [no_update] * len(use)
+    if trig == 'imp-use-all':
+        return [True] * len(use)
+    if trig == 'imp-use-none':
+        return [False] * len(use)
+    if trig == 'imp-use-noattr':
+        return [u and not str(t).startswith('attr:') for u, t in zip(use, targets)]
+    if trig == 'imp-use-eval':
+        return [str(t).startswith(('eval:', 'key:')) for t in targets]
+    return [no_update] * len(use)
+
+
+@callback(Output('imp-use-count', 'children'), Input({'type': 'imp-use', 'index': ALL}, 'value'))
+def count_used(use):
+    return f'{sum(bool(u) for u in use)} / {len(use)}열 올림' if use else ''

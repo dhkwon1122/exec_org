@@ -262,6 +262,12 @@ def _field_value(field: str, v: str) -> str:
     return v
 
 
+def exclude_columns(targets: list[str], use: list | None) -> list[str]:
+    """체크를 푼 열(use 가 거짓)은 '무시'로 — 그 열의 값은 읽지도 바꾸지도 않는다."""
+    use = list(use or [])
+    return [t if (i >= len(use) or use[i]) else 'ignore' for i, t in enumerate(targets)]
+
+
 def run(table: dict, targets: list[str], create_missing: bool = False, apply: bool = False,
         by: str = '') -> dict:
     """apply=False 면 미리보기(DB 변경 없음), True 면 반영. 결과 요약을 돌려준다."""
