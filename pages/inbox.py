@@ -46,7 +46,8 @@ def layout(**_):
                         dbc.Col(dcc.Dropdown(id='ib-parent', placeholder='상위 업무 (비우면 최상위 업무)'), md=8),
                         dbc.Col(dbc.Button([html.I(className='bi bi-plus me-1'), '줄 추가'], id='ib-task-add',
                                            size='sm', color='secondary', outline=True), md=4),
-                    ], className='g-2 mb-2'),
+                    ], className='g-2 mb-1'),
+                    html.Div(id='ib-parent-hint', className='small mb-2'),
                     dash_table.DataTable(id='ib-tasks', editable=True, row_deletable=True, data=[],
                                          columns=[{'name': '업무', 'id': 'title'}, {'name': '기한(YYYY-MM-DD)', 'id': 'due'},
                                                   {'name': '담당', 'id': 'assignee'}],
@@ -153,14 +154,14 @@ def pick(_):
           Output('ib-parent', 'options'), Output('ib-parent', 'value'), Output('ib-sched-box', 'style'),
           Output('ib-sched', 'data'), Output('ib-sched-note', 'children'), Output('ib-actions', 'style'),
           Output('ib-apply', 'style'), Output('ib-ignore', 'style'), Output('ib-reopen', 'style'),
-          Output('ib-body', 'children'), Output('ib-body-box', 'style'),
+          Output('ib-body', 'children'), Output('ib-body-box', 'style'), Output('ib-parent-hint', 'children'),
           Input('ib-sel', 'data'), Input('ib-refresh', 'data'))
 def render_detail(sel, _):
     hide, show = {'display': 'none'}, {}
     m = mailbox.get_mail(sel) if sel else None
     if m is None:
         return (html.Div('왼쪽에서 메일을 고르세요.', className='text-muted small'), hide, [], [], None, hide, [], '',
-                hide, hide, hide, hide, '', hide)
+                hide, hide, hide, hide, '', hide, None)
     open_ = m['status'] in ('review', 'failed')
     kind = KIND.get(m['kind'])
     links = [dcc.Link(f'#{tid}', href=f'/task/{tid}', className='me-2') for tid in m['task_ids']]
@@ -191,11 +192,40 @@ def render_detail(sel, _):
         elif imp:
             note = f"일정 정리 실패: {imp['error']}"
     show_sched = bool(m['schedule_import_id']) and (open_ or bool(sched_rows))
-    parent = m['suggestion'].get('parent_task_id')
+    sug = m['suggestion']
+    parent = sug.get('parent_task_id')
     return (head, show if (open_ and wants_task) else hide, tasks, _task_options(), parent,
             show if show_sched else hide, sched_rows, note, show,
             show if open_ else hide, show if open_ else hide, hide if open_ else show,
-            m['body'], show)
+            m['body'], show, _parent_hint(sug))
+
+
+def _parent_hint(sug: dict):
+    """상위 업무 추천 근거와 다른 후보 — 후보를 누르면 위 칸이 바뀐다."""
+    cands = sug.get('parent_candidates') or []
+    pid = sug.get('parent_task_id')
+    if not cands and not pid:
+        return html.Span('추천할 상위 업무가 없습니다 — 비워 두면 최상위 업무로 만듭니다.', className='text-muted')
+    head = [html.I(className='bi bi-stars me-1 text-warning'),
+            html.Span(f"추천: {next((c['title'] for c in cands if c['id'] == pid), '')}" if pid else '뚜렷한 추천 없음',
+                      className='fw-semibold me-1'),
+            html.Span(f"({sug.get('parent_reason')})" if sug.get('parent_reason') else '', className='text-muted')]
+    others = [c for c in cands if c['id'] != pid]
+    return html.Div([
+        html.Div(head),
+        html.Div([html.Span('다른 후보: ', className='text-muted me-1')] + [
+            dbc.Button(f"#{c['id']} {c['title'][:30]}", id={'type': 'ib-pc', 'id': c['id']}, size='sm', color='light',
+                       className='border me-1 mb-1 py-0', title=f"겹치는 낱말: {', '.join(c['hits'])}" if c['hits'] else None)
+            for c in others]) if others else None,
+    ])
+
+
+@callback(Output('ib-parent', 'value', allow_duplicate=True), Input({'type': 'ib-pc', 'id': ALL}, 'n_clicks'),
+          prevent_initial_call=True)
+def pick_candidate(_):
+    if not isinstance(ctx.triggered_id, dict) or not ctx.triggered[0]['value']:
+        return no_update
+    return ctx.triggered_id['id']
 
 
 @callback(Output('ib-tasks', 'data', allow_duplicate=True), Input('ib-task-add', 'n_clicks'),

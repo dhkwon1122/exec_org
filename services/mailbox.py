@@ -14,6 +14,7 @@ import json
 import logging
 import os
 import poplib
+import re
 import threading
 import time
 from datetime import date, datetime, timedelta
@@ -210,6 +211,101 @@ def task_candidates(subject: str, mail_date: str, body: str) -> list[dict]:
     return [{'title': subject[:300] or '메일 확인', 'due': '', 'assignee': ''}]
 
 
+# ── 상위 업무 추천 ────────────────────────────────────────────────────
+# 메일에 업무가 있으면 어느 업무 아래에 둘지 추천한다.
+#   1) 같은 메일 스레드(RE:/FW:)로 전에 만든 업무가 있으면 그 업무의 상위 업무 (가장 확실)
+#   2) 진행 중인 업무의 제목·태그·설명·기록 키워드가 메일 제목/본문에 얼마나 나오는지 점수
+#   3) LLM 이 있으면 점수 상위 후보 중에서 AI 가 고른다 (근거 포함)
+_SUBJ_PREFIX = re.compile(r'^\s*((re|fw|fwd|회신|전달|답장)\s*[:：]\s*|\[[^\]]{0,20}\]\s*)+', re.I)
+_STOP = {'요청', '관련', '자료', '회신', '검토', '부탁', '드립니다', '합니다', '안내', '공유', '확인', '송부', '제출', '건의',
+         '업무', '진행', '보고', '협조', '문의', '전달', '참고', '사항', '내용', '일정', '회의', '이번', '다음', '해당', '대한'}
+
+
+def norm_subject(subject: str) -> str:
+    return re.sub(r'\s+', ' ', _SUBJ_PREFIX.sub('', subject or '')).strip().lower()
+
+
+def _tokens(text: str) -> set[str]:
+    return {t.lower() for t in re.findall(r'[가-힣A-Za-z0-9]{2,}', text or '') if t not in _STOP and not t.isdigit()}
+
+
+def _thread_parent(subject: str, exclude_id: int | None = None) -> tuple[int | None, str]:
+    """같은 제목(RE:/FW: 등 머리 뺀)의 이전 메일로 만든 업무 → 그 상위 업무(없으면 그 업무)."""
+    key = norm_subject(subject)
+    if not key:
+        return None, ''
+    with db.SessionLocal() as s:
+        rows = list(s.scalars(select(InboundMail).where(InboundMail.task_ids != '', InboundMail.task_ids.is_not(None))
+                              .order_by(InboundMail.id.desc())))
+    for m in rows:
+        if m.id == exclude_id or norm_subject(m.subject) != key:
+            continue
+        t = store.get_task(int(m.task_ids.split(',')[0]))
+        if t is None:
+            continue
+        return t['parent_id'] or t['id'], f"같은 메일 스레드 — 이전 메일 '{m.subject[:40]}'의 업무"
+    return None, ''
+
+
+def _scored_candidates(subject: str, body: str, limit: int = 15) -> list[dict]:
+    """진행 중인 업무별 점수 — 업무의 낱말이 메일 제목에 나오면 3배, 업무 제목의 낱말이면 2배, 긴 낱말일수록 더."""
+    subj, text = (subject or '').lower(), f'{subject}\n{body}'.lower()
+    out = []
+    for t in store.list_tasks(status=['예정', '진행중', '보류']):
+        title_toks = _tokens(t['title'])
+        extra = _tokens(' '.join(t['tags']) + ' ' + t['description'][:300])
+        for k, _ in store.keyword_stats(10, task_id=t['id']):
+            extra |= _tokens(k)
+        score, hits = 0.0, []
+        for tok in title_toks | extra:
+            if tok in text:
+                score += (3 if tok in subj else 1) * min(len(tok), 6) / 2 * (2 if tok in title_toks else 1)
+                hits.append(tok)
+        if score:
+            out.append({'id': t['id'], 'title': t['title'], 'score': round(score, 1), 'hits': sorted(hits)[:6]})
+    return sorted(out, key=lambda c: -c['score'])[:limit]
+
+
+PARENT_SYSTEM = """너는 업무 담당자의 비서다. 받은 메일에서 나온 할 일을 기존 업무 중 어디 아래(하위 업무)에 둘지 고른다.
+목록에서 메일 주제와 가장 직접 관련된 업무 하나를 고르고, 마땅한 게 없으면 null.
+반드시 JSON 만 출력: {"parent_id": 12 또는 null, "reason": "한 줄 근거"}"""
+
+
+def ai_pick_parent(subject: str, body: str, tasks: list[dict], cands: list[dict]) -> tuple[int | None, str]:
+    lines = '\n'.join(f"[{c['id']}] {c['title']}" for c in cands)
+    todo = '\n'.join(f"- {t['title']}" for t in tasks) or '-'
+    raw = llm.chat(PARENT_SYSTEM, f'메일 제목: {subject}\n메일에서 나온 할 일:\n{todo}\n\n메일 본문(앞부분):\n'
+                                  f'{body[:3000]}\n\n업무 목록:\n{lines}')
+    data = llm._extract_json(raw)
+    try:
+        pid = int(data.get('parent_id')) if data.get('parent_id') not in (None, '', 'null') else None
+    except (TypeError, ValueError):
+        pid = None
+    if pid is not None and pid not in {c['id'] for c in cands}:
+        pid = None  # 목록에 없는 번호는 버림
+    return pid, str(data.get('reason') or '')[:200]
+
+
+def suggest_parent(subject: str, body: str, tasks: list[dict], exclude_id: int | None = None) -> dict:
+    """→ {'parent_task_id', 'parent_reason', 'parent_candidates': [{id,title,score,hits}]}. 추천이 없으면 id None."""
+    cands = _scored_candidates(subject, body)
+    pid, why = _thread_parent(subject, exclude_id)
+    if pid is None and cands and llm.is_configured():
+        try:
+            pid, why = ai_pick_parent(subject, body, tasks, cands)
+            why = f'AI: {why}' if pid else ''
+        except Exception:  # noqa: BLE001
+            pid, why = None, ''
+    if pid is None and cands and cands[0]['score'] >= 4 and (
+            len(cands) == 1 or cands[0]['score'] >= cands[1]['score'] * 1.5):  # 뚜렷이 앞선 후보만
+        pid, why = cands[0]['id'], f"메일에 업무 낱말이 나옴: {', '.join(cands[0]['hits'])}"
+    if pid is not None and pid not in {c['id'] for c in cands}:
+        t = store.get_task(pid)
+        if t:
+            cands.insert(0, {'id': pid, 'title': t['title'], 'score': 0, 'hits': []})
+    return {'parent_task_id': pid, 'parent_reason': why, 'parent_candidates': cands[:4]}
+
+
 # ── 반영 ──────────────────────────────────────────────────────────────
 
 def _make_schedule_import(m: dict) -> int:
@@ -251,7 +347,10 @@ def process(mail_id: int) -> None:
         except Exception as e:  # noqa: BLE001
             c = {**guess(m['subject'], m['mail_date'], m['body']), 'reason': f'AI 분류 실패({str(e)[:100]}) — 추정'}
         iid = _make_schedule_import(m) if c['kind'] in ('schedule', 'both') else None
-        _update(mail_id, status='review', kind=c['kind'], reason=c['reason'], suggestion={'tasks': c['tasks']},
+        sug = {'tasks': c['tasks']}
+        if c['kind'] in ('task', 'both') and c['tasks']:
+            sug.update(suggest_parent(m['subject'], m['body'], c['tasks'], mail_id))
+        _update(mail_id, status='review', kind=c['kind'], reason=c['reason'], suggestion=sug,
                 schedule_import_id=iid)
     except Exception as e:  # noqa: BLE001
         log.exception('메일 처리 실패 %s', mail_id)
@@ -277,14 +376,20 @@ def _apply_rule(m: dict, rule: dict) -> None:
                     reason=reason + ('' if imp['status'] == 'done' else f" — 일정 정리 실패: {imp['error']}"))
         return
     tasks = task_candidates(m['subject'], m['mail_date'], m['body'])
+    sug = {'tasks': tasks}
+    if not rule['parent_task_id']:  # 규칙에 상위 업무가 없으면 추천 (자동 반영은 같은 스레드일 때만 그대로 씀)
+        sug.update(suggest_parent(m['subject'], m['body'], tasks, m['id']))
     if rule['auto']:
-        ids = create_tasks(m, tasks, rule['parent_task_id'], MAIL_AUTHOR)
+        thread = sug.get('parent_reason', '').startswith('같은 메일 스레드')
+        ids = create_tasks(m, tasks, rule['parent_task_id'] or (sug.get('parent_task_id') if thread else None),
+                           MAIL_AUTHOR)
         _update(m['id'], status='auto', kind='task', rule_id=rule['id'], reason=f'{reason} — 업무 {len(ids)}건',
-                suggestion={'tasks': tasks}, task_ids=','.join(map(str, ids)),
+                suggestion=sug, task_ids=','.join(map(str, ids)),
                 handled_at=datetime.now().replace(microsecond=0), handled_by=MAIL_AUTHOR)
     else:
-        _update(m['id'], status='review', kind='task', rule_id=rule['id'], reason=reason,
-                suggestion={'tasks': tasks, 'parent_task_id': rule['parent_task_id']})
+        if rule['parent_task_id']:
+            sug['parent_task_id'] = rule['parent_task_id']
+        _update(m['id'], status='review', kind='task', rule_id=rule['id'], reason=reason, suggestion=sug)
 
 
 def apply_review(mail_id: int, tasks: list[dict], parent_id: int | None, schedule_rows: list[dict] | None,
