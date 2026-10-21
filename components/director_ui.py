@@ -75,8 +75,8 @@ def layout():
         dbc.Modal([
             dbc.ModalHeader(dbc.ModalTitle('비서실 메일로 일정 가져오기')),
             dbc.ModalBody([
-                html.Div(['메일 본문을 그대로 붙여넣거나(표 포함, 보낸 날짜·제목 줄도 같이 붙이면 연도·요일 판단이 정확해집니다), '
-                          '메일 파일(.msg .eml .html .txt)을 여러 개 올리세요. ',
+                html.Div(['비서실 메일 파일(.eml)을 여러 개 한꺼번에 올리거나, 메일 본문을 그대로 붙여넣으세요(표 포함, 보낸 날짜·제목 '
+                          '줄도 같이 붙이면 연도·요일 판단이 정확해집니다). .msg .html .txt 도 됩니다. ',
                           'AI 가 일정으로 정리하면 확인한 뒤 반영합니다.' if llm.is_configured() else
                           'LLM 이 설정되지 않아 날짜·시간이 보이는 줄만 규칙으로 읽습니다.'],
                          className='small text-muted mb-2'),
@@ -86,8 +86,9 @@ def layout():
                     dbc.Col(html.Div('메일 보낸 날짜 (비우면 본문에서 찾음)', className='small text-muted'), md=8,
                             className='d-flex align-items-center'),
                 ], className='g-2 my-2'),
-                dcc.Upload(id='dr-imp-files', multiple=True, children=html.Div(
-                    [html.I(className='bi bi-upload me-2'), '메일 파일 끌어 놓기 / 선택 (여러 개 가능)']),
+                dcc.Upload(id='dr-imp-files', multiple=True, accept='.eml,.msg,.html,.htm,.txt', children=html.Div(
+                    [html.I(className='bi bi-upload me-2'), '메일 파일(.eml) 끌어 놓기 / 선택 — 여러 개 가능 ',
+                     html.Span('(첨부가 큰 메일이 많으면 나눠서)', className='text-muted')]),
                     className='border rounded text-center p-3 text-muted small mb-2',
                     style={'borderStyle': 'dashed', 'cursor': 'pointer'}),
                 html.Div([

@@ -102,17 +102,38 @@ def from_pasted(text: str) -> dict:
     return {'name': _subject_of(text) or '붙여넣은 일정', 'mail_date': _header_date(text), 'text': text.strip()}
 
 
+# 국내 메일이 흔히 다는 EUC-KR 계열 이름 — 실제로는 확장 한글(똠·햏 등)까지 들어 있어 cp949 로 읽어야 깨지지 않는다
+_KOREAN_CHARSETS = {'ks_c_5601-1987', 'ks_c_5601', 'ksc5601', 'euc-kr', 'euc_kr', 'euckr', 'ks_c_5601-1989', 'x-windows-949'}
+
+
+def _part_text(part) -> str:
+    raw = part.get_payload(decode=True) or b''
+    charset = (part.get_content_charset() or '').lower()
+    for enc in (('cp949',) if charset in _KOREAN_CHARSETS else (charset,) if charset else ()) + ('utf-8', 'cp949'):
+        try:
+            return raw.decode(enc)
+        except (LookupError, UnicodeDecodeError):
+            continue
+    return raw.decode('utf-8', errors='replace')
+
+
 def _eml(data: bytes) -> dict:
     msg = email.message_from_bytes(data, policy=email.policy.default)
     html_part = msg.get_body(preferencelist=('html',))
     plain_part = msg.get_body(preferencelist=('plain',))
     if html_part is not None:
-        body = html_to_text(html_part.get_content())
+        body = html_to_text(_part_text(html_part))
     elif plain_part is not None:
-        body = plain_part.get_content()
+        body = _part_text(plain_part)
     else:
         body = ''
-    return {'name': str(msg.get('subject') or ''), 'mail_date': _date_of(msg.get('date')), 'text': body.strip()}
+    body = body.replace('\r\n', '\n').strip()
+    try:
+        subject = str(msg.get('subject') or '')
+    except Exception:  # noqa: BLE001 — 깨진 머리글
+        subject = ''
+    # Date 머리가 없으면(저장 방식에 따라) 본문에 붙은 '보낸 날짜:' 줄로
+    return {'name': subject, 'mail_date': _date_of(msg.get('date')) or _header_date(body), 'text': body}
 
 
 def _msg(data: bytes) -> dict:

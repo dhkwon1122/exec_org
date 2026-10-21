@@ -126,3 +126,25 @@ def test_manual_save_search_and_lanes():
     assert [(e['title'], lane, n) for e, lane, n in lanes] == [('회의 A (변경)', 0, 2), ('면담 B', 1, 2), ('보고 C', 0, 1)]
     schedules.delete(a['id'])
     assert len(schedules.list_range('2026-10-01', '2026-10-31')) == 2
+
+
+def _korean_eml(charset: str, with_date: bool = True) -> str:
+    html = '<table><tr><td>10/27(월)</td><td>09:00~10:00</td><td>똠양꿍 오찬</td><td>본관</td></tr></table>'
+    b64 = lambda t: base64.b64encode(t.encode('cp949')).decode()  # noqa: E731
+    head = (f'Subject: =?{charset}?B?{b64("원장님 주간 일정")}?=\n'
+            + ('Date: Fri, 23 Oct 2026 17:10:00 +0900\n' if with_date else '')
+            + 'MIME-Version: 1.0\nContent-Type: multipart/alternative; boundary="b1"\n\n')
+    body = (f'--b1\nContent-Type: text/plain; charset="{charset}"\nContent-Transfer-Encoding: base64\n\n'
+            f'{b64("보낸 날짜: 2026년 10월 22일 목요일")}\n'
+            f'--b1\nContent-Type: text/html; charset="{charset}"\nContent-Transfer-Encoding: base64\n\n'
+            f'{b64(html)}\n--b1--\n')
+    return 'data:message/rfc822;base64,' + base64.b64encode((head + body).encode()).decode()
+
+
+@pytest.mark.parametrize('charset', ['ks_c_5601-1987', 'euc-kr'])
+def test_korean_corporate_eml(charset):
+    m = mail_text.from_upload(_korean_eml(charset), '원장님일정.eml')
+    assert m['name'] == '원장님 주간 일정' and m['mail_date'] == '2026-10-23'
+    assert '10/27(월) | 09:00~10:00 | 똠양꿍 오찬 | 본관' in m['text']  # euc-kr 이라고 적힌 cp949 확장 한글도
+    ev = schedules.rule_parse(m['text'], m['mail_date'])
+    assert [(e['date'], e['title']) for e in ev] == [('2026-10-27', '똠양꿍 오찬')]
