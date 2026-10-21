@@ -164,10 +164,8 @@ def add_suggested_todo(_, n, hn):
     sug = h['ai_todos'][trig['idx']]
     if sug['title'] in store.todo_titles_for_history(h['id']):
         return no_update, no_update
-    # 제안의 담당자 이름이 접속 가능한 사용자 이름과 같으면 그 사람으로 지정
-    match = next((o for o in todo_ui.member_options() if sug['assignee'] and o['label'] == sug['assignee']), None)
+    # 제안의 담당자(쉼표로 여러 명) 중 접속 가능한 사용자 이름과 같은 사람은 그 사용자로 지정
     store.create_todo(sug['title'], task_id=trig.get('task') or h['task_id'], due_date=sug['due'],
-                      assignee_id=match['value'] if match else '',
-                      assignee_name=match['label'] if match else sug['assignee'], created_by=auth.current_name(),
+                      assignees=todo_ui.assignees_from([], sug['assignee']), created_by=auth.current_name(),
                       source_history_id=h['id'])
     return (n or 0) + 1, (hn or 0) + 1

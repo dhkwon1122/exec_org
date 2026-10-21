@@ -54,7 +54,7 @@ def layout(mail=None, **_):
                     html.Div(id='ib-parent-hint', className='small mb-2'),
                     dash_table.DataTable(id='ib-tasks', editable=True, row_deletable=True, data=[],
                                          columns=[{'name': '업무', 'id': 'title'}, {'name': '기한(YYYY-MM-DD)', 'id': 'due'},
-                                                  {'name': '담당', 'id': 'assignee'}],
+                                                  {'name': '담당 (쉼표로 여러 명)', 'id': 'assignee'}],
                                          style_cell=cell),
                     html.Div('메일 원문은 만든 업무마다 "요청" 기록으로 남습니다. 만들지 않을 줄은 × 로 지우세요.',
                              className='small text-muted mt-1'),
@@ -67,7 +67,8 @@ def layout(mail=None, **_):
                                                   {'name': '날짜', 'id': 'date'}, {'name': '시작', 'id': 'start_time'},
                                                   {'name': '종료', 'id': 'end_time'}, {'name': '일정', 'id': 'title'},
                                                   {'name': '장소', 'id': 'location'},
-                                                  {'name': '참석자', 'id': 'attendees'}, {'name': '세부', 'id': 'details'}],
+                                                  {'name': '참석자', 'id': 'attendees'}, {'name': '세부', 'id': 'details'},
+                                                  {'name': '검증', 'id': 'note', 'editable': False}],
                                          style_table={'overflowX': 'auto'}, style_cell={**cell, 'fontSize': '0.8rem'}),
                 ]),
                 html.Div(id='ib-actions', className='mt-3', style={'display': 'none'}, children=[
@@ -189,8 +190,8 @@ def render_detail(sel, _):
         if imp and imp['status'] == 'done':
             sched_rows = schedules.preview(imp['events'])
             for r in sched_rows:
-                r['state_label'] = {'new': '신규', 'changed': '변경', 'same': '동일'}[r['state']] + (
-                    f" ({', '.join(r['changed'])})" if r['changed'] else '')
+                r['state_label'] = {'new': '신규', 'changed': '변경', 'same': '동일', 'check': '확인 필요'}[r['state']] + (
+                    f" ({', '.join(schedules.LABELS[f] for f in r['changed'])})" if r['changed'] else '')
                 r['changed'] = ', '.join(r['changed'])
             note = imp['error'] or ''
         elif imp:

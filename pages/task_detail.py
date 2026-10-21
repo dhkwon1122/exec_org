@@ -24,7 +24,7 @@ def _edit_modal():
             dbc.Label('제목'), dbc.Input(id='ed-title', className='mb-2'),
             dbc.Label('설명'), dbc.Textarea(id='ed-desc', rows=5, className='mb-2'),
             dbc.Row([
-                dbc.Col([dbc.Label('담당자'), dbc.Input(id='ed-owner')]),
+                dbc.Col([dbc.Label('담당자'), todo_ui.assignee_picker('ed')]),
                 dbc.Col([dbc.Label('태그 (쉼표 구분)'), dbc.Input(id='ed-tags')]),
             ], className='mb-2'),
             dbc.Row([
@@ -202,7 +202,7 @@ def render(_, _t, _h, tid):
 
     side = [
         dbc.Card(dbc.CardBody(html.Table([html.Tbody([
-            row('담당자', t['owner']), row('시작일', t['start_date']), row('마감일', t['due_date']),
+            row('담당자', todo_ui.assignee_names(t)), row('시작일', t['start_date']), row('마감일', t['due_date']),
             row('상위 업무', ui.task_link(parent) if parent else None),
             row('등록', t['created_at']), row('최종 수정', t['updated_at']),
         ])], className='table table-sm mb-0')), className='mb-3'),
@@ -266,7 +266,7 @@ def render(_, _t, _h, tid):
     todo_view = todo_ui.todo_list(todos, show_task=False,
                                   empty='하위 업무가 없습니다 — 위에 적고 Enter. 마감·담당을 정하면 "내 업무"와 캘린더에 나옵니다.')
     return (header, side, history, ref_view, link_view, targets, pending, not pending,
-            todo_view, f'하위 업무 ({n_done}/{len(todos)})' if todos else '하위 업무', todo_ui.member_options())
+            todo_view, f'하위 업무 ({n_done}/{len(todos)})' if todos else '하위 업무', todo_ui.assignee_options())
 
 
 todo_ui.register_add_callback('tt', task_id_store='td-id')
@@ -299,40 +299,44 @@ def change_status(status, tid, n):
 # ── 업무 수정/삭제 ─────────────────────────────────────────────────────
 
 @callback(Output('ed-modal', 'is_open'), Output('ed-title', 'value'), Output('ed-desc', 'value'),
-          Output('ed-owner', 'value'), Output('ed-tags', 'value'), Output('ed-start', 'value'),
+          Output('ed-assignees', 'value'), Output('ed-tags', 'value'), Output('ed-start', 'value'),
           Output('ed-due', 'value'), Output('ed-parent', 'value'), Output('ed-parent', 'options'),
           Output('ed-error', 'children'), Output('ed-error', 'is_open'),
           Output('td-refresh', 'data', allow_duplicate=True), Output('td-redirect', 'pathname'),
+          Output('ed-assignees', 'options'), Output('ed-assignee-extra', 'value'),
           Input('ed-open', 'n_clicks'), Input('ed-cancel', 'n_clicks'), Input('ed-save', 'n_clicks'),
           Input('ed-delete', 'n_clicks'),
           State('td-id', 'data'), State('ed-title', 'value'), State('ed-desc', 'value'),
-          State('ed-owner', 'value'), State('ed-tags', 'value'), State('ed-start', 'value'),
-          State('ed-due', 'value'), State('ed-parent', 'value'), 
+          State('ed-assignees', 'value'), State('ed-assignee-extra', 'value'), State('ed-tags', 'value'),
+          State('ed-start', 'value'), State('ed-due', 'value'), State('ed-parent', 'value'),
           State('td-refresh', 'data'), prevent_initial_call=True)
-def edit_task(n_open, _c, _s, _d, tid, title, desc, owner, tags, start, due, parent, n):
+def edit_task(n_open, _c, _s, _d, tid, title, desc, assignees, extra, tags, start, due, parent, n):
     author = auth.current_name()
     nu = no_update
     trig = ctx.triggered_id
     if trig not in ('ed-open', 'ed-cancel', 'ed-save', 'ed-delete'):
-        return (nu,) * 13
+        return (nu,) * 15
     if trig == 'ed-open':
         if not n_open:  # 헤더가 다시 그려지며 버튼이 새로 생길 때의 빈 트리거
-            return (nu,) * 13
+            return (nu,) * 15
         t = store.get_task(tid)
         opts = [{'label': f"#{o['id']} {o['title']}", 'value': o['id']} for o in store.list_tasks() if o['id'] != tid]
-        return (True, t['title'], t['description'], t['owner'], ', '.join(t['tags']), t['start_date'] or None,
-                t['due_date'] or None, t['parent_id'], opts, '', False, nu, nu)
+        return (True, t['title'], t['description'], todo_ui.assignee_values(t['assignees']), ', '.join(t['tags']),
+                t['start_date'] or None, t['due_date'] or None, t['parent_id'], opts, '', False, nu, nu,
+                todo_ui.assignee_options(t['assignees']), '')
     if trig == 'ed-cancel':
-        return (False,) + (nu,) * 8 + ('', False, nu, nu)
+        return (False,) + (nu,) * 8 + ('', False, nu, nu, nu, nu)
     if trig == 'ed-delete':
         store.delete_task(tid)
-        return (False,) + (nu,) * 8 + ('', False, nu, '/')
+        return (False,) + (nu,) * 8 + ('', False, nu, '/', nu, nu)
     try:
-        store.update_task(tid, author=author or '', title=title, description=desc or '', owner=owner or '',
+        current = store.get_task(tid)['assignees']
+        store.update_task(tid, author=author or '', title=title, description=desc or '',
+                          assignees=todo_ui.assignees_from(assignees, extra, current),
                           tags=tags or '', start_date=start or '', due_date=due or '', parent_id=parent)
     except ValueError as e:
-        return (True,) + (nu,) * 8 + (str(e), True, nu, nu)
-    return (False,) + (nu,) * 8 + ('', False, (n or 0) + 1, nu)
+        return (True,) + (nu,) * 8 + (str(e), True, nu, nu, nu, nu)
+    return (False,) + (nu,) * 8 + ('', False, (n or 0) + 1, nu, nu, nu)
 
 
 # ── 이력 ─────────────────────────────────────────────────────────────

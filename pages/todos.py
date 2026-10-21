@@ -65,4 +65,4 @@ def render(scope, show_done, _):
     task_opts = [{'label': f"#{t['id']} {t['title']}", 'value': t['id']}
                  for t in store.list_tasks(status=['예정', '진행중', '보류'])]
     # 새 업무의 담당자 기본값은 나
-    return sections, todo_ui.member_options(), task_opts, me or None
+    return sections, todo_ui.assignee_options(), task_opts, [f'u:{me}'] if me else []

@@ -74,6 +74,19 @@ class Task(Base):
                            passive_deletes=True)
     references = relationship('Reference', back_populates='task', cascade='all, delete-orphan',
                               passive_deletes=True)
+    assignee_rows = relationship('TaskAssignee', order_by='TaskAssignee.pos', cascade='all, delete-orphan',
+                                 passive_deletes=True, lazy='selectin')
+
+
+class TaskAssignee(Base):
+    """업무 담당자 (여러 명). user_id 는 접속 가능한 사용자면 그 id, 이름만 적은 담당자면 ''.
+    tasks.owner / tasks.assignee_id 에는 화면·예전 코드용으로 이름을 이은 글과 첫 user_id 를 같이 둔다."""
+    __tablename__ = 'task_assignees'
+
+    task_id = Column(Integer, ForeignKey('tasks.id', ondelete='CASCADE'), primary_key=True)
+    name = Column(String(100), primary_key=True)
+    user_id = Column(String(100), default='', index=True)
+    pos = Column(Integer, default=0)
 
 
 class HistoryEntry(Base):
@@ -355,6 +368,7 @@ def make_engine(url: str | None = None):
             _add_missing_columns(engine)
             _relax_not_null(engine)
             _merge_todos_into_tasks(engine)
+            _backfill_assignees(engine)
             break
         except Exception:  # noqa: BLE001
             if attempt == 4:
@@ -382,6 +396,21 @@ def _add_missing_columns(engine):
                     default = ''
                 conn.execute(text(f'ALTER TABLE {table.name} ADD COLUMN {col.name} {coltype}{default}'))
 
+
+
+def _backfill_assignees(engine):
+    """담당자를 여러 명 둘 수 있게 되기 전의 업무 — owner(이름)·assignee_id 를 task_assignees 로 옮긴다.
+    담당자 행이 하나도 없는 업무만 채우므로 여러 번 돌아도 같다."""
+    import re
+    with engine.begin() as conn:
+        rows = conn.execute(text(
+            "SELECT id, owner, assignee_id FROM tasks WHERE owner IS NOT NULL AND owner <> '' "
+            "AND id NOT IN (SELECT task_id FROM task_assignees)")).all()
+        for tid, owner, uid in rows:
+            names = list(dict.fromkeys(n.strip() for n in re.split(r'[,/;]', owner) if n.strip()))
+            for i, name in enumerate(names):
+                conn.execute(TaskAssignee.__table__.insert().values(
+                    task_id=tid, name=name[:100], user_id=(uid or '') if i == 0 else '', pos=i))
 
 
 def _merge_todos_into_tasks(engine):

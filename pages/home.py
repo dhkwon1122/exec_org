@@ -21,7 +21,7 @@ def _new_task_modal():
             dbc.Row([
                 dbc.Col([dbc.Label('상태'), dbc.Select(id='new-status', value='진행중',
                                                       options=[{'label': s, 'value': s} for s in store.STATUSES])]),
-                dbc.Col([dbc.Label('담당자'), dbc.Input(id='new-owner')]),
+                dbc.Col([dbc.Label('담당자'), todo_ui.assignee_picker('new')]),
             ], className='mb-2'),
             dbc.Row([
                 dbc.Col([dbc.Label('시작일'), dbc.Input(id='new-start', type='date')]),
@@ -101,7 +101,7 @@ def _task_row(t: dict, level: int = 0, n_children: int = 0, n_done: int = 0, n_h
     """업무 한 줄 — 완료 체크, 상태 바꾸기, 제목(업무 화면으로), 하위 진행률·담당·마감·태그.
     하위 업무는 단계만큼 들여 쓴다."""
     done = t['status'] == '완료'
-    meta = [m for m in [n_children and f"하위 {n_done}/{n_children}", t['owner'] and f"담당 {t['owner']}",
+    meta = [m for m in [n_children and f"하위 {n_done}/{n_children}", t['assignees'] and f"담당 {todo_ui.assignee_names(t)}",
                         f"수정 {t['updated_at'][:10]}" if level == 0 else ''] if m]
     return dbc.ListGroupItem(html.Div([
         dbc.Checkbox(id={'type': 'home-done', 'id': t['id']}, value=done, className='me-2 mt-1'),
@@ -226,26 +226,29 @@ def quick_record(_, task_ids, etype, content, when, use_ai, links, att, att_name
 
 @callback(Output('new-modal', 'is_open'), Output('new-parent', 'options'), Output('new-error', 'children'),
           Output('new-error', 'is_open'), Output('home-redirect', 'pathname'),
+          Output('new-assignees', 'options'), Output('new-assignees', 'value'),
           Input('new-open', 'n_clicks'), Input('new-cancel', 'n_clicks'), Input('new-save', 'n_clicks'),
           State('new-title', 'value'), State('new-desc', 'value'), State('new-status', 'value'),
-          State('new-owner', 'value'), State('new-start', 'value'), State('new-due', 'value'),
-          State('new-tags', 'value'), State('new-parent', 'value'), 
+          State('new-assignees', 'value'), State('new-assignee-extra', 'value'), State('new-start', 'value'),
+          State('new-due', 'value'), State('new-tags', 'value'), State('new-parent', 'value'),
           prevent_initial_call=True)
-def new_task(_o, _c, _s, title, desc, status, owner, start, due, tags, parent):
-    author = auth.current_name()
+def new_task(_o, _c, _s, title, desc, status, assignees, extra, start, due, tags, parent):
+    nu = no_update
     if ctx.triggered_id not in ('new-open', 'new-cancel', 'new-save'):
-        return (no_update,) * 5
+        return (nu,) * 7
     if ctx.triggered_id == 'new-open':
         opts = [{'label': f"#{t['id']} {t['title']}", 'value': t['id']} for t in store.list_tasks()]
-        return True, opts, '', False, no_update
+        me = (auth.current_user() or {}).get('user_id', '')
+        return True, opts, '', False, nu, todo_ui.assignee_options(), [f'u:{me}'] if me else []  # 기본 담당자는 나
     if ctx.triggered_id == 'new-cancel':
-        return False, no_update, '', False, no_update
+        return False, nu, '', False, nu, nu, nu
     try:
-        t = store.create_task(title, desc or '', status or '진행중', owner or author or '', tags or '',
-                              parent, start or '', due or '')
+        t = store.create_task(title, desc or '', status or '진행중', tags=tags or '', parent_id=parent,
+                              start_date=start or '', due_date=due or '',
+                              assignees=todo_ui.assignees_from(assignees, extra))
     except ValueError as e:
-        return True, no_update, str(e), True, no_update
-    return False, no_update, '', False, f"/task/{t['id']}"
+        return True, nu, str(e), True, nu, nu, nu
+    return False, nu, '', False, f"/task/{t['id']}", nu, nu
 
 
 @callback(Output('home-refresh', 'data', allow_duplicate=True),

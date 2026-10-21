@@ -10,6 +10,7 @@ import os
 import re
 from concurrent.futures import ThreadPoolExecutor
 from datetime import date, datetime, timedelta
+from difflib import SequenceMatcher
 
 from sqlalchemy import func, select
 
@@ -166,10 +167,26 @@ PARSE_SYSTEM = f"""너는 원장님 비서실의 일정 담당자다. 비서가 
 "attendees": "", "category": "", "details": ""}}]}}"""
 
 
+def _known_events_hint(mail_date: str, limit: int = 80) -> str:
+    """이미 등록된(사람이 정제한) 메일 날짜 전후 일정 — AI 가 같은 일정의 제목·장소 표기를 그대로 맞추도록 참고로 준다."""
+    try:
+        d = date.fromisoformat(mail_date)
+    except ValueError:
+        return ''
+    rows = list_range((d - timedelta(days=7)).isoformat(), (d + timedelta(days=45)).isoformat())[:limit]
+    if not rows:
+        return ''
+    lines = [f"- {r['date']} {r['start_time'] or '종일'}{'-' + r['end_time'] if r['end_time'] else ''} | {r['title']}"
+             f" | {r['location']} | {r['attendees'][:60]}" for r in rows]
+    return ('\n\n참고 — 이미 등록된 일정 (사람이 확인한 값). 메일의 일정이 이 중 하나와 같은 일정이면 title·location·'
+            'attendees 표기를 이것과 똑같이 맞춘다. 메일에 없는 일정은 만들지 않는다:\n' + '\n'.join(lines))
+
+
 def ai_parse(text: str, mail_date: str) -> list[dict]:
     today = mail_date or date.today().isoformat()
     wd = '월화수목금토일'[date.fromisoformat(today).weekday()]
-    raw = llm.chat(PARSE_SYSTEM, f'메일 보낸 날짜: {today} ({wd})\n\n메일 본문:\n{text[:llm.MAX_INPUT_CHARS]}')
+    raw = llm.chat(PARSE_SYSTEM, f'메일 보낸 날짜: {today} ({wd})\n\n메일 본문:\n{text[:llm.MAX_INPUT_CHARS]}'
+                   + _known_events_hint(today))
     events = [clean_event(e) for e in llm._extract_json(raw).get('events') or [] if isinstance(e, dict)]
     return [e for e in events if e]
 
@@ -605,52 +622,174 @@ def _norm_title(t: str) -> str:
     return re.sub(r'[\s\W_]+', '', (t or '').lower())
 
 
-def _match(s, ev: dict) -> Schedule | None:
-    """같은 날짜·같은 제목(공백·기호 무시)의 일정."""
+LABELS = {'date': '날짜', 'start_time': '시작', 'end_time': '종료', 'title': '일정', 'location': '장소',
+          'attendees': '참석자', 'category': '구분', 'details': '세부'}
+_TEXT_FIELDS = ('title', 'location', 'attendees', 'details')
+# 날짜·시간·요일 글자만 있는 값 — 칸이 밀려 날짜 줄이 제목 등에 들어간 경우
+_ONLY_DATE_TIME = re.compile(r'^[\s\d.\-/:;~()년월일시분오전후월화수목금토일*·,]*$')
+
+
+def is_date_only(v: str) -> bool:
+    v = (v or '').strip()
+    return bool(v) and bool(_ONLY_DATE_TIME.match(v)) and bool(re.search(r'\d', v))
+
+
+def _similar(a: str, b: str) -> float:
+    a, b = _norm_title(a), _norm_title(b)
+    if not a or not b:
+        return 0.0
+    return SequenceMatcher(None, a, b).ratio()
+
+
+def _blob(ev: dict) -> str:
+    return _norm_title(' '.join(ev.get(f) or '' for f in _TEXT_FIELDS))
+
+
+def _digits(t: str) -> list[str]:
+    return re.findall(r'\d+', t or '')
+
+
+def _match(s, ev: dict, taken: set | None = None) -> tuple[Schedule | None, str]:
+    """이미 있는 같은 일정 찾기 → (일정, 어떻게 찾았나). 칸이 밀려 제목이 달라도 같은 날의 기존 일정으로 알아보도록:
+    1) 날짜·제목 일치 2) 기존 제목이 새 일정의 어느 칸엔가 들어 있음 3) 제목이 비슷함 4) 같은 시작 시간에 제목도 꽤 비슷.
+    제목 속 숫자가 다르면('일정 1' / '일정 2') 다른 일정. taken: 이번 메일의 다른 줄이 이미 차지한 일정 id."""
+    all_rows = list(s.scalars(select(Schedule).where(Schedule.date == ev['date'])))
     key = _norm_title(ev['title'])
-    for x in s.scalars(select(Schedule).where(Schedule.date == ev['date'])):
+    for x in all_rows:
         if _norm_title(x.title) == key:
-            return x
-    return None
+            return x, 'title'
+    rows = [x for x in all_rows if x.id not in (taken or set())]
+    blob, best, how, score = _blob(ev), None, '', 0.0
+    for x in rows:
+        xt = _norm_title(x.title)
+        if _digits(x.title) and _digits(ev['title']) and _digits(x.title) != _digits(ev['title']):
+            continue
+        sim = _similar(x.title, ev['title'])
+        same_time = bool(ev['start_time']) and ev['start_time'] == (x.start_time or '')
+        if len(xt) >= 3 and xt in blob:
+            cand, cand_how = 1.0 + (0.5 if same_time or not ev['start_time'] else 0), 'contains'
+        elif sim >= 0.7 and min(len(xt), len(key)) >= 4:
+            cand, cand_how = sim + (0.3 if same_time else 0), 'similar'
+        elif same_time and (sim >= 0.35 or is_date_only(ev['title']) or not key):
+            cand, cand_how = 0.5 + sim, 'time'
+        else:
+            continue
+        if cand > score:
+            best, how, score = x, cand_how, cand
+    return best, how
+
+
+def verify_changes(x: Schedule, ev: dict, how: str = 'title') -> tuple[list[str], list[dict]]:
+    """기존 일정 x 와 새로 읽은 ev 를 칸마다 비교 → (정말 바뀐 칸, 무시한 칸 [{'field', 'value', 'reason'}]).
+    빈 칸은 '모름'이라 건드리지 않는다. 칸이 밀려 다른 칸 값이 들어온 것, 날짜·시간 글자뿐인 것, 기존 값에 이미
+    들어 있는 것, 띄어쓰기·기호만 다른 것은 바뀐 것으로 보지 않는다."""
+    changed, ignored = [], []
+    old_vals = {f: (getattr(x, f) or '') for f in FIELDS}
+    for f in FIELDS:
+        new, old = ev.get(f) or '', old_vals[f]
+        if not new or new == old or f == 'date':
+            continue
+        if f in ('start_time', 'end_time'):
+            changed.append(f)  # 시간이 바뀌는 건 실제 변경 (칸이 밀려도 시간 칸엔 시간만 들어온다)
+            continue
+        if f == 'category':
+            if old:
+                ignored.append({'field': f, 'value': new, 'reason': '구분은 기존 값 유지'})
+            else:
+                changed.append(f)
+            continue
+        n_new, n_old = _norm_title(new), _norm_title(old)
+        if n_new == n_old:
+            continue  # 띄어쓰기·기호만 다름
+        if is_date_only(new):
+            ignored.append({'field': f, 'value': new, 'reason': '날짜·시간 글자뿐 (칸 밀림)'})
+            continue
+        other = next((g for g in _TEXT_FIELDS if g != f and old_vals[g] and len(n_new) >= 2 and
+                      (n_new == _norm_title(old_vals[g]) or n_new in _norm_title(old_vals[g]) or
+                       (len(_norm_title(old_vals[g])) >= 3 and _norm_title(old_vals[g]) in n_new
+                        and not (n_old and n_old in n_new)))), None)
+        if other:
+            ignored.append({'field': f, 'value': new, 'reason': f'기존 {LABELS[other]} 값이 잘못 들어옴'})
+            continue
+        if n_old and n_new in n_old:
+            ignored.append({'field': f, 'value': new, 'reason': '기존 값에 이미 들어 있음'})
+            continue
+        if n_old and _similar(new, old) >= 0.85:
+            ignored.append({'field': f, 'value': new, 'reason': '표기만 조금 다름'})
+            continue
+        if f == 'title' and how != 'title':
+            ignored.append({'field': f, 'value': new, 'reason': '같은 일정으로 보여 기존 제목 유지'})
+            continue
+        changed.append(f)
+    return changed, ignored
+
+
+def _ignored_note(ignored: list[dict]) -> str:
+    return ' · '.join(f"{LABELS[i['field']]} '{i['value'][:20]}' 무시({i['reason']})" for i in ignored)
 
 
 def preview(events: list[dict]) -> list[dict]:
-    """일정마다 상태 — new(신규) / changed(바뀐 칸 목록) / same(이미 같은 내용)."""
-    out = []
+    """일정마다 상태 — new(신규) / changed(정말 바뀐 칸) / same(이미 같은 내용) / check(칸이 밀린 듯, 확인 필요).
+    기존 일정과 같은 일정이면, 잘못 읽은 것으로 보이는 칸은 기존 값으로 되돌려 보여 준다(그대로 반영해도 안전).
+    'match_id' 는 대응하는 기존 일정, 'note' 는 검증 내용."""
+    out, taken = [], set()
     with db.SessionLocal() as s:
         for e in events:
             ev = clean_event(e)
             if ev is None:
                 continue
-            x = _match(s, ev)
+            x, how = _match(s, ev, taken)
             if x is None:
-                out.append({**ev, 'state': 'new', 'changed': []})
+                bad = is_date_only(ev['title'])
+                out.append({**ev, 'state': 'check' if bad else 'new', 'changed': [], 'match_id': None,
+                            'note': '제목이 날짜·시간뿐 — 칸이 밀린 것 같습니다. 고친 뒤 반영하세요.' if bad else ''})
                 continue
-            changed = [f for f in FIELDS if ev[f] and (getattr(x, f) or '') != ev[f]]
-            out.append({**ev, 'state': 'changed' if changed else 'same', 'changed': changed, 'id': x.id})
+            taken.add(x.id)
+            changed, ignored = verify_changes(x, ev, how)
+            row = {**ev}
+            for i in ignored:
+                row[i['field']] = getattr(x, i['field']) or ''
+            for f in FIELDS:  # 새로 읽은 값이 비어 있는 칸은 기존 값 그대로
+                if not row[f]:
+                    row[f] = getattr(x, f) or ''
+            found = {'title': '', 'contains': '기존 일정 제목이 들어 있어 같은 일정으로 봄',
+                     'similar': f"비슷한 제목의 기존 일정 '{x.title[:30]}'", 'time': f"같은 시간의 기존 일정 '{x.title[:30]}'"}
+            note = ' · '.join(n for n in [found.get(how, ''), _ignored_note(ignored)] if n)
+            out.append({**row, 'state': 'changed' if changed else 'same', 'changed': changed, 'match_id': x.id,
+                        'note': note})
     return out
 
 
 def apply_events(events: list[dict], import_id: int | None = None, by: str = '') -> dict:
-    """일정 목록을 반영 — 같은 날짜·제목이 있으면 값이 있는 칸만 고치고, 없으면 새로 만든다."""
-    added = updated = same = 0
+    """일정 목록을 반영. 'match_id' 가 있는 줄(미리보기에서 사람이 확인한 줄)은 그 일정을 줄 내용대로 고치고,
+    없는 줄은 같은 일정을 찾아 정말 바뀐 칸만 고친다(verify_changes) — 같은 일정이 없으면 새로 만든다.
+    제목이 날짜·시간뿐인 새 일정(칸이 밀린 줄)은 넣지 않는다(skipped)."""
+    added = updated = same = skipped = 0
+    taken = set()
     with db.SessionLocal() as s:
         for e in events:
             ev = clean_event(e)
             if ev is None:
                 continue
-            x = _match(s, ev)
+            x = s.get(Schedule, int(e['match_id'])) if str(e.get('match_id') or '').isdigit() else None
+            if x is not None:
+                fields = [f for f in FIELDS if ev[f] and (getattr(x, f) or '') != ev[f]]
+            else:
+                x, how = _match(s, ev, taken)
+                fields = verify_changes(x, ev, how)[0] if x is not None else []
+            if x is not None:
+                taken.add(x.id)
             if x is None:
+                if is_date_only(ev['title']):
+                    skipped += 1
+                    continue
                 s.add(Schedule(**ev, source='mail' if import_id else 'manual', import_id=import_id, created_by=by))
                 s.flush()
                 added += 1
                 continue
-            changed = False
-            for f in FIELDS:
-                if ev[f] and (getattr(x, f) or '') != ev[f]:
-                    setattr(x, f, ev[f])
-                    changed = True
-            if changed:
+            for f in fields:
+                setattr(x, f, ev[f])
+            if fields:
                 x.import_id = import_id or x.import_id
                 updated += 1
             else:
@@ -661,18 +800,18 @@ def apply_events(events: list[dict], import_id: int | None = None, by: str = '')
                 imp.applied_at = datetime.now().replace(microsecond=0)
                 imp.events = json.dumps([clean_event(e) for e in events if clean_event(e)], ensure_ascii=False)
         s.commit()
-    return {'added': added, 'updated': updated, 'same': same}
+    return {'added': added, 'updated': updated, 'same': same, 'skipped': skipped}
 
 
 def apply_all_pending(by: str = '') -> dict:
     """정리가 끝났는데 아직 반영하지 않은 메일을 보낸 날짜 순(옛 메일 먼저 → 최신 메일이 덮어씀)으로 모두 반영."""
     todo = [i for i in list_imports(limit=10000) if i['status'] == 'done' and not i['applied']]
     todo.sort(key=lambda i: (i['mail_date'] or '9999', i['id']))
-    total = {'mails': 0, 'added': 0, 'updated': 0, 'same': 0}
+    total = {'mails': 0, 'added': 0, 'updated': 0, 'same': 0, 'skipped': 0}
     for i in todo:
         r = apply_events(i['events'], i['id'], by)
         total['mails'] += 1
-        for k in ('added', 'updated', 'same'):
+        for k in ('added', 'updated', 'same', 'skipped'):
             total[k] += r[k]
     return total
 
