@@ -160,14 +160,36 @@ def _subject_of(text: str) -> str:
     return m.group(1).strip()[:300] if m else ''
 
 
+def _tabs_to_cells(text: str) -> str:
+    """표를 복사해 붙여넣은 글(칸 = 탭) → '칸 | 칸'. 칸 안에 줄바꿈이 있으면 Outlook·엑셀은 그 칸을 큰따옴표로
+    감싸 여러 줄에 걸쳐 붙여 넣으므로, 따옴표가 닫힐 때까지 이어 붙여 한 행으로 읽고 칸 안 줄바꿈은 ' / ' 로."""
+    import csv
+    lines, out, i = text.replace('\r\n', '\n').split('\n'), [], 0
+    while i < len(lines):
+        ln = lines[i]
+        if '\t' not in ln:
+            out.append(ln)
+            i += 1
+            continue
+        while ln.count('"') % 2 == 1 and i + 1 < len(lines):  # 열린 따옴표 칸 — 다음 줄까지 한 행
+            i += 1
+            ln += '\n' + lines[i]
+        i += 1
+        try:
+            cells = next(csv.reader(io.StringIO(ln), dialect='excel-tab'))
+        except (csv.Error, StopIteration):
+            cells = ln.split('\t')
+        out.append(' | '.join(re.sub(r'\s*\n\s*', ' / ', c).strip() for c in cells))
+    return '\n'.join(out)
+
+
 def from_pasted(text: str) -> dict:
     """붙여넣은 글 — HTML 로 붙었으면 표를 살려 글자로, 아니면 그대로(표에서 복사한 탭은 ' | ' 로)."""
     text = text or ''
     if re.search(r'<(table|tr|td|div|p|br)\b', text, re.I):
         text = html_to_text(text)
     else:
-        text = '\n'.join(' | '.join(c.strip() for c in ln.split('\t')) if '\t' in ln else ln
-                         for ln in text.replace('\r\n', '\n').split('\n'))
+        text = _tabs_to_cells(text)
     return {'name': _subject_of(text) or '붙여넣은 일정', 'mail_date': _header_date(text), 'text': text.strip()}
 
 

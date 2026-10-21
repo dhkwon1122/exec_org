@@ -157,6 +157,8 @@ PARSE_SYSTEM = f"""너는 원장님 비서실의 일정 담당자다. 비서가 
 - 표에서 날짜 칸이 비어 있거나(병합된 칸) 아예 빠져 시간으로 시작하는 행은 바로 위 일정과 같은 날짜다.
   그런 행을 메일 보낸 날짜로 넣지 않는다. 메일 보낸 날짜는 연도·'다음주' 같은 표현을 풀 때만 쓴다.
 - title 은 일정 이름만 짧게, location 은 장소, attendees 는 참석자(쉼표로), details 는 그 밖의 내용(준비물·비고·담당 등).
+- '26.10.21(수)' 처럼 두 자리 연도는 2026년. 날짜 줄 아래 '08;00-10;00 회의명' 줄이 일정 하나이고, 이어지는
+  '* 참석자 : …' 줄은 attendees, '장소 : …' 또는 '본관동 7층 대회의실' 같은 장소 줄은 location 이다.
 - category 는 {', '.join(CATEGORIES)} 중 하나.
 - 취소·연기된 일정은 details 에 '취소' 또는 '연기'를 적고 그대로 넣는다. 일정이 아닌 인사말·서명은 무시한다.
 - 입력에 없는 내용은 만들지 않는다.
@@ -174,6 +176,9 @@ def ai_parse(text: str, mail_date: str) -> list[dict]:
 
 _DATE_PATTERNS = [
     re.compile(r'(?P<y>20\d{2})\s*[.\-/년]\s*(?P<m>\d{1,2})\s*[.\-/월]\s*(?P<d>\d{1,2})\s*일?'),
+    # 두 자리 연도 '26.10.21(수)' / '26-10-21' / '26/10/21'
+    re.compile(r'(?<![\d:.])(?P<yy>\d{2})\s*[.\-/]\s*(?P<m>\d{1,2})\s*[.\-/]\s*(?P<d>\d{1,2})(?![\d:])\.?'
+               r'(?:\s*\([월화수목금토일]\))?'),
     re.compile(r'(?<![\d:])(?P<m>\d{1,2})\s*월\s*(?P<d>\d{1,2})\s*일'),
     re.compile(r'(?<![\d:.])(?P<m>\d{1,2})\s*[/.]\s*(?P<d>\d{1,2})(?![\d:])(?:\s*\([월화수목금토일]\))?'),
 ]
@@ -185,21 +190,25 @@ _ROW_STARTS_WITH_TIME = re.compile(r'^\s*(?:\|\s*)*(?:오전|오후)?\s*\d{1,2}\
 
 
 def _find_date(line: str, base: date) -> tuple[str, str] | None:
+    """줄에서 처음 보이는 날짜 → (YYYY-MM-DD, 날짜를 뺀 나머지). 날짜가 안 되는 숫자 조합(26.10 의 26월 등)은 건너뛴다."""
     for pat in _DATE_PATTERNS:
-        m = pat.search(line)
-        if not m:
-            continue
-        y = int(m.group('y')) if 'y' in pat.groupindex and m.group('y') else base.year
-        mo, d = int(m.group('m')), int(m.group('d'))
-        if 'y' not in pat.groupindex or not m.group('y'):
-            if base.month == 12 and mo == 1:
-                y += 1
-            elif base.month == 1 and mo == 12:
-                y -= 1
-        try:
-            return date(y, mo, d).isoformat(), line[:m.start()] + ' ' + line[m.end():]
-        except ValueError:
-            continue
+        for m in pat.finditer(line):
+            g = m.groupdict()
+            mo, d = int(g['m']), int(g['d'])
+            if g.get('y'):
+                y = int(g['y'])
+            elif g.get('yy'):
+                y = 2000 + int(g['yy'])
+            else:
+                y = base.year
+                if base.month == 12 and mo == 1:
+                    y += 1
+                elif base.month == 1 and mo == 12:
+                    y -= 1
+            try:
+                return date(y, mo, d).isoformat(), line[:m.start()] + ' ' + line[m.end():]
+            except ValueError:
+                continue
     return None
 
 
@@ -382,6 +391,110 @@ def table_parse(text: str, mail_date: str) -> list[dict]:
     return out
 
 
+# ── 블록 형식 읽기 ────────────────────────────────────────────────────
+# 비서실 메일이 표 대신(또는 표 한 칸 안에) 이렇게 적힌 경우:
+#     26.10.21(수)
+#      08;00-10;00 주간 임원 간담회
+#     * 참석자 : 플랫폼장(7), staff팀장(2)
+#     본관동 7층 대회의실
+# 날짜 줄 → 그 아래 '시간 + 일정' 줄마다 일정 하나 → 이어지는 '항목 : 값' 줄과 장소처럼 보이는 줄을 그 일정에 붙인다.
+_BULLET = re.compile(r'^[\s*\-•ㆍ·○●◦▶▷■□◆◇※>]+')
+_KV = re.compile(r'^(?P<k>[^:：]{1,12}?)\s*[:：]\s*(?P<v>.*)$')
+_KEY_FIELD = {'참석': 'attendees', '참석자': 'attendees', '배석': 'attendees', '배석자': 'attendees', '대상': 'attendees',
+              '참석대상': 'attendees', '동행': 'attendees', '수행': 'attendees', '참석범위': 'attendees',
+              '장소': 'location', '위치': 'location', '회의실': 'location', '장소/위치': 'location',
+              '구분': 'category', '일정': 'title', '제목': 'title', '내용': 'title', '행사': 'title', '회의': 'title'}
+_PLACE = re.compile(r'(\d+\s*층|회의실|접견실|원장실|대회의실|강당|홀|룸|Room|본관|별관|동\b|관\b|센터|호텔|청사|연구소|캠퍼스|'
+                    r'사옥|빌딩|타워|\bB\d|\bR\d|온라인|화상|Zoom|Teams|Webex)', re.I)
+# 맺음말·서명 — 여기서 일정 블록이 끝난다
+_CLOSING = re.compile(r'^(감사합니다|감사드립니다|고맙습니다|이상입니다|수고하세요|수고하십시오|.{0,20}(드림|올림)\.?$|'
+                      r'Best regards|Regards|Thanks|Thank you|-- ?$)', re.I)
+_TIME_AT_START = re.compile(r'^\s*(?:\[|\()?\s*((?:오전|오후)?\s*\d{1,2}\s*[:;시]\s*\d{0,2}\s*분?)'
+                            r'\s*(?:[~\-–]\s*((?:오전|오후)?\s*\d{1,2}\s*[:;시]\s*\d{0,2}\s*분?)?)?\s*(?:\]|\))?\s*(.*)$')
+
+
+def _logical_lines(text: str) -> list[str]:
+    """표 칸(' | ')과 칸 안 줄바꿈(' / ')도 줄로 나눈다 — 블록이 표 한 칸에 들어 있는 메일도 같은 방식으로."""
+    out = []
+    for line in (text or '').splitlines():
+        for part in re.split(r'\s+\|\s+|\s*\|\s*$|^\s*\|\s*|\s+/\s+', line):
+            if part.strip():
+                out.append(part.strip())
+    return out
+
+
+_TIME_ONLY = re.compile(r'^(?:오전|오후)?\s*\d{1,2}\s*[:;시]\s*\d{0,2}\s*분?\s*(?:[~\-–]\s*((?:오전|오후)?\s*\d{1,2}'
+                        r'\s*[:;시]\s*\d{0,2}\s*분?)?)?$')
+
+
+def is_column_table(text: str) -> bool:
+    """시간만 든 칸이 있는 표(열마다 뜻이 따로인 표)인지 — 그런 표는 블록으로 읽지 않고 AI·규칙에 맡긴다."""
+    for line in (text or '').splitlines():
+        if '|' in line and any(_TIME_ONLY.match(c.strip()) for c in line.split('|')):
+            return True
+    return False
+
+
+def block_parse(text: str, mail_date: str) -> list[dict]:
+    base = date.fromisoformat(mail_date) if mail_date else date.today()
+    out, cur_date, ev = [], None, None
+
+    def close():
+        nonlocal ev
+        if ev and ev.get('title'):
+            e = clean_event(ev)
+            if e:
+                out.append(e)
+        ev = None
+
+    for raw in _logical_lines(text):
+        if _HEADER_LINE.match(raw):
+            continue
+        line = _BULLET.sub('', raw).strip()
+        if not line:
+            continue
+        if _CLOSING.match(line):
+            close()
+            cur_date = None
+            continue
+        found = _find_date(line, base)
+        if found:
+            close()
+            cur_date, line = found[0], found[1].strip(' ,-~|')
+            if not line or re.fullmatch(r'[(（]?[월화수목금토일][)）]?', line):
+                continue
+        t = _TIME_AT_START.match(line)
+        if t and cur_date and norm_time(t.group(1)):
+            close()
+            title = t.group(3).strip(' -:|')
+            ev = {'date': cur_date, 'start_time': t.group(1), 'end_time': t.group(2) or '', 'title': title,
+                  'location': '', 'attendees': '', 'details': ''}
+            continue
+        if ev is None:
+            if cur_date and re.search(r'종일|하루', line):  # '종일 해외 출장'
+                close()
+                ev = {'date': cur_date, 'title': re.sub(r'\s*(하루\s*)?종일\s*', ' ', line).strip(), 'location': '',
+                      'attendees': '', 'details': ''}
+            continue
+        kv = _KV.match(line)
+        if kv and not re.match(r'^\d', kv.group('k')):
+            key = re.sub(r'\s+', '', kv.group('k'))
+            field = _KEY_FIELD.get(key)
+            val = kv.group('v').strip()
+            if field and not ev.get(field):
+                ev[field] = val
+            else:
+                ev['details'] = (ev['details'] + ' / ' if ev['details'] else '') + f'{kv.group("k").strip()}: {val}'
+        elif not ev['title']:
+            ev['title'] = line
+        elif not ev['location'] and _PLACE.search(line):
+            ev['location'] = line
+        else:
+            ev['details'] = (ev['details'] + ' / ' if ev['details'] else '') + line
+    close()
+    return out
+
+
 # ── 가져오기 ──────────────────────────────────────────────────────────
 
 def _import_dict(x: ScheduleImport) -> dict:
@@ -417,6 +530,10 @@ def parse_import(import_id: int) -> None:
         events = table_parse(text, mail_date)  # 제목 행이 있는 표는 열 이름대로 그대로 읽는다 (AI 보다 정확)
         if events:
             error = '표의 제목 행(일자·시간·내용·장소…) 기준으로 읽었습니다.'
+        elif not is_column_table(text):
+            events = block_parse(text, mail_date)  # 날짜 줄 / 시간+일정 줄 / 참석자·장소 줄 형식
+            if events:
+                error = '날짜 · 시간+일정 · 참석자/장소 줄 형식으로 읽었습니다.'
     except Exception:  # noqa: BLE001
         events = []
     text = fill_dates(text, mail_date)

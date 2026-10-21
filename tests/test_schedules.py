@@ -244,3 +244,81 @@ def test_bulk_delete_and_undo_import():
     assert schedules.delete_many(ids) == 3 and schedules.delete_many([]) == 0
     assert [e['title'] for e in schedules.list_range('2026-10-01', '2026-11-30')] == ['해외 출장', '다음 달 일정']
     assert manual['id'] in ids
+
+
+BLOCK_MAIL = """보낸 날짜: 2026년 10월 20일 화요일 오후 5:10
+제목: 원장님 주간 일정
+안녕하세요, 이번 주 원장님 일정 공유드립니다.
+
+26.10.21(수)
+ 08;00-10;00 주간 임원 간담회
+* 참석자 : 플랫폼장(7), staff팀장(2) 
+본관동 7층 대회의실
+ 14;00-15;00 AI센터 현황 보고
+ - 장소 : 원장실
+ - 준비 : 3분기 실적
+26.10.22(목)
+ 종일 해외 출장(미국)
+
+감사합니다.
+비서실 홍길동 드림"""
+
+
+def test_two_digit_year_dates():
+    from datetime import date
+    base = date(2026, 10, 20)
+    assert schedules._find_date('26.10.21(수)', base)[0] == '2026-10-21'
+    assert schedules._find_date('26-10-21', base)[0] == '2026-10-21'
+    assert schedules.parse_date_cell('26.10.21.(수)', base, None) == '2026-10-21'
+
+
+def test_block_format_mail(monkeypatch):
+    monkeypatch.setattr(llm, 'is_configured', lambda: True)
+    monkeypatch.setattr(llm, 'chat', lambda *a, **k: pytest.fail('블록 형식이면 AI 를 부르지 않는다'))
+    m = mail_text.from_pasted(BLOCK_MAIL)
+    iid = schedules.create_import(m['name'], m['mail_date'], m['text'])
+    schedules.submit_import(iid, background=False)
+    imp = schedules.get_import(iid)
+    assert '줄 형식' in imp['error']
+    assert [(e['date'], e['start_time'], e['end_time'], e['title'], e['location'], e['attendees'], e['details'])
+            for e in imp['events']] == [
+        ('2026-10-21', '08:00', '10:00', '주간 임원 간담회', '본관동 7층 대회의실', '플랫폼장(7), staff팀장(2)', ''),
+        ('2026-10-21', '14:00', '15:00', 'AI센터 현황 보고', '원장실', '', '준비: 3분기 실적'),
+        ('2026-10-22', '', '', '해외 출장(미국)', '', '', '')]  # 맺음말·서명은 붙지 않는다
+
+
+def test_block_format_inside_table_cells():
+    html = ('<table><tr><td rowspan=2>26.10.21(수)</td><td>08;00-10;00 주간 임원 간담회<br>* 참석자 : 플랫폼장(7), '
+            'staff팀장(2)</td><td>본관동 7층 대회의실</td></tr><tr><td>14;00-15;00 AI센터 현황 보고</td><td>원장실</td></tr>'
+            '</table>')
+    ev = schedules.block_parse(mail_text.html_to_text(html), '2026-10-20')
+    assert [(e['start_time'], e['title'], e['location'], e['attendees']) for e in ev] == [
+        ('08:00', '주간 임원 간담회', '본관동 7층 대회의실', '플랫폼장(7), staff팀장(2)'),
+        ('14:00', 'AI센터 현황 보고', '원장실', '')]
+
+
+@pytest.mark.parametrize('text', [
+    # 표 3칸 (시간+일정과 참석자가 한 칸, 장소 칸 따로)
+    mail_text.html_to_text('<table><tr><td>26.10.21(수)</td><td>08;00-10;00 주간 임원 간담회<br>* 참석자 : 플랫폼장(7), '
+                           'staff팀장(2)</td><td>본관동 7층 대회의실</td></tr></table>'),
+    # 표 4칸 (참석자 칸 따로)
+    mail_text.html_to_text('<table><tr><td>26.10.21(수)</td><td>08;00-10;00 주간 임원 간담회</td><td>* 참석자 : 플랫폼장(7), '
+                           'staff팀장(2)</td><td>본관동 7층 대회의실</td></tr></table>'),
+    # 표를 복사해 붙여넣음 — 줄바꿈 있는 칸은 큰따옴표로 감싸여 여러 줄
+    mail_text.from_pasted('26.10.21(수)\t"08;00-10;00 주간 임원 간담회\n* 참석자 : 플랫폼장(7), staff팀장(2)"\t'
+                          '본관동 7층 대회의실')['text'],
+    # 줄 단위 글
+    mail_text.from_pasted('26.10.21(수)\n 08;00-10;00 주간 임원 간담회\n* 참석자 : 플랫폼장(7), staff팀장(2) \n'
+                          '본관동 7층 대회의실')['text'],
+])
+def test_same_schedule_in_every_layout(text):
+    iid = schedules.create_import('x', '2026-10-20', text)
+    schedules.submit_import(iid, background=False)
+    assert [(e['date'], e['start_time'], e['end_time'], e['title'], e['location'], e['attendees'])
+            for e in schedules.get_import(iid)['events']] == [
+        ('2026-10-21', '08:00', '10:00', '주간 임원 간담회', '본관동 7층 대회의실', '플랫폼장(7), staff팀장(2)')]
+
+
+def test_pasted_quoted_cells_do_not_swallow_prose():
+    t = mail_text.from_pasted('a\t"b\nc"\td\n그는 "따옴표 하나 있는 문장\n끝')['text']
+    assert t.splitlines() == ['a | b / c | d', '그는 "따옴표 하나 있는 문장', '끝']
