@@ -4,7 +4,7 @@ import dash_bootstrap_components as dbc
 from dash import ALL, Input, Output, State, callback, ctx, dash_table, dcc, html, no_update
 
 from components import absence_ui, doc_ui, ui
-from services import absences, auth, doc_versions, mailbox, outbox, schedules, store
+from services import absences, auth, doc_versions, llm, mailbox, outbox, schedules, store
 
 dash.register_page(__name__, path='/inbox', name='받은 메일', title='업무 기록 · 받은 메일')
 
@@ -47,6 +47,21 @@ def layout(mail=None, **_):
             dbc.Col(html.Div(id='ib-list'), lg=5),
             dbc.Col(html.Div([
                 html.Div(id='ib-head'),
+                html.Div(id='ib-ai-box', style={'display': 'none'}, children=[
+                    dbc.Card(dbc.CardBody([
+                        html.Div([html.I(className='bi bi-stars me-1 text-warning'), 'AI 에게 맡기기'],
+                                 className='fw-semibold small mb-1'),
+                        html.Div('이 메일로 무엇을 할지 고르세요. 추천 표시는 AI 분류와 본문 모양을 보고 미리 골라 둔 것입니다. '
+                                 '결과는 아래에 추천으로 나오고, 확인한 뒤 반영합니다.', className='small text-muted mb-2'),
+                        dbc.Checklist(id='ib-ai-actions', options=[], value=[], className='small'),
+                        html.Div([
+                            dbc.Button([html.I(className='bi bi-magic me-1'), 'AI 분석 실행'], id='ib-ai-run',
+                                       color='primary', size='sm', className='me-2'),
+                            dcc.Loading(html.Span(id='ib-ai-busy', className='small text-muted'), type='dot'),
+                        ], className='d-flex align-items-center mt-2'),
+                        html.Div(id='ib-ai-summary', className='mt-2'),
+                    ]), className='mt-2'),
+                ]),
                 html.Div(id='ib-attach'),
                 html.Div(id='ib-link-box', style={'display': 'none'}, children=[
                     dbc.Card(dbc.CardBody([
@@ -72,8 +87,6 @@ def layout(mail=None, **_):
                         ], id='ib-new-box'),
                         html.Div('연결하거나 만든 업무에는 메일 원문이 "요청" 기록으로 남고, 업무 화면의 출처에 이 메일이 보입니다.',
                                  className='small text-muted mt-2'),
-                        dbc.Button([html.I(className='bi bi-person-dash me-1'), '이 메일에서 임원 부재 찾기'],
-                                   id='ib-abs-extract', color='link', size='sm', className='p-0 mt-1'),
                     ]), className='mt-2'),
                 ]),
                 html.Div(id='ib-task-box', style={'display': 'none'}, children=[
@@ -235,7 +248,7 @@ def render_detail(sel, _):
         if m['handled_at'] else None,
         dbc.Alert(m['error'], color='danger', className='small py-1 mt-2 mb-0') if m['error'] else None,
     ]))
-    wants_task = m['kind'] in ('task', 'both') or not m['kind']
+    wants_task = m['kind'] in ('task', 'both') or not m['kind'] or m['suggestion'].get('requested_tasks')
     tasks = m['suggestion'].get('tasks') or []
     sched_rows, note = [], ''
     if m['schedule_import_id']:
@@ -415,20 +428,65 @@ def render_abs(sel, _):
 
 @callback(Output('ib-refresh', 'data', allow_duplicate=True), Output('ib-msg', 'children', allow_duplicate=True),
           Output('ib-msg', 'is_open', allow_duplicate=True), Output('ib-msg', 'color', allow_duplicate=True),
-          Input('ib-abs-extract', 'n_clicks'), Input('ib-abs-apply', 'n_clicks'),
+          Input('ib-abs-apply', 'n_clicks'),
           State('ib-sel', 'data'), State('ib-abs', 'data'), State('ib-refresh', 'data'), prevent_initial_call=True)
-def abs_actions(_e, _a, sel, rows, n):
+def abs_actions(_a, sel, rows, n):
     if not sel or not ctx.triggered or not ctx.triggered[0]['value']:
         return no_update, no_update, no_update, no_update
-    if ctx.triggered_id == 'ib-abs-extract':
-        found = mailbox.extract_absences(sel)
-        return ((n or 0) + 1, f'임원 부재 {len(found)}건을 찾았습니다 — 아래 표에서 확인하고 등록하세요.' if found else
-                '임원 부재를 찾지 못했습니다 — 표에 직접 적어서 등록할 수 있습니다.', True, 'info')
     r = mailbox.apply_absences(sel, rows or [], auth.current_name())
     msg = [f"임원 부재 {r['added']}건 등록" + (f", 이미 있음 {r['same']}건" if r['same'] else '')
            + (f", 임원을 못 찾아 건너뜀 {r['unknown']}건" if r['unknown'] else '') + '. ',
            dcc.Link('부재 달력 보기', href='/calendar?tab=absence')]
     return (n or 0) + 1, msg, True, 'success' if r['added'] else 'secondary'
+
+
+# ── AI 에게 맡기기 ────────────────────────────────────────────────────
+
+@callback(Output('ib-ai-box', 'style'), Output('ib-ai-actions', 'options'), Output('ib-ai-actions', 'value'),
+          Output('ib-ai-summary', 'children'), Input('ib-sel', 'data'), Input('ib-refresh', 'data'))
+def render_ai(sel, _):
+    m = mailbox.get_mail(sel) if sel else None
+    if m is None:
+        return {'display': 'none'}, [], [], None
+    rec = dict(mailbox.recommend_actions(m))
+    asked = m['suggestion'].get('requested') or []
+    ai_on = llm.is_configured()
+    opts = []
+    for key, label in mailbox.AI_ACTIONS.items():
+        off = key == 'summary' and not ai_on
+        opts.append({'label': html.Span([
+            label,
+            dbc.Badge('추천', color='warning', text_color='dark', className='ms-2') if key in rec else None,
+            dbc.Badge('실행함', color='light', text_color='dark', className='ms-1 border') if key in asked else None,
+            html.Span(f' — {rec[key]}', className='text-muted') if key in rec else None,
+            html.Span(' (LLM 미설정)', className='text-muted') if off else None,
+        ]), 'value': key, 'disabled': off})
+    value = [k for k in rec if not (k == 'summary' and not ai_on)] if not asked else []
+    sm = m['suggestion'].get('summary')
+    summary = dbc.Alert([
+        html.Div(sm['title'], className='fw-semibold'),
+        html.Div(sm['summary'], style={'whiteSpace': 'pre-wrap'}),
+        html.Div([dbc.Badge(f'#{k}', color='light', text_color='dark', className='me-1 border')
+                  for k in sm.get('keywords', [])], className='mt-1') if sm.get('keywords') else None,
+    ], color='light', className='small mb-0') if sm else None
+    return {}, opts, value, summary
+
+
+@callback(Output('ib-refresh', 'data', allow_duplicate=True), Output('ib-msg', 'children', allow_duplicate=True),
+          Output('ib-msg', 'is_open', allow_duplicate=True), Output('ib-msg', 'color', allow_duplicate=True),
+          Output('ib-ai-busy', 'children'),
+          Input('ib-ai-run', 'n_clicks'), State('ib-sel', 'data'), State('ib-ai-actions', 'value'),
+          State('ib-refresh', 'data'), prevent_initial_call=True)
+def run_ai(n, sel, actions, refresh):
+    """고른 분석을 돌린다 — 일정 표·부재 표·업무 후보·요약이 아래에 추천으로 나온다."""
+    if not n or not sel:
+        return no_update, no_update, no_update, no_update, ''
+    try:
+        done = mailbox.run_actions(sel, actions or [], auth.current_name())
+    except (ValueError, llm.LLMError) as e:
+        return no_update, str(e), True, 'warning', ''
+    parts = ['요약 완료' if k == 'summary' else f'{mailbox.AI_ACTIONS[k]} {v}건' for k, v in done.items()]
+    return (refresh or 0) + 1, '분석했습니다 — ' + ', '.join(parts) + '. 아래에서 확인하고 반영하세요.', True, 'success', ''
 
 
 # ── 규칙 ──────────────────────────────────────────────────────────────

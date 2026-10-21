@@ -484,6 +484,74 @@ def apply_review(mail_id: int, tasks: list[dict], parent_id: int | None, schedul
     return {'tasks': len(ids), **r, 'absences': ab['added']}
 
 
+# ── AI 에게 맡기기 (사람이 고르는 분석) ───────────────────────────────
+
+AI_ACTIONS = {'schedule': '원장님 일정 정리', 'absence': '임원 부재 추출', 'tasks': '할 일(업무) 추출',
+              'summary': '요약·키워드'}
+
+
+def recommend_actions(m: dict) -> list[tuple[str, str]]:
+    """이 메일에 맞을 분석 추천 — [(동작, 이유)]. 받을 때의 AI 분류와 본문 모양(일정표, 임원 이름+부재 낱말)으로.
+    AI 를 다시 부르지 않는다(화면을 열 때마다 돌기 때문)."""
+    out: dict[str, str] = {}
+    kind = m['kind']
+    why = f"분류: {m['reason'][:60]}" if m['reason'] else '분류'
+    if kind in ('schedule', 'both'):
+        out['schedule'] = why
+    if kind in ('task', 'both'):
+        out['tasks'] = why
+    if kind == 'absence':
+        out['absence'] = why
+    body, md = m['body'], m['mail_date']
+    if 'schedule' not in out and (schedules.table_parse(body, md) or schedules.block_parse(body, md)):
+        out['schedule'] = '본문에 일정표가 있음'
+    if 'absence' not in out and absences.rule_extract(body, md, m['subject']):
+        out['absence'] = '임원 이름과 휴가·출장 등 부재 낱말·날짜가 있음'
+    if len(body) > 1500 and llm.is_configured():
+        out.setdefault('summary', '본문이 길어 요약이 도움이 됨')
+    return list(out.items())
+
+
+def run_actions(mail_id: int, actions: list[str], by: str = '') -> dict:
+    """고른 분석을 돌려 추천으로 남긴다(바로 반영하지 않음 — 화면에서 확인 후 반영).
+    schedule: 일정 정리(표) / absence: 임원 부재 표 / tasks: 업무 후보 + 상위 업무 추천 / summary: 제목·요약·키워드·할 일.
+    결과 {동작: 건수}. 메일은 '확인 필요'로 돌려 반영 버튼을 쓸 수 있게 한다."""
+    m = get_mail(mail_id)
+    if m is None:
+        raise ValueError('메일을 찾을 수 없습니다.')
+    actions = [a for a in actions or [] if a in AI_ACTIONS]
+    if not actions:
+        raise ValueError('맡길 일을 고르세요.')
+    sug, done, fields = dict(m['suggestion']), {}, {}
+    if 'schedule' in actions:
+        iid = _make_schedule_import(m)
+        imp = schedules.get_import(iid)
+        fields['schedule_import_id'] = iid
+        done['schedule'] = len(imp['events']) if imp else 0
+    if 'absence' in actions:
+        sug['absences'], sug['absence_note'] = absences.extract(m['body'], m['mail_date'], m['subject'])
+        done['absence'] = len(sug['absences'])
+    if 'tasks' in actions:
+        tasks = task_candidates(m['subject'], m['mail_date'], m['body'])
+        sug['tasks'] = tasks
+        sug['requested_tasks'] = True
+        sug.update(suggest_parent(m['subject'], m['body'], tasks, mail_id))
+        done['tasks'] = len(tasks)
+    if 'summary' in actions:
+        if not llm.is_configured():
+            raise ValueError('요약은 LLM 이 설정돼 있어야 합니다.')
+        r = llm.analyze_record(f"제목: {m['subject']}\n보낸 사람: {m['sender']}\n\n{m['body']}", entry_type='요청')
+        sug['summary'] = {k: r[k] for k in ('title', 'summary', 'keywords', 'todos')}
+        if r['todos'] and 'tasks' not in actions:  # 요약에서 찾은 할 일도 업무 후보로
+            sug['tasks'] = r['todos']
+            sug['requested_tasks'] = True
+        done['summary'] = 1
+    sug['requested'] = actions
+    reason = 'AI 분석 요청: ' + ', '.join(AI_ACTIONS[a] for a in actions)
+    _update(mail_id, suggestion=sug, status='review', reason=reason[:500], handled_at=None, handled_by='', **fields)
+    return done
+
+
 def extract_absences(mail_id: int) -> list[dict]:
     """어떤 메일이든 — 임원 부재를 뽑아 추천으로 남긴다 (받은 메일 화면의 '임원 부재 찾기')."""
     m = get_mail(mail_id)
