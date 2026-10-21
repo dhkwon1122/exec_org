@@ -2,12 +2,14 @@
 
 월 보기: 날짜 칸마다 자리를 비운 임원(종류별 색). 날짜를 누르면 오른쪽에 그날 부재 상세.
 목록 보기: 그달 부재를 기간 순으로. '부재 등록'에서 여러 임원을 고르면 사람마다 한 건씩 만든다(함께 가는 출장).
+'메일로 등록': 부재 안내 메일을 붙여넣으면 임원·종류·기간을 뽑아 표로 보여 주고, 확인한 뒤 등록한다
+(POP3 로 받은 메일은 받은 메일 화면에서 같은 방식으로).
 """
 import calendar as pycal
 from datetime import date
 
 import dash_bootstrap_components as dbc
-from dash import ALL, Input, Output, State, callback, ctx, dcc, html, no_update
+from dash import ALL, Input, Output, State, callback, ctx, dash_table, dcc, html, no_update
 
 from services import absences, auth, store
 
@@ -63,6 +65,8 @@ def layout():
                          className='ms-auto', style={'minWidth': '200px'}),
             dbc.Input(id='ab-q', type='search', debounce=True, placeholder='이름·장소·대결자 검색', size='sm',
                       style={'maxWidth': '200px'}),
+            dbc.Button([html.I(className='bi bi-envelope-paper me-1'), '메일로 등록'], id='ab-imp-open',
+                       color='secondary', outline=True, size='sm'),
             dbc.Button([html.I(className='bi bi-plus-lg me-1'), '부재 등록'], id='ab-add', color='primary', size='sm'),
         ], className='d-flex align-items-center flex-wrap gap-2 mb-2'),
         html.Div(id='ab-now', className='mb-2'),
@@ -79,6 +83,39 @@ def layout():
                 dbc.Button('저장', id='ab-save', color='primary'),
             ]),
         ], id='ab-modal', is_open=False, size='lg'),
+        dbc.Modal([
+            dbc.ModalHeader(dbc.ModalTitle('메일로 임원 부재 등록')),
+            dbc.ModalBody([
+                html.Div('휴가·출장·교육 안내나 부재 현황 메일을 그대로 붙여넣으세요. 임원 이름·별칭으로 등록된 임원을 찾고, '
+                         '종류·기간·반차·장소·대결자를 뽑습니다.', className='small text-muted mb-2'),
+                dbc.Textarea(id='ab-imp-text', rows=7, placeholder='메일 내용 붙여넣기 (제목 줄도 같이 붙이면 좋습니다)'),
+                html.Div([
+                    dbc.Input(id='ab-imp-date', type='date', size='sm', style={'maxWidth': '170px'}),
+                    html.Span('메일 날짜 (연도·요일 표현을 풀 때 씀, 비우면 오늘)', className='small text-muted ms-2 me-auto'),
+                    dbc.Button([html.I(className='bi bi-magic me-1'), '읽기'], id='ab-imp-read', color='secondary',
+                               size='sm'),
+                ], className='d-flex align-items-center my-2'),
+                html.Div(id='ab-imp-note', className='small text-muted mb-1'),
+                dash_table.DataTable(
+                    id='ab-imp-table', editable=True, row_deletable=True, data=[],
+                    columns=[{'name': '상태', 'id': 'state_label', 'editable': False}, {'name': '임원', 'id': 'person'},
+                             {'name': '종류', 'id': 'kind'}, {'name': '시작', 'id': 'start_date'},
+                             {'name': '종료', 'id': 'end_date'}, {'name': '반차', 'id': 'half'},
+                             {'name': '장소', 'id': 'place'}, {'name': '대결자', 'id': 'deputy'},
+                             {'name': '메모', 'id': 'note'}, {'name': '확인', 'id': 'check', 'editable': False}],
+                    style_table={'overflowX': 'auto'},
+                    style_cell={'textAlign': 'left', 'fontSize': '0.8rem', 'whiteSpace': 'normal', 'height': 'auto'},
+                    style_data_conditional=[
+                        {'if': {'filter_query': '{state} = "unknown"'}, 'backgroundColor': 'rgba(220,53,69,.08)'},
+                        {'if': {'filter_query': '{state} = "overlap"'}, 'backgroundColor': 'rgba(255,193,7,.12)'},
+                        {'if': {'filter_query': '{state} = "same"'}, 'color': '#888'}]),
+                dbc.Alert(id='ab-imp-msg', is_open=False, className='small py-2 mt-2 mb-0'),
+            ]),
+            dbc.ModalFooter([
+                dbc.Button('닫기', id='ab-imp-close', color='secondary', outline=True),
+                dbc.Button([html.I(className='bi bi-check2 me-1'), '등록'], id='ab-imp-apply', color='primary'),
+            ]),
+        ], id='ab-imp-modal', is_open=False, size='xl', scrollable=True),
     ])
 
 
@@ -272,3 +309,47 @@ def warn_overlap(people, start, end, aid):
         for r in absences.overlaps(pid, start, end or start, exclude=aid):
             msgs.append(f"{r['person_name']}: 이미 {r['kind']} {_period(r)}")
     return [html.I(className='bi bi-exclamation-triangle me-1'), '겹치는 부재 — ' + ' / '.join(msgs)] if msgs else ''
+
+
+# ── 메일로 등록 ───────────────────────────────────────────────────────
+
+_ABS_STATE = {'new': '신규', 'same': '이미 있음', 'overlap': '겹침', 'unknown': '임원 모름'}
+
+
+def table_rows(rows: list[dict]) -> list[dict]:
+    """부재 후보 → 표 줄 (상태·확인 칸 포함) — 받은 메일 화면과 같이 씀."""
+    return [{k: r.get(k, '') or '' for k in ('person', 'kind', 'start_date', 'end_date', 'half', 'place', 'deputy',
+                                             'note', 'check', 'state')} | {'state_label': _ABS_STATE.get(r['state'], '')}
+            for r in absences.preview(rows)]
+
+
+@callback(Output('ab-imp-modal', 'is_open'), Output('ab-imp-table', 'data'), Output('ab-imp-note', 'children'),
+          Output('ab-imp-msg', 'children'), Output('ab-imp-msg', 'is_open'), Output('ab-imp-msg', 'color'),
+          Output('ab-refresh', 'data', allow_duplicate=True),
+          Input('ab-imp-open', 'n_clicks'), Input('ab-imp-close', 'n_clicks'), Input('ab-imp-read', 'n_clicks'),
+          Input('ab-imp-apply', 'n_clicks'),
+          State('ab-imp-text', 'value'), State('ab-imp-date', 'value'), State('ab-imp-table', 'data'),
+          State('ab-refresh', 'data'), prevent_initial_call=True)
+def import_mail(_o, _c, _r, _a, text, mail_date, rows, n):
+    nu = no_update
+    trig = ctx.triggered_id
+    if not ctx.triggered or not ctx.triggered[0]['value']:
+        return (nu,) * 7
+    if trig == 'ab-imp-open':
+        return True, nu, nu, '', False, nu, nu
+    if trig == 'ab-imp-close':
+        return False, nu, nu, '', False, nu, nu
+    if trig == 'ab-imp-read':
+        if not (text or '').strip():
+            return nu, nu, nu, '메일 내용을 붙여넣으세요.', True, 'warning', nu
+        found, how = absences.extract(text, mail_date or date.today().isoformat())
+        msg = '' if found else '부재를 찾지 못했습니다 — 표에 직접 적어도 됩니다.'
+        data = table_rows(found) or [{'person': '', 'kind': '휴가', 'start_date': mail_date or '', 'end_date': '',
+                                      'half': '', 'place': '', 'deputy': '', 'note': '', 'check': '',
+                                      'state': 'unknown', 'state_label': ''}]
+        return nu, data, how, msg, bool(msg), 'warning', nu
+    r = absences.apply_rows(rows or [], auth.current_name())
+    msg = (f"{r['added']}건 등록" + (f", 이미 있음 {r['same']}건" if r['same'] else '')
+           + (f", 임원을 못 찾아 건너뜀 {r['unknown']}건" if r['unknown'] else ''))
+    return nu, table_rows([x for x in rows or [] if x.get('person')]), nu, msg, True, \
+        'success' if r['added'] else 'secondary', (n or 0) + 1

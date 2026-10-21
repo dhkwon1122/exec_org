@@ -283,6 +283,7 @@ class Absence(Base):
     place = Column(String(300), default='')  # 출장지·교육 기관 등
     deputy = Column(String(100), default='')  # 대결자(업무 대행)
     note = Column(Text, default='')
+    source_mail_id = Column(Integer, nullable=True, index=True)  # 메일에서 뽑아 등록했으면 그 메일 (inbound_mails.id)
     created_by = Column(String(100), default='')
     created_at = Column(DateTime, default=_now)
     updated_at = Column(DateTime, default=_now, onupdate=_now)

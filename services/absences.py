@@ -1,9 +1,14 @@
-"""임원 부재 일정 — 휴가·출장·교육 등으로 자리를 비우는 기간 (캘린더의 '임원 부재' 탭, 임원 화면)."""
+"""임원 부재 일정 — 휴가·출장·교육 등으로 자리를 비우는 기간 (캘린더의 '임원 부재' 탭, 임원 화면).
+
+메일에서 뽑기: extract() — AI(없거나 실패하면 규칙)로 [임원 이름, 종류, 기간, 반차, 장소, 대결자, 메모] 를 뽑고,
+이름·별칭으로 등록된 임원을 찾는다. preview() 로 신규/이미 있음/겹침/임원 모름을 보여 주고 apply_rows() 로 넣는다.
+"""
+import re
 from datetime import date, timedelta
 
 from sqlalchemy import select
 
-from services import db
+from services import db, llm
 from services.db import Absence, Person
 
 KINDS = ['휴가', '출장', '해외출장', '교육', '외부 일정', '병가', '기타']
@@ -11,7 +16,7 @@ HALVES = ['', '오전', '오후']
 
 
 def _dict(a: Absence, p: Person | None) -> dict:
-    return {'id': a.id, 'person_id': a.person_id, 'person_name': p.name if p else '',
+    return {'id': a.id, 'source_mail_id': a.source_mail_id, 'person_id': a.person_id, 'person_name': p.name if p else '',
             'position': (p.position or '') if p else '', 'kind': a.kind or '기타', 'start_date': a.start_date,
             'end_date': a.end_date, 'half': a.half or '', 'place': a.place or '', 'deputy': a.deputy or '',
             'note': a.note or '', 'created_by': a.created_by or '',
@@ -43,7 +48,8 @@ def _check(data: dict) -> dict:
             'note': str(data.get('note') or '').strip()}
 
 
-def save(data: dict, person_ids: list[int] | None = None, aid: int | None = None, by: str = '') -> list[dict]:
+def save(data: dict, person_ids: list[int] | None = None, aid: int | None = None, by: str = '',
+         source_mail_id: int | None = None) -> list[dict]:
     """새로 만들 때는 person_ids 마다 한 건씩, 고칠 때(aid)는 그 한 건. 저장한 부재 목록을 돌려준다."""
     vals = _check(data)
     with db.SessionLocal() as s:
@@ -60,7 +66,7 @@ def save(data: dict, person_ids: list[int] | None = None, aid: int | None = None
                 raise ValueError('임원을 고르세요.')
             if len(s.scalars(select(Person.id).where(Person.id.in_(ids))).all()) != len(ids):
                 raise ValueError('임원을 찾을 수 없습니다.')
-            rows = [Absence(person_id=pid, created_by=by, **vals) for pid in ids]
+            rows = [Absence(person_id=pid, created_by=by, source_mail_id=source_mail_id, **vals) for pid in ids]
             s.add_all(rows)
         s.commit()
         return [_dict(a, s.get(Person, a.person_id)) for a in rows]
@@ -127,3 +133,179 @@ def for_person(person_id: int, limit: int = 20) -> list[dict]:
 def week_of(d: date) -> tuple[str, str]:
     start = d - timedelta(days=d.weekday())
     return start.isoformat(), (start + timedelta(days=6)).isoformat()
+
+
+# ── 메일에서 뽑기 ─────────────────────────────────────────────────────
+
+EXTRACT_SYSTEM = f"""너는 임원조직 담당자의 비서다. 메일(휴가·출장·교육·외부 일정 안내, 부재 현황표 등)을 읽고
+임원이 자리를 비우는 일정을 사람마다 한 건씩 뽑는다.
+- person: 임원 이름(직위 빼고 이름만). 여러 명이 같이 가면 사람마다 따로.
+- kind: {', '.join(KINDS)} 중 하나 (연차·휴가·리프레시 → 휴가, 국내 출장 → 출장, 국외·해외 → 해외출장).
+- start_date, end_date: YYYY-MM-DD. 연도가 없으면 메일 날짜의 연도, '다음주 월요일' 같은 표현은 메일 날짜 기준.
+  하루면 둘 다 같은 날. '10/26~30' 은 10월 26일부터 30일까지.
+- half: 반차면 '오전' 또는 '오후', 아니면 빈 문자열.
+- place: 출장지·교육 기관 등, deputy: 대결자·업무 대행자, note: 그 밖의 내용(사유·연락처 등).
+- 부재가 아닌 내용(회의 일정·업무 요청 등)은 뽑지 않는다. 입력에 없는 내용은 만들지 않는다.
+반드시 JSON 만 출력: {{"absences": [{{"person": "", "kind": "", "start_date": "", "end_date": "", "half": "",
+"place": "", "deputy": "", "note": ""}}]}}"""
+
+_KIND_WORDS = [('해외출장', r'해외\s*출장|국외\s*출장|해외'), ('병가', r'병가|병원|입원'), ('교육', r'교육|연수|과정'),
+               ('출장', r'출장'), ('휴가', r'휴가|연차|반차|리프레시|하계|동계|월차'), ('외부 일정', r'외부\s*일정|외근|외부\s*행사')]
+_DEPUTY = re.compile(r'(?:대결자?|업무\s*대행|대행|직무\s*대리)\s*[:：]?\s*([가-힣A-Za-z]{2,10}(?:\s*(?:부사장|사장|전무|상무|'
+                     r'마스터|Master|펠로우|Fellow|팀장|센터장|님))?)')
+_HALF = re.compile(r'(오전|오후)\s*반차|반차\s*\(?(오전|오후)')
+
+
+def _clean_row(r: dict, base: date) -> dict | None:
+    def d(v):
+        v = str(v or '').strip()[:10].replace('.', '-').replace('/', '-')
+        try:
+            return date.fromisoformat(v).isoformat()
+        except ValueError:
+            return ''
+    start = d(r.get('start_date'))
+    if not start or not str(r.get('person') or '').strip():
+        return None
+    end = d(r.get('end_date')) or start
+    if end < start:
+        end = start
+    kind = str(r.get('kind') or '').strip()
+    kind = kind if kind in KINDS else ('휴가' if '휴가' in kind or '연차' in kind else '기타')
+    half = str(r.get('half') or '').strip()
+    half = half if half in HALVES and start == end else ''
+    return {'person': str(r['person']).strip()[:50], 'kind': kind, 'start_date': start, 'end_date': end, 'half': half,
+            'place': str(r.get('place') or '').strip()[:300], 'deputy': str(r.get('deputy') or '').strip()[:100],
+            'note': str(r.get('note') or '').strip()[:500]}
+
+
+def ai_extract(text: str, mail_date: str) -> list[dict]:
+    base = _base(mail_date)
+    names = ', '.join(p.name for p in _people())[:2000]
+    raw = llm.chat(EXTRACT_SYSTEM, f"메일 날짜: {base.isoformat()} ({'월화수목금토일'[base.weekday()]})\n"
+                                   f"등록된 임원 이름(참고): {names}\n\n메일:\n{text[:llm.MAX_INPUT_CHARS]}")
+    rows = [_clean_row(r, base) for r in llm._extract_json(raw).get('absences') or [] if isinstance(r, dict)]
+    return [r for r in rows if r]
+
+
+def _base(mail_date: str) -> date:
+    try:
+        return date.fromisoformat(mail_date)
+    except (TypeError, ValueError):
+        return date.today()
+
+
+def _people() -> list[Person]:
+    with db.SessionLocal() as s:
+        return list(s.scalars(select(Person).order_by(Person.active.desc(), Person.id)))
+
+
+def _names(p: Person) -> list[str]:
+    return [n for n in [p.name] + [a.strip() for a in (p.aliases or '').split(',')] if len(n) >= 2]
+
+
+def rule_extract(text: str, mail_date: str, subject: str = '') -> list[dict]:
+    """LLM 없이 — 등록된 임원 이름이 나오는 줄에서 부재 종류 낱말과 날짜(범위)를 읽는다."""
+    from services.schedules import _find_date  # 날짜 읽기는 원장님 일정과 같은 규칙
+    base = _base(mail_date)
+    people = _people()
+    out = []
+    subj_kind = next((k for k, pat in _KIND_WORDS if re.search(pat, subject or '')), '')
+    for line in (text or '').splitlines():
+        deputy = ''
+        dm = _DEPUTY.search(line)
+        if dm:  # '(대결: 박민수 상무)' — 대결자는 부재가 아니다
+            deputy = dm.group(1).strip()
+            line = line[:dm.start()] + line[dm.end():]
+        who = [p for p in people if any(n in line for n in _names(p))]
+        if not who:
+            continue
+        kind = next((k for k, pat in _KIND_WORDS if re.search(pat, line)), subj_kind)
+        found = _find_date(line, base)
+        if not kind or not found:
+            continue
+        start, rest = found
+        end = start
+        tail = line[line.find(start[5:7].lstrip('0')):]  # 시작 날짜 뒤에 '~30' 같은 끝 날짜가 붙었는지
+        second = _find_date(rest, base)
+        if second and second[0] >= start:
+            end = second[0]
+        else:
+            m = re.search(r'[~\-–]\s*(?:(\d{1,2})\s*[./월]\s*)?(\d{1,2})\s*일?(?!\d)', tail)
+            if m:
+                try:
+                    s = date.fromisoformat(start)
+                    e = date(s.year, int(m.group(1) or s.month), int(m.group(2)))
+                    end = e.isoformat() if e >= s else start
+                except ValueError:
+                    pass
+        h = _HALF.search(line)
+        half = (h.group(1) or h.group(2)) if h and start == end else ''
+        for p in who:
+            out.append({'person': p.name, 'kind': kind, 'start_date': start, 'end_date': end, 'half': half,
+                        'place': '', 'deputy': deputy[:100], 'note': line.strip()[:200]})
+    return out
+
+
+def extract(text: str, mail_date: str, subject: str = '') -> tuple[list[dict], str]:
+    """메일 → (부재 후보, 어떻게 읽었나). AI 가 있으면 AI, 없거나 실패하면 규칙."""
+    if llm.is_configured():
+        try:
+            return ai_extract(f'제목: {subject}\n\n{text}' if subject else text, mail_date), 'AI 로 읽었습니다.'
+        except Exception as e:  # noqa: BLE001
+            return rule_extract(text, mail_date, subject), f'AI 실패({str(e)[:80]}) — 규칙으로 읽었습니다.'
+    return rule_extract(text, mail_date, subject), 'LLM 미설정 — 임원 이름·날짜가 있는 줄을 규칙으로 읽었습니다.'
+
+
+def match_person(name: str) -> tuple[int | None, str]:
+    """이름(직위가 붙어 있어도) → (임원 id, 찾은 이름). 같은 이름이 여럿이면 추적 중인 임원 먼저."""
+    name = (name or '').strip()
+    if not name:
+        return None, ''
+    people = _people()
+    for p in people:  # 이름이 정확히 같거나
+        if name == p.name or name in _names(p):
+            return p.id, p.name
+    for p in people:  # 적힌 글자 안에 이름·별칭이 들어 있으면 ('김영수 부사장')
+        if any(n in name for n in _names(p)):
+            return p.id, p.name
+    return None, ''
+
+
+def preview(rows: list[dict]) -> list[dict]:
+    """후보마다 상태 — new(신규) / same(이미 등록됨) / overlap(그 기간에 다른 부재가 있음) / unknown(임원 모름)."""
+    out = []
+    for r in rows:
+        r = {**r}
+        pid, pname = match_person(r.get('person', ''))
+        r['person_id'] = pid
+        if pid is None:
+            r['state'], r['check'] = 'unknown', '등록된 임원을 찾지 못함 — 이름을 고치거나 임원을 먼저 등록하세요'
+            out.append(r)
+            continue
+        others = overlaps(pid, r['start_date'], r['end_date'])
+        same = [o for o in others if (o['kind'], o['start_date'], o['end_date'], o['half']) ==
+                (r['kind'], r['start_date'], r['end_date'], r.get('half') or '')]
+        if same:
+            r['state'], r['check'] = 'same', f'이미 등록됨 ({pname})'
+        elif others:
+            o = others[0]
+            r['state'], r['check'] = 'overlap', f"{pname}: 이미 {o['kind']} {o['start_date'][5:]}~{o['end_date'][5:]}"
+        else:
+            r['state'], r['check'] = 'new', pname if pname != r.get('person') else ''
+        out.append(r)
+    return out
+
+
+def apply_rows(rows: list[dict], by: str = '', source_mail_id: int | None = None) -> dict:
+    """미리보기 줄을 등록 — 이미 같은 부재가 있으면 건너뛰고, 임원을 못 찾은 줄도 건너뛴다."""
+    added = same = unknown = 0
+    for r in preview([x for x in (_clean_row(x, date.today()) for x in rows) if x]):
+        if r['state'] == 'unknown':
+            unknown += 1
+            continue
+        if r['state'] == 'same':
+            same += 1
+            continue
+        save(r, person_ids=[r['person_id']], by=by, source_mail_id=source_mail_id)
+        added += 1
+    return {'added': added, 'same': same, 'unknown': unknown}

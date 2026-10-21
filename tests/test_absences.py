@@ -52,3 +52,11 @@ def test_validation_and_person_view():
     assert ids.index(soon['id']) < ids.index(past['id'])  # 앞으로의 부재가 먼저
     store.delete_person(kim['id'])
     assert absences.list_range('2000-01-01', '2100-01-01') == []  # 임원을 지우면 부재도 지워짐
+
+
+def test_rule_extract_keeps_deputy_out():
+    store.create_person('이영희', position='상무')
+    store.create_person('박민수', position='상무')
+    rows, _ = absences.extract('이영희 상무 11/9~11/10 휴가 (대결: 박민수 상무)', '2026-10-21')
+    assert [(r['person'], r['start_date'], r['end_date'], r['deputy']) for r in rows] == [
+        ('이영희', '2026-11-09', '2026-11-10', '박민수 상무')]

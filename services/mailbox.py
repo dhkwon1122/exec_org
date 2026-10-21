@@ -23,11 +23,11 @@ from email.utils import parseaddr
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 
-from services import db, doc_versions, llm, mail_text, schedules, store
+from services import absences, db, doc_versions, llm, mail_text, schedules, store
 from services.db import InboundMail, MailRule
 
 log = logging.getLogger(__name__)
-ACTIONS = {'schedule': '원장님 일정', 'task': '업무', 'ignore': '무시'}
+ACTIONS = {'schedule': '원장님 일정', 'task': '업무', 'absence': '임원 부재', 'ignore': '무시'}
 FIELDS = {'sender': '보낸 사람', 'subject': '제목', 'body': '본문'}
 STATUS = {'auto': '자동 반영', 'review': '확인 필요', 'done': '반영함', 'ignored': '무시', 'failed': '실패',
           'skipped': '건너뜀'}
@@ -157,10 +157,11 @@ CLASSIFY_SYSTEM = """너는 임원조직 담당자의 메일을 정리하는 비
 - schedule: 원장님(기관장) 일정을 알리거나 바꾸는 메일 (비서실 주간 일정, 회의·행사 일시 안내 등)
 - task: 담당자가 해야 할 일이 있는 메일 (요청·지시·자료 제출·검토·회신 요청 등)
 - both: 둘 다
+- absence: 임원의 휴가·출장·교육·병가 등 부재(자리 비움)를 알리는 메일 (부재 현황, 휴가·출장 신청·안내)
 - ignore: 공지·광고·자동 발송·참고용이라 할 일이 없는 메일
 task 나 both 면 해야 할 일을 tasks 에 넣는다(제목은 동사로 끝나는 한 문장, 기한은 YYYY-MM-DD — '금요일까지' 같은
 상대 표현은 메일 날짜 기준, 없으면 빈 문자열, 담당자는 메일에 이름이 있을 때만, 여러 명이면 쉼표로).
-반드시 JSON 만 출력: {"kind": "schedule|task|both|ignore", "reason": "한 줄 근거",
+반드시 JSON 만 출력: {"kind": "schedule|task|both|absence|ignore", "reason": "한 줄 근거",
 "tasks": [{"title": "", "due": "", "assignee": ""}]}"""
 
 
@@ -183,7 +184,7 @@ def ai_classify(subject: str, sender: str, mail_date: str, body: str) -> dict:
                                     f'제목: {subject}\n\n본문:\n{body[:llm.MAX_INPUT_CHARS]}')
     data = llm._extract_json(raw)
     kind = str(data.get('kind') or '').strip().lower()
-    if kind not in ('schedule', 'task', 'both', 'ignore'):
+    if kind not in ('schedule', 'task', 'both', 'absence', 'ignore'):
         raise llm.LLMError(f'알 수 없는 분류: {kind}')
     return {'kind': kind, 'reason': str(data.get('reason') or '')[:300], 'tasks': _clean_tasks(data.get('tasks'))}
 
@@ -193,6 +194,8 @@ def guess(subject: str, mail_date: str, body: str) -> dict:
     if schedules.table_parse(body, mail_date) or schedules.block_parse(body, mail_date) or \
             len(schedules.rule_parse(body, mail_date)) >= 2:
         return {'kind': 'schedule', 'reason': '본문에서 일정표를 찾음', 'tasks': []}
+    if absences.rule_extract(body, mail_date, subject):
+        return {'kind': 'absence', 'reason': '임원 이름과 휴가·출장 등 부재 낱말·날짜가 있음', 'tasks': []}
     return {'kind': 'task', 'reason': 'LLM 미설정 — 제목을 업무 후보로', 'tasks': [{'title': subject[:300], 'due': '',
                                                                                   'assignee': ''}]}
 
@@ -404,6 +407,8 @@ def process(mail_id: int) -> None:
             c = {**guess(m['subject'], m['mail_date'], m['body']), 'reason': f'AI 분류 실패({str(e)[:100]}) — 추정'}
         iid = _make_schedule_import(m) if c['kind'] in ('schedule', 'both') else None
         sug = {'tasks': c['tasks']}
+        if c['kind'] == 'absence':
+            sug['absences'], sug['absence_note'] = absences.extract(m['body'], m['mail_date'], m['subject'])
         if c['kind'] in ('task', 'both') and c['tasks']:
             sug.update(suggest_parent(m['subject'], m['body'], c['tasks'], mail_id))
         _update(mail_id, status='review', kind=c['kind'], reason=c['reason'], suggestion=sug,
@@ -431,6 +436,21 @@ def _apply_rule(m: dict, rule: dict) -> None:
             _update(m['id'], status='review', kind='schedule', rule_id=rule['id'], schedule_import_id=iid,
                     reason=reason + ('' if imp['status'] == 'done' else f" — 일정 정리 실패: {imp['error']}"))
         return
+    if rule['action'] == 'absence':
+        rows, how = absences.extract(m['body'], m['mail_date'], m['subject'])
+        sug = {'tasks': [], 'absences': rows, 'absence_note': how}
+        states = {r['state'] for r in absences.preview(rows)}
+        if rule['auto'] and rows and states <= {'new', 'same'}:  # 임원을 다 찾았고 겹치는 부재가 없을 때만 자동
+            r = absences.apply_rows(rows, MAIL_AUTHOR, m['id'])
+            _update(m['id'], status='auto', kind='absence', rule_id=rule['id'], suggestion=sug,
+                    reason=f"{reason} — 임원 부재 {r['added']}건 (이미 있음 {r['same']}건)",
+                    handled_at=datetime.now().replace(microsecond=0), handled_by=MAIL_AUTHOR)
+        else:
+            why = '' if rows else ' — 부재를 찾지 못함'
+            if rows and not states <= {'new', 'same'}:
+                why = ' — 임원을 못 찾았거나 겹치는 부재가 있어 확인 필요'
+            _update(m['id'], status='review', kind='absence', rule_id=rule['id'], suggestion=sug, reason=reason + why)
+        return
     tasks = task_candidates(m['subject'], m['mail_date'], m['body'])
     sug = {'tasks': tasks}
     if not rule['parent_task_id']:  # 규칙에 상위 업무가 없으면 추천 (자동 반영은 같은 스레드일 때만 그대로 씀)
@@ -449,8 +469,8 @@ def _apply_rule(m: dict, rule: dict) -> None:
 
 
 def apply_review(mail_id: int, tasks: list[dict], parent_id: int | None, schedule_rows: list[dict] | None,
-                 by: str) -> dict:
-    """확인 화면에서 반영 — 고친 업무 후보로 업무를 만들고, 고친 일정 표를 반영한다."""
+                 by: str, absence_rows: list[dict] | None = None) -> dict:
+    """확인 화면에서 반영 — 고친 업무 후보로 업무를 만들고, 고친 일정 표·임원 부재 표를 반영한다."""
     m = get_mail(mail_id)
     if m is None:
         raise ValueError('메일을 찾을 수 없습니다.')
@@ -458,9 +478,31 @@ def apply_review(mail_id: int, tasks: list[dict], parent_id: int | None, schedul
     r = {'added': 0, 'updated': 0, 'same': 0}
     if schedule_rows:
         r = schedules.apply_events(schedule_rows, m['schedule_import_id'], by)
+    ab = absences.apply_rows(absence_rows, by, mail_id) if absence_rows else {'added': 0}
     _update(mail_id, status='done', task_ids=','.join(map(str, m['task_ids'] + ids)),
             handled_at=datetime.now().replace(microsecond=0), handled_by=by)
-    return {'tasks': len(ids), **r}
+    return {'tasks': len(ids), **r, 'absences': ab['added']}
+
+
+def extract_absences(mail_id: int) -> list[dict]:
+    """어떤 메일이든 — 임원 부재를 뽑아 추천으로 남긴다 (받은 메일 화면의 '임원 부재 찾기')."""
+    m = get_mail(mail_id)
+    if m is None:
+        raise ValueError('메일을 찾을 수 없습니다.')
+    rows, how = absences.extract(m['body'], m['mail_date'], m['subject'])
+    _update(mail_id, suggestion={**m['suggestion'], 'absences': rows, 'absence_note': how})
+    return rows
+
+
+def apply_absences(mail_id: int, rows: list[dict], by: str) -> dict:
+    """부재 표만 반영. 부재 안내 메일이 '확인 필요'였으면 '반영함'으로."""
+    m = get_mail(mail_id)
+    if m is None:
+        raise ValueError('메일을 찾을 수 없습니다.')
+    r = absences.apply_rows(rows or [], by, mail_id)
+    if m['kind'] == 'absence' and m['status'] in ('review', 'failed'):
+        _update(mail_id, status='done', handled_at=datetime.now().replace(microsecond=0), handled_by=by)
+    return r
 
 
 def ignore(mail_id: int, by: str) -> None:

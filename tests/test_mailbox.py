@@ -3,7 +3,7 @@ from email.message import EmailMessage
 
 import pytest
 
-from services import db, llm, mailbox, schedules, store
+from services import absences, db, llm, mailbox, schedules, store
 
 
 @pytest.fixture(autouse=True)
@@ -265,3 +265,63 @@ def test_link_or_create_task_from_any_mail():
     assert store.get_task(new_id)['source_mail_id'] is None and store.task_sources(new_id)['mails'] == []
     with pytest.raises(ValueError):
         mailbox.link_task(m['id'], 9999, '나')
+
+
+ABSENCE_TEXT = """이번 주 임원 부재 현황입니다.
+- 김부사장: 10/26(월)~30(금) 해외출장
+- 이영희 상무 10/27 오후 반차
+- 홍길동 상무 10/28 휴가"""
+
+
+def test_absence_rule_auto_and_review():
+    kim = store.create_person('김영수', position='부사장', aliases='김부사장')
+    lee = store.create_person('이영희', position='상무')
+    absences.save({'kind': '교육', 'start_date': '2026-10-27'}, person_ids=[lee['id']])  # 이미 다른 부재가 있음
+    mailbox.save_rule({'name': '부재 현황', 'field': 'subject', 'pattern': '부재', 'action': 'absence', 'auto': True})
+    mailbox.fetch_new(connect=lambda cfg: FakePOP([_mail('[공지] 임원 부재 현황', 'sec@x.com', text=ABSENCE_TEXT)]))
+    m = mailbox.list_mails()[0]
+    # 겹치는 부재가 있어 자동 반영하지 않고 확인 필요로 (규칙으로 읽을 때 등록 안 된 홍길동은 못 찾음)
+    assert (m['status'], m['kind']) == ('review', 'absence') and '확인' in m['reason']
+    rows = m['suggestion']['absences'] + [{'person': '홍길동', 'kind': '휴가', 'start_date': '2026-10-28'}]
+    assert [r['state'] for r in absences.preview(rows)] == ['new', 'overlap', 'unknown']
+    r = mailbox.apply_review(m['id'], [], None, None, '나', absence_rows=rows)
+    assert r['absences'] == 2  # 겹쳐도 사람이 확인했으면 등록, 임원 모름은 건너뜀
+    got = absences.list_range('2026-10-01', '2026-10-31')
+    assert [(x['person_name'], x['kind'], x['start_date'], x['end_date'], x['half']) for x in got] == [
+        ('김영수', '해외출장', '2026-10-26', '2026-10-30', ''), ('이영희', '교육', '2026-10-27', '2026-10-27', ''),
+        ('이영희', '휴가', '2026-10-27', '2026-10-27', '오후')]
+    assert got[0]['source_mail_id'] == m['id']
+    # 같은 메일을 다시 반영해도 두 번 들어가지 않음
+    assert mailbox.apply_absences(m['id'], rows, '나') == {'added': 0, 'same': 2, 'unknown': 1}
+    assert absences.overlaps(kim['id'], '2026-10-26', '2026-10-26')[0]['kind'] == '해외출장'
+
+
+def test_absence_rule_auto_when_all_known():
+    store.create_person('김영수', aliases='김부사장')
+    mailbox.save_rule({'name': '부재', 'field': 'subject', 'pattern': '부재', 'action': 'absence', 'auto': True})
+    mailbox.fetch_new(connect=lambda cfg: FakePOP([_mail('임원 부재 안내', 'sec@x.com',
+                                                         text='김부사장 10/26~28 출장 (부산)')]))
+    m = mailbox.list_mails()[0]
+    assert m['status'] == 'auto' and '임원 부재 1건' in m['reason']
+    assert absences.list_range('2026-10-26', '2026-10-26')[0]['end_date'] == '2026-10-28'
+
+
+def test_ai_classifies_absence_and_manual_extract(monkeypatch):
+    store.create_person('이영희', position='상무')
+
+    def fake_chat(system, user, temperature=0.2):
+        if '부재' in system and 'absences' in system:
+            return json.dumps({'absences': [{'person': '이영희 상무', 'kind': '교육', 'start_date': '2026-11-02',
+                                             'end_date': '2026-11-04', 'place': '인재개발원', 'deputy': '김철수'}]})
+        return json.dumps({'kind': 'absence', 'reason': '교육 일정 안내', 'tasks': []})
+    monkeypatch.setattr(llm, 'is_configured', lambda: True)
+    monkeypatch.setattr(llm, 'chat', fake_chat)
+    mailbox.fetch_new(connect=lambda cfg: FakePOP([_mail('교육 참석 안내', 'hr@x.com', text='이영희 상무 교육 참석')]))
+    m = mailbox.list_mails()[0]
+    assert m['kind'] == 'absence' and m['suggestion']['absences'][0]['place'] == '인재개발원'
+    assert absences.preview(m['suggestion']['absences'])[0]['state'] == 'new'  # '이영희 상무' → 이영희
+    # 업무로 분류된 메일에서도 직접 찾기
+    rows = mailbox.extract_absences(m['id'])
+    assert len(rows) == 1 and mailbox.get_mail(m['id'])['suggestion']['absences'] == rows
+    r = mailbox.apply_absences(m['id'], rows, '나')
+    assert r['added'] == 1 and mailbox.get_mail(m['id'])['status'] == 'done'
