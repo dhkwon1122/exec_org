@@ -5,7 +5,7 @@ import dash_bootstrap_components as dbc
 from dash import ALL, Input, Output, State, callback, ctx, dash_table, dcc, html, no_update
 
 from components import absence_ui, doc_ui, ui
-from services import absences, auth, doc_versions, llm, mailbox, outbox, schedules, store
+from services import absences, auth, doc_versions, doc_worker, llm, mailbox, outbox, schedules, store
 
 dash.register_page(__name__, path='/inbox', name='받은 메일', title='업무 기록 · 받은 메일')
 
@@ -243,6 +243,13 @@ def render_list(flt, _, sel):
                  if lr else ''))
     else:
         st = 'POP3 미설정 (.env 의 MAIL_POP3_*) — 자동으로 가져오지 않습니다'
+    ds = doc_worker.status()
+    if ds['minutes'] and llm.is_configured():
+        last = ds['last']
+        st = [st, html.Br(), f"첨부 문서 자동 요약: {ds['minutes']}분 동안 입력이 없으면 하나씩"
+              + (f" · 대기 {ds['pending']}개" if ds['pending'] else ' · 대기 없음')
+              + (f" · 마지막 {last['at']} " + (last.get('filename', '') if last.get('ok') else f"(실패: {last.get('error', '')[:60]})")
+                 if last else '')]
     if not mails:
         return html.Div('메일이 없습니다.', className='small text-muted'), opts, st
     items = []

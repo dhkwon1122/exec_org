@@ -193,3 +193,66 @@ def test_docs_action_recommended_and_keeps_mail_status(monkeypatch):
     with db.SessionLocal() as s:
         assert s.get(InboundMail, mid).status == before
     assert 'docs' not in dict(mailbox.recommend_actions(mailbox.get_mail(mid)))
+
+
+# ── 쉬는 시간 자동 요약 (services/doc_worker.py) ─────────────────────
+
+def test_worker_waits_for_idle_then_summarizes_one_at_a_time(monkeypatch):
+    from services import doc_worker
+    monkeypatch.setattr(doc_worker, '_fails', {})
+    monkeypatch.setattr(doc_worker, '_pause_until', 0.0)
+    monkeypatch.setattr(doc_worker, '_last_touch', 0.0)
+    monkeypatch.setenv('DOC_SUMMARY_IDLE_MINUTES', '10')
+    calls = []
+    monkeypatch.setattr(llm, 'chat', lambda *a, **k: calls.append(1) or json.dumps(
+        {'doc_type': '보고서', 'summary': '요약', 'tags': ['보고'], 'key_dates': [], 'changes': ''}))
+    _fetch([_mail('1', 'Mon, 19 Oct 2026 09:00:00 +0900', [('가.docx', _docx(['가'])), ('나.xlsx', _xlsx([['나']])),
+                                                            ('사진.png', b'PNG')], '<a@x>')], monkeypatch)
+    assert len(doc_worker.pending()) == 2
+
+    now = 1_000_000.0
+    doc_worker.touch(now)
+    assert doc_worker.step(now + 60) is False  # 1분 전에 입력 — 기다린다
+    assert calls == []
+    assert doc_worker.step(now + 601) is True  # 10분 넘게 입력 없음 — 하나만
+    assert len(calls) == 1 and len(doc_worker.pending()) == 1
+    doc_worker.touch(now + 602)  # 사람이 돌아옴
+    assert doc_worker.step(now + 603) is False and len(calls) == 1
+    assert doc_worker.step(now + 1300) is True and doc_worker.step(now + 1301) is False
+    assert len(calls) == 2 and doc_worker.pending() == []
+    assert doc_worker.last_status()['ok'] is True
+
+
+def test_worker_backs_off_on_llm_error_and_can_be_turned_off(monkeypatch):
+    from services import doc_worker
+    monkeypatch.setattr(doc_worker, '_fails', {})
+    monkeypatch.setattr(doc_worker, '_pause_until', 0.0)
+
+    def boom(*a, **k):
+        raise llm.LLMError('LLM 서버에 연결할 수 없습니다')
+
+    monkeypatch.setattr(llm, 'chat', boom)
+    _fetch([_mail('1', 'Mon, 19 Oct 2026 09:00:00 +0900', [('가.docx', _docx(['가']))], '<a@x>')], monkeypatch)
+    monkeypatch.setenv('DOC_SUMMARY_IDLE_MINUTES', '0')
+    assert doc_worker.step(10 ** 10) is False and doc_worker.start() is False
+    monkeypatch.setenv('DOC_SUMMARY_IDLE_MINUTES', '10')
+    t = 10.0 ** 10
+    assert doc_worker.step(t) is False  # 실패 → 10분 쉼
+    assert doc_worker.last_status()['ok'] is False
+    assert doc_worker.step(t + 60) is False and doc_worker._fails  # 쉬는 중엔 부르지 않음
+    for i in range(1, 3):
+        doc_worker.step(t + i * 700)
+    assert doc_worker.pending() == []  # 3번 실패한 파일은 건너뜀
+
+
+def test_worker_fills_text_for_old_attachments_without_llm(monkeypatch):
+    from services import doc_worker
+    monkeypatch.setenv('DOC_SUMMARY_IDLE_MINUTES', '10')
+    _fetch([_mail('1', 'Mon, 19 Oct 2026 09:00:00 +0900', [('가.docx', _docx(['예전 첨부']))], '<a@x>')])
+    with db.SessionLocal() as s:  # 글자 뽑기 기능 전에 받은 첨부처럼
+        a = s.query(MailAttachment).one()
+        a.text, a.text_at = '', None
+        s.commit()
+    assert doc_worker.step(10 ** 10) is True
+    assert '예전 첨부' in _att('가.docx').text
+    assert doc_worker.step(10 ** 10) is False  # LLM 없으면 요약은 안 함
