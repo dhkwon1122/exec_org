@@ -131,3 +131,20 @@ def test_deleting_main_task_keeps_shared_history():
     moved = store.get_history(h['id'])
     assert moved['task_id'] == b['id'] and moved['also_tasks'] == []
     assert store.get_history(only_a['id']) is None
+
+
+def test_history_about_reference_and_linked_task():
+    a, b = store.create_task('조직개편'), store.create_task('임원 인사')
+    h0 = store.add_history(a['id'], '조직도 초안 공유', '메모')
+    ref = store.add_reference(a['id'], 'link', title='조직도 v2', url='https://conf/1', history_id=h0['id'])
+    h1 = store.add_history(a['id'], 'v2 검토 의견: 센터 통합안 보류', '피드백', ref_ids=[ref['id']])
+    assert [r['id'] for r in h1['refs']] == [ref['id']]  # 이 기록이 다룬 자료로 붙음
+    assert store.reference_history_counts(a['id']) == {ref['id']: 2}
+    with pytest.raises(ValueError):
+        store.add_history(a['id'], 'x', ref_ids=[9999])
+    store.link_tasks(a['id'], b['id'], '관련')
+    assert store.shared_history_count(a['id'], b['id']) == 0
+    store.add_history(a['id'], '두 업무 일정 맞추기로 함', '회의', also_task_ids=[b['id']])
+    assert store.shared_history_count(a['id'], b['id']) == 1 == store.shared_history_count(b['id'], a['id'])
+    store.delete_reference(ref['id'])  # 자료를 지우면 연결도 사라짐
+    assert store.get_history(h1['id'])['refs'] == []

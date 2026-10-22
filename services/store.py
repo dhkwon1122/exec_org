@@ -16,7 +16,7 @@ from sqlalchemy import func, or_, select, update
 from sqlalchemy.orm import aliased
 
 from services import db
-from services.db import HistoryEntry, HistoryPerson, HistoryTask, InboundMail, TaskAssignee, Person, PersonCareer, Reference, Task, TaskLink
+from services.db import HistoryEntry, HistoryPerson, HistoryReference, HistoryTask, InboundMail, TaskAssignee, Person, PersonCareer, Reference, Task, TaskLink
 
 STATUSES = ['예정', '진행중', '보류', '완료']
 ENTRY_TYPES = ['메모', '피드백', '동향', '회의', '결정', '진행', '이슈', '요청']
@@ -325,10 +325,11 @@ def child_tasks(task_id: int) -> list[dict]:
 def add_history(task_id: int | None, content: str, entry_type: str = '메모', author: str = '',
                 occurred_at: str | datetime | None = None, title: str = '', summary: str = '',
                 keywords: list[str] | str = '', person_ids: list[int] | None = None,
-                also_task_ids: list[int] | None = None, *, session=None) -> dict:
+                also_task_ids: list[int] | None = None, ref_ids: list[int] | None = None, *, session=None) -> dict:
     """원문(content)을 그대로 저장한다. AI 요약·키워드는 services.enrich.submit() 으로 따로 요청.
     업무(task_id)나 임원(person_ids) 중 하나는 있어야 한다 — 임원 동향은 업무 없이 임원에만 연결된다.
-    also_task_ids: 이 이력이 함께 걸친 다른 업무들 (task_id 가 없으면 그 첫 업무가 이력의 업무가 된다)."""
+    also_task_ids: 이 이력이 함께 걸친 다른 업무들 (task_id 가 없으면 그 첫 업무가 이력의 업무가 된다).
+    ref_ids: 이 이력이 다룬 참고자료 (참고자료 탭의 '이 자료에 대한 기록')."""
     person_ids = sorted({int(p) for p in (person_ids or [])})
     also = list(dict.fromkeys(int(x) for x in (also_task_ids or [])))
     if task_id is None and also:
@@ -350,6 +351,9 @@ def add_history(task_id: int | None, content: str, entry_type: str = '메모', a
         if person_ids and len(s.scalars(select(Person.id).where(Person.id.in_(person_ids))).all()) != len(person_ids):
             raise ValueError('임원을 찾을 수 없습니다.')
         others = _check_tasks(s, also)
+        ref_ids = list(dict.fromkeys(int(r) for r in ref_ids or []))
+        if ref_ids and len(s.scalars(select(Reference.id).where(Reference.id.in_(ref_ids))).all()) != len(ref_ids):
+            raise ValueError('참고자료를 찾을 수 없습니다.')
         h = HistoryEntry(task_id=task_id, entry_type=entry_type, content=content, author=author or '',
                          title=(title or '').strip(), summary=(summary or '').strip(),
                          keywords=_join_keywords(keywords))
@@ -361,11 +365,35 @@ def add_history(task_id: int | None, content: str, entry_type: str = '메모', a
             s.add(HistoryPerson(history_id=h.id, person_id=pid))
         for o in others:
             s.add(HistoryTask(history_id=h.id, task_id=o.id))
+        for rid in ref_ids:
+            s.add(HistoryReference(history_id=h.id, reference_id=rid))
         for x in [t, *others]:
             if x is not None:
                 x.updated_at = datetime.now().replace(microsecond=0)
         s.flush()
         return _decorate(s, [_history_dict(h)])[0]
+
+
+def reference_history_counts(task_id: int) -> dict[int, int]:
+    """업무의 참고자료별 기록 수 — 자료가 붙은 이력 + 그 자료를 다룬 기록."""
+    with db.SessionLocal() as s:
+        refs = list(s.scalars(select(Reference).where(Reference.task_id == task_id)))
+        ids = [r.id for r in refs]
+        out = {r.id: 1 if r.history_id else 0 for r in refs}
+        if ids:
+            for rid, n in s.execute(select(HistoryReference.reference_id, func.count())
+                                    .where(HistoryReference.reference_id.in_(ids))
+                                    .group_by(HistoryReference.reference_id)):
+                out[rid] += n
+        return out
+
+
+def shared_history_count(a: int, b: int) -> int:
+    """두 업무에 함께 걸친 기록 수 (연결 업무 탭)."""
+    with db.SessionLocal() as s:
+        in_b = select(HistoryEntry.id).where(_history_of_task(b))
+        return s.scalar(select(func.count()).select_from(HistoryEntry)
+                        .where(_history_of_task(a), HistoryEntry.id.in_(in_b))) or 0
 
 
 def _check_tasks(s, ids: list[int]) -> list[Task]:
@@ -507,6 +535,16 @@ def set_history_ai(entry_id: int, status: str, title: str | None = None, summary
         s.execute(stmt.values(**values))
 
 
+def mark_ai_todo(entry_id: int, idx: int, task_id: int) -> None:
+    """AI 가 찾은 할 일 idx 번째를 업무로 만들었다고 표시 — 제목을 고쳐 등록해도 '추가됨'으로 보이게."""
+    with db.transaction() as s:
+        h = s.get(HistoryEntry, entry_id)
+        todos = _load_json_list(h.ai_todos) if h else []
+        if 0 <= idx < len(todos) and isinstance(todos[idx], dict):
+            todos[idx]['task_id'] = task_id
+            h.ai_todos = json.dumps(todos, ensure_ascii=False)
+
+
 def _decorate(s, entries: list[dict]) -> list[dict]:
     """이력 dict 들에 'refs'(붙은 관련 자료)·'people'(연결된 임원)·'task_title' 을 채운다."""
     ids = [e['id'] for e in entries]
@@ -521,6 +559,11 @@ def _decorate(s, entries: list[dict]) -> list[dict]:
             also[hid].append({'id': tid, 'title': title})
         for r in s.scalars(select(Reference).where(Reference.history_id.in_(ids)).order_by(Reference.id)):
             refs[r.history_id].append(_ref_dict(r))
+        for hid, r in s.execute(select(HistoryReference.history_id, Reference)  # 이 기록이 다룬 자료
+                                .join(Reference, Reference.id == HistoryReference.reference_id)
+                                .where(HistoryReference.history_id.in_(ids)).order_by(Reference.id)):
+            if all(x['id'] != r.id for x in refs[hid]):
+                refs[hid].append(_ref_dict(r))
         for hid, p in s.execute(select(HistoryPerson.history_id, Person).join(Person, Person.id == HistoryPerson.person_id)
                                 .where(HistoryPerson.history_id.in_(ids)).order_by(Person.name)):
             people[hid].append({'id': p.id, 'name': p.name, 'position': p.position or ''})

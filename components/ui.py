@@ -182,19 +182,30 @@ def history_card(h: dict, terms: list[str] | None = None, show_task: bool = Fals
         body.append(keyword_chips(h['keywords'], terms))
     if h['ai_todos']:
         added_todos = added_todos or set()
+
+        def added_id(t):  # 만든 업무 id — 확인 창에서 고쳐 등록했으면 표시(task_id), 예전 것은 제목으로
+            if t.get('task_id'):
+                return t['task_id']
+            if isinstance(added_todos, dict):
+                return added_todos.get(t['title'])
+            return True if t['title'] in added_todos else None
+        left = [i for i, t in enumerate(h['ai_todos']) if not added_id(t)]
         body.append(html.Div([
-            html.Div([html.I(className='bi bi-list-check me-1'), 'AI가 찾은 할 일' + (' — + 를 누르면 업무로 추가' if actions else ''),
+            html.Div([html.I(className='bi bi-list-check me-1'), 'AI가 찾은 할 일' + (' — + 를 누르면 고쳐서 업무로 등록' if actions else ''),
                       html.Span(f" · 기한 기준: {h['ai_reference_date']}", className='ms-1')
-                      if h.get('ai_reference_date') and any(t.get('due') for t in h['ai_todos']) else None],
-                     className='text-muted mb-1'),
+                      if h.get('ai_reference_date') and any(t.get('due') for t in h['ai_todos']) else None,
+                      dbc.Button(f'{len(left)}건 한꺼번에 검토', id={'type': 'h-todo-all', 'hid': h['id'],
+                                                               'task': context_task_id or 0},
+                                 color='link', size='sm', className='p-0 ms-auto')
+                      if actions and len(left) > 1 else None],
+                     className='text-muted mb-1 d-flex align-items-center'),
             *[html.Div([
-                html.I(className='bi bi-check-lg text-success me-1') if t['title'] in added_todos else
+                html.I(className='bi bi-check-lg text-success me-1') if added_id(t) else
                 dbc.Button(html.I(className='bi bi-plus-lg'), id={'type': 'h-todo', 'hid': h['id'], 'idx': i, 'task': context_task_id or 0},
-                           color='link', size='sm', className='p-0 me-1', title='업무로 추가 (이 기록의 업무가 있으면 그 하위 업무로)')
+                           color='link', size='sm', className='p-0 me-1', title='고쳐서 업무로 등록')
                 if actions else html.I(className='bi bi-dot me-1'),
-                dcc.Link(t['title'], href=f"/task/{added_todos[t['title']]}", className='me-2',
-                         title='이 할 일로 만든 업무 열기')
-                if isinstance(added_todos, dict) and t['title'] in added_todos else
+                dcc.Link(t['title'], href=f"/task/{added_id(t)}", className='me-2', title='이 할 일로 만든 업무 열기')
+                if isinstance(added_id(t), int) and not isinstance(added_id(t), bool) else
                 html.Span(t['title'], className='me-2'),
                 html.Span(t['due'], className='badge text-bg-light border me-1') if t['due'] else None,
                 html.Span(t['assignee'], className='text-muted') if t['assignee'] else None,

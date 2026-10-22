@@ -120,7 +120,8 @@ def layout(mail=None, **_):
                     html.Div([
                         dbc.Button([html.I(className='bi bi-check2 me-1'), '업무로 등록'], id='ib-task-create',
                                    color='primary', size='sm', className='me-2'),
-                        html.Span('메일 원문은 만든 업무마다 "요청" 기록으로 남습니다. 만들지 않을 줄은 × 로 지우세요.',
+                        html.Span('AI 가 고른 업무입니다 — 칸을 눌러 이름·기한·담당을 바로 고친 뒤 등록하세요. 만들지 않을 줄은 ×, '
+                                  '빠진 업무는 "줄 추가". 메일 원문은 만든 업무마다 "요청" 기록으로 남습니다.',
                                   className='small text-muted'),
                     ], className='mt-1 d-flex align-items-center flex-wrap'),
                 ]),
