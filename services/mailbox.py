@@ -30,7 +30,7 @@ from services.db import InboundMail, MailRule, Task
 log = logging.getLogger(__name__)
 ACTIONS = {'schedule': '원장님 일정', 'task': '업무', 'absence': '임원 부재', 'ignore': '무시'}
 FIELDS = {'sender': '보낸 사람', 'subject': '제목', 'body': '본문'}
-STATUS = {'auto': '자동 반영', 'review': '확인 필요', 'done': '반영함', 'ignored': '무시', 'failed': '실패',
+STATUS = {'auto': '자동 처리', 'review': '확인 필요', 'done': '처리 완료', 'ignored': '무시', 'failed': '실패',
           'skipped': '건너뜀'}
 MAIL_AUTHOR = '메일 자동'
 
@@ -512,7 +512,7 @@ def apply_review(mail_id: int, tasks: list[dict], parent_id: int | None, schedul
 # ── AI 에게 맡기기 (사람이 고르는 분석) ───────────────────────────────
 
 AI_ACTIONS = {'schedule': '원장님 일정 정리', 'absence': '임원 부재 추출', 'tasks': '할 일(업무) 추출',
-              'summary': '요약·키워드'}
+              'person': '임원 정보 변경 찾기', 'summary': '요약·키워드'}
 
 
 def recommend_actions(m: dict) -> list[tuple[str, str]]:
@@ -562,6 +562,11 @@ def run_actions(mail_id: int, actions: list[str], by: str = '') -> dict:
         sug['requested_tasks'] = True
         sug.update(suggest_parent(m['subject'], m['body'], tasks, mail_id))
         done['tasks'] = len(tasks)
+    if 'person' in actions:
+        if not llm.is_configured():
+            raise ValueError('임원 정보 변경 찾기는 LLM 이 설정돼 있어야 합니다.')
+        sug['person_updates'] = ai_person_updates(m)
+        done['person'] = len(sug['person_updates'])
     if 'summary' in actions:
         if not llm.is_configured():
             raise ValueError('요약은 LLM 이 설정돼 있어야 합니다.')
@@ -577,6 +582,157 @@ def run_actions(mail_id: int, actions: list[str], by: str = '') -> dict:
     return done
 
 
+# ── 항목별 처리 (추천을 하나씩 처리하고, 끝나면 '처리 완료') ──────────────
+# suggestion['done'] = {'tasks'|'schedule'|'absence'|'trend'|'person': {'n': 건수, 'at': 시각, 'by': 사람}}
+
+HANDLED = {'tasks': '업무로 등록', 'schedule': '일정에 반영', 'absence': '부재 일정에 등록', 'trend': '임원 동향으로 기록',
+           'person': '임원 정보에 반영'}
+
+
+def _mark(mail_id: int, key: str, n: int, by: str, **extra) -> None:
+    m = get_mail(mail_id)
+    sug = dict(m['suggestion'])
+    done = dict(sug.get('done') or {})
+    prev = done.get(key, {}).get('n', 0)
+    done[key] = {'n': prev + n, 'at': datetime.now().strftime('%Y-%m-%d %H:%M'), 'by': by}
+    sug['done'] = done
+    sug.update(extra)
+    _update(mail_id, suggestion=sug)
+
+
+def add_tasks(mail_id: int, items: list[dict], parent_id: int | None, by: str) -> list[int]:
+    """업무 후보 표 → 업무로 등록 (메일 상태는 그대로 — 다 처리했으면 '처리 완료')."""
+    m = get_mail(mail_id)
+    if m is None:
+        raise ValueError('메일을 찾을 수 없습니다.')
+    if not any(str(it.get('title') or '').strip() for it in items or []):
+        raise ValueError('등록할 업무가 없습니다 — 표에 업무 이름을 적으세요.')
+    ids = create_tasks(m, items or [], parent_id, by)  # 같은 메일에서 이미 만든 제목은 건너뛴다
+    if not ids:
+        raise ValueError('표의 업무는 이 메일로 이미 등록했습니다.')
+    _mark(mail_id, 'tasks', len(ids), by)
+    return ids
+
+
+def apply_schedule(mail_id: int, rows: list[dict], by: str) -> dict:
+    """원장님 일정 표 → 일정에 반영 (기존 일정과 대조해 정말 바뀐 칸만)."""
+    m = get_mail(mail_id)
+    if m is None:
+        raise ValueError('메일을 찾을 수 없습니다.')
+    r = schedules.apply_events(rows or [], m['schedule_import_id'], by)
+    _mark(mail_id, 'schedule', r['added'] + r['updated'], by)
+    return r
+
+
+def record_trend(mail_id: int, person_ids: list[int], by: str, task_id: int | None = None) -> dict:
+    """메일을 임원 동향으로 기록 — 고른 임원(과 업무)에 연결된 '동향' 이력. AI 가 있으면 요약·키워드를 붙인다."""
+    from services import enrich
+    m = get_mail(mail_id)
+    if m is None:
+        raise ValueError('메일을 찾을 수 없습니다.')
+    if not person_ids:
+        raise ValueError('동향을 남길 임원을 고르세요.')
+    content = (f"[받은 메일] {m['subject']}\n보낸 사람: {m['sender']}\n날짜: {m['mail_date']}\n\n"
+               f"{m['body'][:20000]}")
+    h = store.add_history(task_id or None, content, '동향', author=sender_name(m['sender']) or by,
+                          occurred_at=f"{m['mail_date']} 09:00" if m['mail_date'] else None,
+                          title=m['subject'][:200], person_ids=person_ids)
+    enrich.submit(h['id'])
+    _mark(mail_id, 'trend', 1, by, trend_history_id=h['id'])
+    return h
+
+
+PERSON_FIELDS = {'직위': 'position', '소속': 'org', '별칭': 'aliases', '메모': 'note'}
+
+PERSON_SYSTEM = """너는 임원 정보를 관리하는 비서다. 메일에서 임원 정보가 바뀌거나 새로 알게 된 사실만 뽑는다
+(승진·보임·전보로 바뀐 직위나 소속, 새 직책, 겸직, 수상, 학위, 연락처 등).
+- person: 임원 이름(직위 빼고). field: 직위 / 소속 / 별칭 / 메모 중 하나, 그 밖이면 짧은 항목 이름(예: 겸직, 수상, 학위).
+- value: 바뀐 뒤의 값(메모면 한 줄로 남길 내용). reason: 메일에서 근거가 된 구절(짧게).
+- 메일에 없는 내용은 만들지 않는다. 임원 정보와 상관없는 내용(회의 일정, 업무 요청)은 뽑지 않는다.
+반드시 JSON 만 출력: {"updates": [{"person": "", "field": "", "value": "", "reason": ""}]}"""
+
+
+def ai_person_updates(m: dict) -> list[dict]:
+    names = ', '.join(f"{p['name']}({p['position']}, {p['org']})" for p in store.list_people())[:3000]
+    raw = llm.chat(PERSON_SYSTEM, f"등록된 임원(이름(직위, 소속)): {names}\n\n메일 날짜: {m['mail_date']}\n"
+                                  f"제목: {m['subject']}\n\n본문:\n{m['body'][:llm.MAX_INPUT_CHARS]}")
+    out = []
+    for u in llm._extract_json(raw).get('updates') or []:
+        if isinstance(u, dict) and str(u.get('person') or '').strip() and str(u.get('value') or '').strip():
+            out.append({'person': str(u['person']).strip()[:50], 'field': str(u.get('field') or '메모').strip()[:40],
+                        'value': str(u['value']).strip()[:500], 'reason': str(u.get('reason') or '').strip()[:200]})
+    return out[:20]
+
+
+def person_update_rows(rows: list[dict]) -> list[dict]:
+    """임원 정보 변경 표 — 임원을 찾고 지금 값을 붙인다."""
+    from services import profile
+    out = []
+    for r in rows or []:
+        pid, pname = absences.match_person(r.get('person', ''))
+        field = (r.get('field') or '메모').strip()
+        current = ''
+        if pid:
+            p = store.get_person(pid)
+            if field in PERSON_FIELDS:
+                v = p.get(PERSON_FIELDS[field])
+                current = ', '.join(v) if isinstance(v, list) else (v or '')
+            else:
+                current = next((a['value'] for a in profile.list_attributes(pid) if a['name'] == field), '')
+        out.append({'person': r.get('person', ''), 'field': field, 'current': current[:200],
+                    'value': r.get('value', ''), 'reason': r.get('reason', ''),
+                    'state': 'unknown' if pid is None else ('same' if current == (r.get('value') or '') else 'new'),
+                    'person_id': pid or ''})
+    return out
+
+
+def apply_person_updates(mail_id: int, rows: list[dict], by: str) -> dict:
+    """임원 정보에 반영 — 직위·소속은 바꾸고, 별칭은 더하고, 메모는 끝에 덧붙이고(날짜·메일 제목과 함께),
+    그 밖의 항목은 '추가 항목'으로. 임원을 못 찾은 줄·값이 같은 줄은 건너뛴다."""
+    from services import profile
+    m = get_mail(mail_id)
+    if m is None:
+        raise ValueError('메일을 찾을 수 없습니다.')
+    changed = skipped = 0
+    for r in person_update_rows(rows):
+        value = str(r['value'] or '').strip()
+        if not r['person_id'] or not value or r['state'] == 'same':
+            skipped += 1
+            continue
+        pid, field = int(r['person_id']), r['field']
+        if field in ('직위', '소속'):
+            store.update_person(pid, **{PERSON_FIELDS[field]: value})
+        elif field == '별칭':
+            p = store.get_person(pid)
+            store.update_person(pid, aliases=list(dict.fromkeys(p['aliases'] + [value])))
+        elif field == '메모':
+            p = store.get_person(pid)
+            line = f"[{m['mail_date']}] {value} (메일: {m['subject'][:60]})"
+            store.update_person(pid, note=(p['note'] + '\n' if p['note'] else '') + line)
+        else:
+            with db.SessionLocal() as s:
+                profile.upsert_attribute(s, pid, field[:100], value)
+                s.commit()
+        changed += 1
+    if changed:
+        _mark(mail_id, 'person', changed, by)
+    return {'changed': changed, 'skipped': skipped}
+
+
+def complete(mail_id: int, by: str) -> None:
+    """처리 완료 — '확인 필요'에서 빠진다."""
+    _update(mail_id, status='done', handled_at=datetime.now().replace(microsecond=0), handled_by=by)
+
+
+def pending_items(m: dict) -> list[str]:
+    """추천은 있는데 아직 처리하지 않은 항목 이름 (처리 완료 전에 알려 주기)."""
+    sug, done = m['suggestion'], (m['suggestion'].get('done') or {})
+    has = {'tasks': bool(sug.get('tasks')) and (m['kind'] in ('task', 'both') or sug.get('requested_tasks')),
+           'schedule': bool(m['schedule_import_id']), 'absence': bool(sug.get('absences')),
+           'person': bool(sug.get('person_updates'))}
+    return [HANDLED[k] for k, v in has.items() if v and k not in done]
+
+
 def extract_absences(mail_id: int) -> list[dict]:
     """어떤 메일이든 — 임원 부재를 뽑아 추천으로 남긴다 (받은 메일 화면의 '임원 부재 찾기')."""
     m = get_mail(mail_id)
@@ -588,13 +744,12 @@ def extract_absences(mail_id: int) -> list[dict]:
 
 
 def apply_absences(mail_id: int, rows: list[dict], by: str) -> dict:
-    """부재 표만 반영. 부재 안내 메일이 '확인 필요'였으면 '반영함'으로."""
+    """부재 표 → 부재 일정에 등록 (메일 상태는 그대로 — 다 처리했으면 '처리 완료')."""
     m = get_mail(mail_id)
     if m is None:
         raise ValueError('메일을 찾을 수 없습니다.')
     r = absences.apply_rows(rows or [], by, mail_id)
-    if m['kind'] == 'absence' and m['status'] in ('review', 'failed'):
-        _update(mail_id, status='done', handled_at=datetime.now().replace(microsecond=0), handled_by=by)
+    _mark(mail_id, 'absence', r['added'], by)
     return r
 
 
