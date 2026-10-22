@@ -185,6 +185,15 @@ class HistoryTask(Base):
     task_id = Column(Integer, ForeignKey('tasks.id', ondelete='CASCADE'), primary_key=True, index=True)
 
 
+class HistoryReference(Base):
+    """이력이 다룬 참고자료 — 참고자료 탭에서 '이 자료에 대한 기록'을 남길 때. 자료 하나에 기록이 여럿일 수 있다
+    (자료가 처음 붙은 이력은 references_.history_id)."""
+    __tablename__ = 'history_references'
+
+    history_id = Column(Integer, ForeignKey('history.id', ondelete='CASCADE'), primary_key=True)
+    reference_id = Column(Integer, ForeignKey('references_.id', ondelete='CASCADE'), primary_key=True, index=True)
+
+
 class HistoryPerson(Base):
     __tablename__ = 'history_people'
 
