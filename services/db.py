@@ -274,8 +274,7 @@ class Schedule(Base):
 
 
 class Absence(Base):
-    """임원 부재 — 휴가·출장·교육 등으로 자리를 비우는 기간. 한 사람당 한 건(여럿이 같이 가는 출장은 사람마다).
-    half: '' 종일, '오전'/'오후' 반차(시작일=종료일일 때)."""
+    """임원 부재 — 휴가·출장·교육 등으로 자리를 비우는 기간. 한 사람당 한 건(여럿이 같이 가는 출장은 사람마다)."""
     __tablename__ = 'absences'
 
     id = Column(Integer, primary_key=True)
@@ -283,10 +282,13 @@ class Absence(Base):
     kind = Column(String(20), default='휴가')
     start_date = Column(String(10), nullable=False, index=True)  # YYYY-MM-DD
     end_date = Column(String(10), nullable=False, index=True)
+    time_range = Column(String(50), default='')  # 부재 시간대 (선택) '09:00~12:00' · '오후' — 비면 종일
+    place = Column(String(300), default='')  # 행선지
+    content = Column(Text, default='')  # 일정 내용
+    note = Column(Text, default='')  # 메모
+    # 예전 칸 — 더는 쓰지 않는다(반차는 시간대로, 대결자는 메모로 옮김: _migrate_absences)
     half = Column(String(10), default='')
-    place = Column(String(300), default='')  # 출장지·교육 기관 등
-    deputy = Column(String(100), default='')  # 대결자(업무 대행)
-    note = Column(Text, default='')
+    deputy = Column(String(100), default='')
     source_mail_id = Column(Integer, nullable=True, index=True)  # 메일에서 뽑아 등록했으면 그 메일 (inbound_mails.id)
     created_by = Column(String(100), default='')
     created_at = Column(DateTime, default=_now)
@@ -427,6 +429,7 @@ def make_engine(url: str | None = None):
             _relax_not_null(engine)
             _merge_todos_into_tasks(engine)
             _backfill_assignees(engine)
+            _migrate_absences(engine)
             break
         except Exception:  # noqa: BLE001
             if attempt == 4:
@@ -454,6 +457,20 @@ def _add_missing_columns(engine):
                     default = ''
                 conn.execute(text(f'ALTER TABLE {table.name} ADD COLUMN {col.name} {coltype}{default}'))
 
+
+
+def _migrate_absences(engine):
+    """부재 칸 정리 이전의 기록 — 반차(half)는 부재 시간대로, 대결자(deputy)는 메모 끝에 '대결: …'로 옮긴다.
+    옮긴 칸은 비우므로 여러 번 돌아도 같다."""
+    with engine.begin() as conn:
+        rows = conn.execute(text("SELECT id, half, deputy, time_range, note FROM absences "
+                                 "WHERE (half IS NOT NULL AND half <> '') OR (deputy IS NOT NULL AND deputy <> '')")).all()
+        for aid, half, deputy, time_range, note in rows:
+            note = note or ''
+            if deputy:
+                note = (note + '\n' if note else '') + f'대결: {deputy}'
+            conn.execute(text("UPDATE absences SET time_range = :t, note = :n, half = '', deputy = '' WHERE id = :i"),
+                         {'t': time_range or half or '', 'n': note, 'i': aid})
 
 
 def _backfill_assignees(engine):

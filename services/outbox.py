@@ -209,11 +209,11 @@ def draft_schedule(date_from: str, date_to: str) -> dict:
 def draft_absence(date_from: str, date_to: str) -> dict:
     """임원 부재 현황 — 기간과 겹치는 부재를 표로."""
     rows = absences.list_range(date_from, date_to)
-    table = _table(['임원', '종류', '기간', '장소', '대결자', '메모'], [
-        [f"{r['person_name']} {r['position']}".strip(), r['kind'] + (f"({r['half']})" if r['half'] else ''),
+    table = _table(['임원', '종류', '기간', '시간대', '행선지', '일정 내용', '메모'], [
+        [f"{r['person_name']} {r['position']}".strip(), r['kind'],
          r['start_date'][5:].replace('-', '/') + ('' if r['start_date'] == r['end_date'] else
                                                   ' ~ ' + r['end_date'][5:].replace('-', '/')),
-         r['place'], r['deputy'], r['note']] for r in rows]) if rows else '<p>부재 중인 임원이 없습니다.</p>'
+         r['time_range'], r['place'], r['content'], r['note']] for r in rows]) if rows else '<p>부재 중인 임원이 없습니다.</p>'
     span = f"{date_from[5:].replace('-', '/')}~{date_to[5:].replace('-', '/')}"
     return {'subject': f'[임원 부재 현황] {span}', 'text': f'임원 부재 현황({span}) 공유드립니다.',
             'table_html': table, 'to': '', 'attachments': [], 'related_kind': 'absence',

@@ -1,6 +1,8 @@
 """임원 부재 일정 — 휴가·출장·교육 등으로 자리를 비우는 기간 (캘린더의 '임원 부재' 탭, 임원 화면).
 
-메일에서 뽑기: extract() — AI(없거나 실패하면 규칙)로 [임원 이름, 종류, 기간, 반차, 장소, 대결자, 메모] 를 뽑고,
+항목: 임원, 종류, 시작일, 종료일, 부재 시간대(선택 — '09:00~12:00', '오후' 등), 행선지(place), 일정 내용(content), 메모.
+
+메일에서 뽑기: extract() — AI(없거나 실패하면 규칙)로 위 항목을 뽑고,
 이름·별칭으로 등록된 임원을 찾는다. preview() 로 신규/이미 있음/겹침/임원 모름을 보여 주고 apply_rows() 로 넣는다.
 """
 import re
@@ -12,14 +14,26 @@ from services import db, llm
 from services.db import Absence, Person
 
 KINDS = ['휴가', '출장', '해외출장', '교육', '외부 일정', '병가', '기타']
-HALVES = ['', '오전', '오후']
+_TIME = re.compile(r'(?:오전|오후)?\s*\d{1,2}\s*[:;시]\s*\d{0,2}\s*분?')
+
+
+def norm_time_range(v: str) -> str:
+    """부재 시간대 — '9:00-12:00' / '14시~18시' → '09:00~12:00', 시각 하나면 '14:00~', 글자('오후' 등)는 그대로."""
+    from services.schedules import norm_time
+    v = re.sub(r'\s+', ' ', str(v or '')).strip()[:50]
+    times = [t for t in (norm_time(m.group(0)) for m in _TIME.finditer(v)) if t]
+    if len(times) >= 2:
+        return f'{times[0]}~{times[1]}'
+    if len(times) == 1:
+        return f'{times[0]}~'
+    return v
 
 
 def _dict(a: Absence, p: Person | None) -> dict:
     return {'id': a.id, 'source_mail_id': a.source_mail_id, 'person_id': a.person_id, 'person_name': p.name if p else '',
             'position': (p.position or '') if p else '', 'kind': a.kind or '기타', 'start_date': a.start_date,
-            'end_date': a.end_date, 'half': a.half or '', 'place': a.place or '', 'deputy': a.deputy or '',
-            'note': a.note or '', 'created_by': a.created_by or '',
+            'end_date': a.end_date, 'time_range': a.time_range or '', 'place': a.place or '',
+            'content': a.content or '', 'note': a.note or '', 'created_by': a.created_by or '',
             'updated_at': a.updated_at.strftime('%Y-%m-%d %H:%M') if a.updated_at else ''}
 
 
@@ -38,13 +52,9 @@ def _check(data: dict) -> dict:
     kind = data.get('kind') or '휴가'
     if kind not in KINDS:
         raise ValueError(f'알 수 없는 부재 종류: {kind}')
-    half = data.get('half') or ''
-    if half not in HALVES:
-        raise ValueError(f'알 수 없는 반차: {half}')
-    if half and end != start:
-        half = ''  # 반차는 하루짜리만
-    return {'kind': kind, 'start_date': start.isoformat(), 'end_date': end.isoformat(), 'half': half,
-            'place': str(data.get('place') or '').strip()[:300], 'deputy': str(data.get('deputy') or '').strip()[:100],
+    return {'kind': kind, 'start_date': start.isoformat(), 'end_date': end.isoformat(),
+            'time_range': norm_time_range(data.get('time_range') or ''),
+            'place': str(data.get('place') or '').strip()[:300], 'content': str(data.get('content') or '').strip(),
             'note': str(data.get('note') or '').strip()}
 
 
@@ -88,7 +98,7 @@ def delete(aid: int) -> None:
 
 def list_range(date_from: str, date_to: str, person_id: int | None = None, kinds: list[str] | None = None,
                query: str = '') -> list[dict]:
-    """기간과 겹치는 부재 — 시작일, 이름 순. query: 이름·장소·대결자·메모."""
+    """기간과 겹치는 부재 — 시작일, 이름 순. query: 이름·행선지·일정 내용·메모."""
     with db.SessionLocal() as s:
         stmt = (select(Absence, Person).join(Person, Person.id == Absence.person_id)
                 .where(Absence.start_date <= date_to, Absence.end_date >= date_from))
@@ -99,7 +109,7 @@ def list_range(date_from: str, date_to: str, person_id: int | None = None, kinds
         rows = [_dict(a, p) for a, p in s.execute(stmt)]
     q = (query or '').strip().lower()
     if q:
-        rows = [r for r in rows if q in ' '.join([r['person_name'], r['place'], r['deputy'], r['note'],
+        rows = [r for r in rows if q in ' '.join([r['person_name'], r['place'], r['content'], r['note'],
                                                   r['kind']]).lower()]
     return sorted(rows, key=lambda r: (r['start_date'], r['person_name'], r['id']))
 
@@ -109,10 +119,8 @@ def on_day(day: str, rows: list[dict] | None = None) -> list[dict]:
     return [r for r in rows if r['start_date'] <= day <= r['end_date']]
 
 
-def days(r: dict) -> float:
-    """부재 일수 (반차 0.5, 주말 포함 달력 일수)."""
-    if r['half']:
-        return 0.5
+def days(r: dict) -> int:
+    """부재 일수 (주말 포함 달력 일수)."""
     return (date.fromisoformat(r['end_date']) - date.fromisoformat(r['start_date'])).days + 1
 
 
@@ -143,17 +151,19 @@ EXTRACT_SYSTEM = f"""너는 임원조직 담당자의 비서다. 메일(휴가·
 - kind: {', '.join(KINDS)} 중 하나 (연차·휴가·리프레시 → 휴가, 국내 출장 → 출장, 국외·해외 → 해외출장).
 - start_date, end_date: YYYY-MM-DD. 연도가 없으면 메일 날짜의 연도, '다음주 월요일' 같은 표현은 메일 날짜 기준.
   하루면 둘 다 같은 날. '10/26~30' 은 10월 26일부터 30일까지.
-- half: 반차면 '오전' 또는 '오후', 아니면 빈 문자열.
-- place: 출장지·교육 기관 등, deputy: 대결자·업무 대행자, note: 그 밖의 내용(사유·연락처 등).
+- time_range: 하루 중 일부만 비우면 그 시간대('09:00~12:00', '오후' 등), 종일이면 빈 문자열.
+- place: 행선지(출장지·교육 기관·방문처 등), content: 일정 내용(무슨 일로 비우는지 — 학회 참석, 고객사 방문 등),
+  note: 그 밖의 내용(연락처·대결자 등).
 - 부재가 아닌 내용(회의 일정·업무 요청 등)은 뽑지 않는다. 입력에 없는 내용은 만들지 않는다.
-반드시 JSON 만 출력: {{"absences": [{{"person": "", "kind": "", "start_date": "", "end_date": "", "half": "",
-"place": "", "deputy": "", "note": ""}}]}}"""
+반드시 JSON 만 출력: {{"absences": [{{"person": "", "kind": "", "start_date": "", "end_date": "", "time_range": "",
+"place": "", "content": "", "note": ""}}]}}"""
 
 _KIND_WORDS = [('해외출장', r'해외\s*출장|국외\s*출장|해외'), ('병가', r'병가|병원|입원'), ('교육', r'교육|연수|과정'),
                ('출장', r'출장'), ('휴가', r'휴가|연차|반차|리프레시|하계|동계|월차'), ('외부 일정', r'외부\s*일정|외근|외부\s*행사')]
 _DEPUTY = re.compile(r'(?:대결자?|업무\s*대행|대행|직무\s*대리)\s*[:：]?\s*([가-힣A-Za-z]{2,10}(?:\s*(?:부사장|사장|전무|상무|'
                      r'마스터|Master|펠로우|Fellow|팀장|센터장|님))?)')
 _HALF = re.compile(r'(오전|오후)\s*반차|반차\s*\(?(오전|오후)')
+_TIME_RANGE = re.compile(r'((?:오전|오후)?\s*\d{1,2}\s*[:;시]\s*\d{0,2}\s*분?)\s*[~\-–]\s*((?:오전|오후)?\s*\d{1,2}\s*[:;시]\s*\d{0,2}\s*분?)')
 
 
 def _clean_row(r: dict, base: date) -> dict | None:
@@ -171,11 +181,9 @@ def _clean_row(r: dict, base: date) -> dict | None:
         end = start
     kind = str(r.get('kind') or '').strip()
     kind = kind if kind in KINDS else ('휴가' if '휴가' in kind or '연차' in kind else '기타')
-    half = str(r.get('half') or '').strip()
-    half = half if half in HALVES and start == end else ''
-    return {'person': str(r['person']).strip()[:50], 'kind': kind, 'start_date': start, 'end_date': end, 'half': half,
-            'place': str(r.get('place') or '').strip()[:300], 'deputy': str(r.get('deputy') or '').strip()[:100],
-            'note': str(r.get('note') or '').strip()[:500]}
+    return {'person': str(r['person']).strip()[:50], 'kind': kind, 'start_date': start, 'end_date': end,
+            'time_range': norm_time_range(r.get('time_range') or ''), 'place': str(r.get('place') or '').strip()[:300],
+            'content': str(r.get('content') or '').strip()[:500], 'note': str(r.get('note') or '').strip()[:500]}
 
 
 def ai_extract(text: str, mail_date: str) -> list[dict]:
@@ -215,7 +223,7 @@ def rule_extract(text: str, mail_date: str, subject: str = '') -> list[dict]:
         dm = _DEPUTY.search(line)
         if dm:  # '(대결: 박민수 상무)' — 대결자는 부재가 아니다
             deputy = dm.group(1).strip()
-            line = line[:dm.start()] + line[dm.end():]
+            line = re.sub(r'\(\s*\)', '', line[:dm.start()] + line[dm.end():]).rstrip()
         who = [p for p in people if any(n in line for n in _names(p))]
         if not who:
             continue
@@ -239,10 +247,13 @@ def rule_extract(text: str, mail_date: str, subject: str = '') -> list[dict]:
                 except ValueError:
                     pass
         h = _HALF.search(line)
-        half = (h.group(1) or h.group(2)) if h and start == end else ''
+        tr = _TIME_RANGE.search(line)
+        time_range = (h.group(1) or h.group(2)) if h else (f'{tr.group(1)}~{tr.group(2)}' if tr else '')
+        place = re.search(r'\(([^()]{2,40})\)\s*$', line.strip())  # 줄 끝 괄호 '(미국)' 은 행선지로
         for p in who:
-            out.append({'person': p.name, 'kind': kind, 'start_date': start, 'end_date': end, 'half': half,
-                        'place': '', 'deputy': deputy[:100], 'note': line.strip()[:200]})
+            out.append({'person': p.name, 'kind': kind, 'start_date': start, 'end_date': end,
+                        'time_range': norm_time_range(time_range), 'place': place.group(1).strip() if place else '',
+                        'content': line.strip()[:200], 'note': f'대결: {deputy}' if deputy else ''})
     return out
 
 
@@ -272,26 +283,23 @@ def match_person(name: str) -> tuple[int | None, str]:
 
 
 def preview(rows: list[dict]) -> list[dict]:
-    """후보마다 상태 — new(신규) / same(이미 등록됨) / overlap(그 기간에 다른 부재가 있음) / unknown(임원 모름)."""
+    """후보마다 상태 — new(신규) / same(이미 등록됨) / overlap(그 기간에 다른 부재가 있음) / unknown(임원 모름).
+    상태는 표의 '상태' 칸 글자와 줄 색으로만 보여 준다."""
     out = []
     for r in rows:
         r = {**r}
         pid, pname = match_person(r.get('person', ''))
         r['person_id'] = pid
         if pid is None:
-            r['state'], r['check'] = 'unknown', '등록된 임원을 찾지 못함 — 이름을 고치거나 임원을 먼저 등록하세요'
+            r['state'] = 'unknown'
             out.append(r)
             continue
         others = overlaps(pid, r['start_date'], r['end_date'])
-        same = [o for o in others if (o['kind'], o['start_date'], o['end_date'], o['half']) ==
-                (r['kind'], r['start_date'], r['end_date'], r.get('half') or '')]
-        if same:
-            r['state'], r['check'] = 'same', f'이미 등록됨 ({pname})'
-        elif others:
-            o = others[0]
-            r['state'], r['check'] = 'overlap', f"{pname}: 이미 {o['kind']} {o['start_date'][5:]}~{o['end_date'][5:]}"
+        key = (r['kind'], r['start_date'], r['end_date'], norm_time_range(r.get('time_range') or ''))
+        if any((o['kind'], o['start_date'], o['end_date'], o['time_range']) == key for o in others):
+            r['state'] = 'same'
         else:
-            r['state'], r['check'] = 'new', pname if pname != r.get('person') else ''
+            r['state'] = 'overlap' if others else 'new'
         out.append(r)
     return out
 

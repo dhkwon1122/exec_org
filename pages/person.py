@@ -176,8 +176,8 @@ def _absence_card(pid: int):
                   style={'background': absence_ui.KIND_COLOR.get(r['kind'], '#6b7280'), 'color': '#fff'}),
         html.Span(absence_ui._period(r)),
         dbc.Badge('부재 중', color='danger', className='ms-2') if r['start_date'] <= today <= r['end_date'] else None,
-        html.Div(' · '.join(x for x in [r['place'], f"대결 {r['deputy']}" if r['deputy'] else ''] if x),
-                 className='text-muted') if r['place'] or r['deputy'] else None,
+        html.Div(' · '.join(x for x in [r['place'], r['content']] if x), className='text-muted')
+        if r['place'] or r['content'] else None,
     ], className='small', style={'opacity': .6} if r['end_date'] < today else None) for r in rows]
     return dbc.Card([
         dbc.CardHeader(html.Div([html.Span('부재 일정'), dcc.Link('캘린더에서 등록', href='/calendar?tab=absence',

@@ -423,7 +423,7 @@ def test_absence_rule_auto_and_review():
     r = mailbox.apply_review(m['id'], [], None, None, '나', absence_rows=rows)
     assert r['absences'] == 2  # 겹쳐도 사람이 확인했으면 등록, 임원 모름은 건너뜀
     got = absences.list_range('2026-10-01', '2026-10-31')
-    assert [(x['person_name'], x['kind'], x['start_date'], x['end_date'], x['half']) for x in got] == [
+    assert [(x['person_name'], x['kind'], x['start_date'], x['end_date'], x['time_range']) for x in got] == [
         ('김영수', '해외출장', '2026-10-26', '2026-10-30', ''), ('이영희', '교육', '2026-10-27', '2026-10-27', ''),
         ('이영희', '휴가', '2026-10-27', '2026-10-27', '오후')]
     assert got[0]['source_mail_id'] == m['id']
@@ -448,7 +448,7 @@ def test_ai_classifies_absence_and_manual_extract(monkeypatch):
     def fake_chat(system, user, temperature=0.2):
         if '부재' in system and 'absences' in system:
             return json.dumps({'absences': [{'person': '이영희 상무', 'kind': '교육', 'start_date': '2026-11-02',
-                                             'end_date': '2026-11-04', 'place': '인재개발원', 'deputy': '김철수'}]})
+                                             'end_date': '2026-11-04', 'place': '인재개발원', 'content': '리더십 과정'}]})
         return json.dumps({'kind': 'absence', 'reason': '교육 일정 안내', 'tasks': []})
     monkeypatch.setattr(llm, 'is_configured', lambda: True)
     monkeypatch.setattr(llm, 'chat', fake_chat)
@@ -461,3 +461,29 @@ def test_ai_classifies_absence_and_manual_extract(monkeypatch):
     assert len(rows) == 1 and mailbox.get_mail(m['id'])['suggestion']['absences'] == rows
     r = mailbox.apply_absences(m['id'], rows, '나')
     assert r['added'] == 1 and mailbox.get_mail(m['id'])['status'] == 'done'
+
+
+def test_user_picks_ai_actions(monkeypatch):
+    store.create_person('김영수', aliases='김부사장')
+    mailbox.fetch_new(connect=lambda cfg: FakePOP([_mail('주간 안내', 'sec@x.com', html=SCHEDULE_HTML,
+                                                         text='김부사장 10/26~28 출장 (부산)')]))
+    m = mailbox.list_mails()[0]
+    rec = dict(mailbox.recommend_actions(m))
+    assert 'schedule' in rec  # 일정표가 있어 추천
+    mailbox.ignore(m['id'], '나')
+    with pytest.raises(ValueError):
+        mailbox.run_actions(m['id'], [], '나')
+    with pytest.raises(ValueError):
+        mailbox.run_actions(m['id'], ['summary'], '나')  # LLM 없으면 요약 불가
+    done = mailbox.run_actions(m['id'], ['schedule', 'tasks'], '나')
+    m = mailbox.get_mail(m['id'])
+    assert m['status'] == 'review' and m['schedule_import_id'] and done['schedule'] == 2 and done['tasks'] >= 1
+    assert m['suggestion']['requested'] == ['schedule', 'tasks'] and m['suggestion']['requested_tasks']
+    # 요약 (AI)
+    monkeypatch.setattr(llm, 'is_configured', lambda: True)
+    monkeypatch.setattr(llm, 'chat', lambda system, user, **k: json.dumps(
+        {'title': '주간 일정 안내', 'summary': '임원회의와 보고 일정', 'keywords': ['임원회의'],
+         'todos': [{'title': '보고 자료 준비', 'due': '2026-10-27'}]}))
+    mailbox.run_actions(m['id'], ['summary'], '나')
+    sug = mailbox.get_mail(m['id'])['suggestion']
+    assert sug['summary']['title'] == '주간 일정 안내' and sug['tasks'][0]['title'] == '보고 자료 준비'
