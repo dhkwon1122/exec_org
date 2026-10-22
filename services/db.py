@@ -438,6 +438,7 @@ def make_engine(url: str | None = None):
             _relax_not_null(engine)
             _merge_todos_into_tasks(engine)
             _backfill_assignees(engine)
+            _link_source_history(engine)
             _migrate_absences(engine)
             break
         except Exception:  # noqa: BLE001
@@ -480,6 +481,17 @@ def _migrate_absences(engine):
                 note = (note + '\n' if note else '') + f'대결: {deputy}'
             conn.execute(text("UPDATE absences SET time_range = :t, note = :n, half = '', deputy = '' WHERE id = :i"),
                          {'t': time_range or half or '', 'n': note, 'i': aid})
+
+
+def _link_source_history(engine):
+    """AI 할 일로 만든 업무(tasks.source_history_id)에 그 기록이 걸려 있지 않으면 건다 — 예전에 만든 업무도
+    새 업무 이력에서 원래 기록이 보이게. 이미 걸린 것은 건너뛰므로 여러 번 돌아도 같다."""
+    with engine.begin() as conn:
+        conn.execute(text(
+            "INSERT INTO history_tasks (history_id, task_id) "
+            "SELECT t.source_history_id, t.id FROM tasks t JOIN history h ON h.id = t.source_history_id "
+            "WHERE (h.task_id IS NULL OR h.task_id <> t.id) AND NOT EXISTS ("
+            "  SELECT 1 FROM history_tasks ht WHERE ht.history_id = t.source_history_id AND ht.task_id = t.id)"))
 
 
 def _backfill_assignees(engine):

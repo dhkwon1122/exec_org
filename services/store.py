@@ -374,6 +374,24 @@ def add_history(task_id: int | None, content: str, entry_type: str = '메모', a
         return _decorate(s, [_history_dict(h)])[0]
 
 
+def link_history_task(entry_id: int, task_id: int) -> bool:
+    """이미 있는 기록을 업무에 연결 — 업무 없는 기록(동향)이면 그 업무가 기록의 업무가 되고, 아니면 함께 걸친 업무로.
+    이미 걸려 있으면 False."""
+    with db.transaction() as s:
+        h = s.get(HistoryEntry, entry_id)
+        if h is None:
+            raise ValueError('이력을 찾을 수 없습니다.')
+        if s.get(Task, task_id) is None:
+            raise ValueError('업무를 찾을 수 없습니다.')
+        if h.task_id == task_id or s.get(HistoryTask, (entry_id, task_id)) is not None:
+            return False
+        if h.task_id is None:
+            h.task_id = task_id
+        else:
+            s.add(HistoryTask(history_id=entry_id, task_id=task_id))
+        return True
+
+
 def reference_history_counts(task_id: int) -> dict[int, int]:
     """업무의 참고자료별 기록 수 — 자료가 붙은 이력 + 그 자료를 다룬 기록."""
     with db.SessionLocal() as s:
@@ -929,7 +947,8 @@ def create_todo(title: str, task_id: int | None = None, due_date: str = '', assi
                 source_mail_id: int | None = None, assignees: list | None = None, *, session=None,
                 source_mail_key: str = '') -> dict:
     """체크 항목처럼 업무를 하나 만든다 — task_id 가 있으면 그 업무의 하위 업무.
-    담당자: assignees([{'name', 'user_id'}]) 또는 assignee_name(쉼표로 여러 명) + assignee_id(한 명일 때)."""
+    담당자: assignees([{'name', 'user_id'}]) 또는 assignee_name(쉼표로 여러 명) + assignee_id(한 명일 때).
+    source_history_id: AI 가 이 할 일을 찾은 기록 — 그 기록을 새 업무에도 걸어 새 업무 이력에서 보이게 한다."""
     title = (title or '').strip()
     if not title:
         raise ValueError('업무 내용을 입력하세요.')
@@ -946,6 +965,8 @@ def create_todo(title: str, task_id: int | None = None, due_date: str = '', assi
         s.add(t)
         s.flush()
         _set_assignees(s, t, assignees_of(assignees, assignee_name, assignee_id))
+        if source_history_id and s.get(HistoryEntry, source_history_id) is not None:
+            s.add(HistoryTask(history_id=source_history_id, task_id=t.id))  # 할 일을 찾은 기록이 새 업무 이력에도
         if parent:
             _log(s, parent.id, '할일', f'하위 업무 추가: {title}', created_by)
         s.flush()

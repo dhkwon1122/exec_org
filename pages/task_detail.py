@@ -42,6 +42,25 @@ def _edit_modal():
     ], id='ed-modal', is_open=False, size='lg')
 
 
+def _import_history_modal():
+    """다른 업무·동향에 남긴 기존 기록을 찾아 이 업무에도 건다."""
+    return dbc.Modal([
+        dbc.ModalHeader(dbc.ModalTitle([html.I(className='bi bi-box-arrow-in-down me-2'), '기존 이력을 이 업무에 연결'])),
+        dbc.ModalBody([
+            dbc.Input(id='hx-q', type='search', debounce=True, placeholder='검색: 원문·제목·요약·키워드·업무명·임원 이름'),
+            html.Div('다른 업무·임원 동향에 남긴 기록을 찾아 고르세요. 고른 기록은 원래 자리에도 그대로 있고, 이 업무 이력에도 보입니다.',
+                     className='small text-muted my-2'),
+            html.Div(dbc.Checklist(id='hx-pick', options=[], value=[], className='small'),
+                     style={'maxHeight': '50vh', 'overflowY': 'auto'}),
+            dbc.Alert(id='hx-msg', is_open=False, className='small py-2 mt-2 mb-0'),
+        ]),
+        dbc.ModalFooter([
+            dbc.Button('닫기', id='hx-close', color='secondary', outline=True),
+            dbc.Button([html.I(className='bi bi-link-45deg me-1'), '연결'], id='hx-save', color='primary'),
+        ]),
+    ], id='hx-modal', is_open=False, size='lg', scrollable=True)
+
+
 def _quick_history_modal():
     """참고자료·연결 업무 탭에서 바로 쓰는 기록 — 자료에 대한 기록이면 그 자료가 붙고, 연결 업무면 두 업무에 걸린다."""
     ai_on = llm.is_configured()
@@ -181,12 +200,17 @@ def layout(task_id=None, src=None, **_):
         dcc.Location(id='td-redirect', refresh='callback-nav'),
         _edit_modal(),
         _quick_history_modal(),
+        _import_history_modal(),
         *_source_modals(tid, sources, src),
         html.Div(id='td-header', className='mb-3'),
         dbc.Row([
             dbc.Col([
                 dbc.Tabs([
-                    dbc.Tab([_history_form(tid), html.Div(id='td-history')], label='이력', tab_id='history'),
+                    dbc.Tab([_history_form(tid),
+                             html.Div(dbc.Button([html.I(className='bi bi-box-arrow-in-down me-1'), '기존 이력 연결'],
+                                                 id='hx-open', color='link', size='sm', className='p-0'),
+                                      className='text-end mb-1'),
+                             html.Div(id='td-history')], label='이력', tab_id='history'),
                     dbc.Tab([dbc.Card(dbc.CardBody(todo_ui.add_form('tt', with_task=False)), className='mb-3'),
                              html.Div(id='td-todos')], label='하위 업무', tab_id='todos', id='td-todo-tab'),
                     dbc.Tab([_reference_form(), html.Div(id='td-refs')], label='참고자료', tab_id='refs'),
@@ -558,3 +582,43 @@ def quick_history(_r, _l, _c, _s, tid, meta, etype, when, content, use_ai, n):
     except ValueError as e:
         return True, nu, nu, nu, nu, nu, str(e), True, nu, nu
     return False, nu, nu, None, '', None, '', False, (n or 0) + 1, nu
+
+
+# ── 기존 이력 연결 ────────────────────────────────────────────────────
+
+@callback(Output('hx-modal', 'is_open'), Input('hx-open', 'n_clicks'), Input('hx-close', 'n_clicks'),
+          prevent_initial_call=True)
+def toggle_import(_o, _c):
+    return ctx.triggered_id == 'hx-open'
+
+
+@callback(Output('hx-pick', 'options'), Output('hx-pick', 'value'),
+          Input('hx-q', 'value'), Input('hx-modal', 'is_open'), Input('td-refresh', 'data'), State('td-id', 'data'))
+def search_existing(q, is_open, _, tid):
+    """이 업무에 아직 걸리지 않은 기록 — 검색어가 없으면 최근 기록."""
+    if not is_open:
+        return no_update, no_update
+    mine = {h['id'] for h in store.list_history(tid)}
+    rows = [h for h in store.search_history(q or '', limit=60) if h['id'] not in mine][:40]
+    opts = [{'label': html.Span([
+        html.Span(f"{h['occurred_at'][:10]} ", className='text-muted'),
+        dbc.Badge(h['entry_type'], color='light', text_color='dark', className='me-1 border'),
+        html.B(h['title'] or h['content'][:50]),
+        html.Span(f" — #{h['task_id']} {h['task_title']}" if h['task_id'] else
+                  (' — ' + ', '.join(p['name'] for p in h['people']) + ' 동향' if h['people'] else ''),
+                  className='text-muted'),
+    ]), 'value': h['id']} for h in rows]
+    return opts, []
+
+
+@callback(Output('hx-msg', 'children'), Output('hx-msg', 'is_open'), Output('hx-msg', 'color'),
+          Output('td-refresh', 'data', allow_duplicate=True),
+          Input('hx-save', 'n_clicks'), State('hx-pick', 'value'), State('td-id', 'data'),
+          State('td-refresh', 'data'), prevent_initial_call=True)
+def import_history(n, picked, tid, r):
+    if not n:
+        return no_update, no_update, no_update, no_update
+    if not picked:
+        return '연결할 기록을 고르세요.', True, 'warning', no_update
+    k = sum(store.link_history_task(int(hid), tid) for hid in picked)
+    return f'기록 {k}건을 이 업무에 연결했습니다.', True, 'success', (r or 0) + 1
