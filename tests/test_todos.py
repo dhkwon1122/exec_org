@@ -189,3 +189,15 @@ def test_old_single_owner_moves_to_assignees(tmp_path):
     assert store.get_task(t['id'])['assignees'] == [{'name': '김철수', 'user_id': 'kim'}, {'name': '이영희', 'user_id': ''}]
     db.configure('sqlite:///' + str(path))  # 다시 시작해도 그대로
     assert len(store.get_task(t['id'])['assignees']) == 2
+
+
+def test_mark_ai_todo_after_editing_title():
+    t = store.create_task('a')
+    h = store.add_history(t['id'], '원문')
+    store.set_history_ai(h['id'], 'done', todos=[{'title': '보고서 수정', 'due': '', 'assignee': ''},
+                                                 {'title': '견적 받기', 'due': '', 'assignee': ''}])
+    sub = store.create_todo('보고서 2차 수정본 작성', task_id=t['id'], source_history_id=h['id'])  # 고쳐서 등록
+    store.mark_ai_todo(h['id'], 0, sub['id'])
+    todos = store.get_history(h['id'])['ai_todos']
+    assert todos[0]['task_id'] == sub['id'] and 'task_id' not in todos[1]
+    store.mark_ai_todo(h['id'], 9, sub['id'])  # 범위 밖은 무시

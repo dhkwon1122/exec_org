@@ -507,6 +507,16 @@ def set_history_ai(entry_id: int, status: str, title: str | None = None, summary
         s.execute(stmt.values(**values))
 
 
+def mark_ai_todo(entry_id: int, idx: int, task_id: int) -> None:
+    """AI 가 찾은 할 일 idx 번째를 업무로 만들었다고 표시 — 제목을 고쳐 등록해도 '추가됨'으로 보이게."""
+    with db.transaction() as s:
+        h = s.get(HistoryEntry, entry_id)
+        todos = _load_json_list(h.ai_todos) if h else []
+        if 0 <= idx < len(todos) and isinstance(todos[idx], dict):
+            todos[idx]['task_id'] = task_id
+            h.ai_todos = json.dumps(todos, ensure_ascii=False)
+
+
 def _decorate(s, entries: list[dict]) -> list[dict]:
     """이력 dict 들에 'refs'(붙은 관련 자료)·'people'(연결된 임원)·'task_title' 을 채운다."""
     ids = [e['id'] for e in entries]

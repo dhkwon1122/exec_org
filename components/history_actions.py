@@ -3,8 +3,10 @@
 수정 창은 앱 레이아웃에 한 번만 들어가고(app.py), 무언가 바뀌면 전역 Store 'history-changed' 값을
 올린다. 이력을 보여주는 화면(업무 상세·임원)은 그 Store 를 Input 으로 받아 다시 그린다.
 """
+import re
+
 import dash_bootstrap_components as dbc
-from dash import ALL, Input, Output, State, callback, ctx, dcc, html, no_update
+from dash import ALL, Input, Output, State, callback, ctx, dash_table, dcc, html, no_update
 
 from components import todo_ui, ui
 from components.history_form import parse_uploads, people_options, register_form_callbacks, task_options
@@ -148,24 +150,84 @@ def regen_or_delete(_r, _d, _u, n):
     return (n or 0) + 1
 
 
-@callback(Output('todo-changed', 'data', allow_duplicate=True),
-          Output('history-changed', 'data', allow_duplicate=True),
+def todo_review_modal():
+    """AI 가 찾은 할 일을 고쳐서 업무로 등록하는 창 — 앱 레이아웃에 한 번(app.py)."""
+    return dbc.Modal([
+        dbc.ModalHeader(dbc.ModalTitle([html.I(className='bi bi-list-check me-2'), 'AI 가 찾은 할 일 — 고쳐서 등록'])),
+        dbc.ModalBody([
+            dcc.Store(id='ht-meta'),
+            html.Div('칸을 눌러 업무 이름·마감·담당을 고치고, 등록하지 않을 줄은 × 로 지우세요. '
+                     '마감은 YYYY-MM-DD, 담당은 쉼표로 여러 명(사용자 이름과 같으면 그 사용자로 지정).',
+                     className='small text-muted mb-2'),
+            dash_table.DataTable(
+                id='ht-table', editable=True, row_deletable=True, data=[],
+                columns=[{'name': '업무', 'id': 'title'}, {'name': '마감 (YYYY-MM-DD)', 'id': 'due'},
+                         {'name': '담당', 'id': 'assignee'}],
+                style_cell={'textAlign': 'left', 'fontSize': '0.85rem', 'whiteSpace': 'normal', 'height': 'auto'},
+                style_cell_conditional=[{'if': {'column_id': 'title'}, 'width': '55%'}]),
+            dbc.Label('상위 업무', className='small mt-3 mb-1'),
+            dcc.Dropdown(id='ht-parent', placeholder='없음 (최상위 업무로)'),
+            dbc.Alert(id='ht-error', color='danger', is_open=False, className='small py-2 mt-2 mb-0'),
+        ]),
+        dbc.ModalFooter([
+            dbc.Button('취소', id='ht-cancel', color='secondary', outline=True),
+            dbc.Button([html.I(className='bi bi-check2 me-1'), '등록'], id='ht-save', color='primary'),
+        ]),
+    ], id='ht-modal', is_open=False, size='lg')
+
+
+@callback(Output('ht-modal', 'is_open'), Output('ht-table', 'data'), Output('ht-parent', 'options'),
+          Output('ht-parent', 'value'), Output('ht-meta', 'data'), Output('ht-error', 'is_open'),
+          Output('todo-changed', 'data', allow_duplicate=True),
+          Output('history-changed', 'data', allow_duplicate=True), Output('ht-error', 'children'),
           Input({'type': 'h-todo', 'hid': ALL, 'idx': ALL, 'task': ALL}, 'n_clicks'),
+          Input({'type': 'h-todo-all', 'hid': ALL, 'task': ALL}, 'n_clicks'),
+          Input('ht-cancel', 'n_clicks'), Input('ht-save', 'n_clicks'),
+          State('ht-table', 'data'), State('ht-parent', 'value'), State('ht-meta', 'data'),
           State('todo-changed', 'data'), State('history-changed', 'data'), prevent_initial_call=True)
-def add_suggested_todo(_, n, hn):
-    """AI 가 원문에서 찾은 할 일 제안을 실제 할 일로 추가한다 — 보고 있는 업무 화면이 있으면 그 업무에
-    (여러 업무에 걸친 기록일 때), 아니면 그 이력의 업무에, 동향이면 업무 없이."""
+def review_todos(_one, _all, _c, _s, rows, parent, meta, n, hn):
+    """AI 가 찾은 할 일 → 확인 창에서 고쳐 등록. 상위 업무 기본값은 보고 있는 업무 화면의 업무, 아니면 그 기록의 업무."""
+    nu = no_update
     trig = ctx.triggered_id
-    if not isinstance(trig, dict) or not ctx.triggered[0]['value']:
-        return no_update, no_update
-    h = store.get_history(trig['hid'])
-    if h is None or trig['idx'] >= len(h['ai_todos']):
-        return no_update, no_update
-    sug = h['ai_todos'][trig['idx']]
-    if sug['title'] in store.todo_titles_for_history(h['id']):
-        return no_update, no_update
-    # 제안의 담당자(쉼표로 여러 명) 중 접속 가능한 사용자 이름과 같은 사람은 그 사용자로 지정
-    store.create_todo(sug['title'], task_id=trig.get('task') or h['task_id'], due_date=sug['due'],
-                      assignees=todo_ui.assignees_from([], sug['assignee']), created_by=auth.current_name(),
-                      source_history_id=h['id'])
-    return (n or 0) + 1, (hn or 0) + 1
+    if trig is None or not ctx.triggered[0]['value']:  # 목록이 다시 그려질 때의 빈 트리거
+        return (nu,) * 9
+    if trig == 'ht-cancel':
+        return False, nu, nu, nu, nu, False, nu, nu, ''
+    if isinstance(trig, dict):
+        h = store.get_history(trig['hid'])
+        if h is None:
+            return (nu,) * 9
+        idxs = [trig['idx']] if trig['type'] == 'h-todo' else \
+            [i for i, t in enumerate(h['ai_todos']) if not t.get('task_id')]
+        done = store.todo_titles_for_history(h['id'])
+        rows = [{'idx': i, 'title': h['ai_todos'][i]['title'], 'due': h['ai_todos'][i].get('due', ''),
+                 'assignee': h['ai_todos'][i].get('assignee', '')} for i in idxs
+                if i < len(h['ai_todos']) and (trig['type'] == 'h-todo' or h['ai_todos'][i]['title'] not in done)]
+        opts = [{'label': f"#{t['id']} {t['title']}", 'value': t['id']}
+                for t in store.list_tasks(status=['예정', '진행중', '보류'])]
+        default = trig.get('task') or h['task_id']
+        if default and default not in {o['value'] for o in opts}:
+            t = store.get_task(default)
+            if t:
+                opts.insert(0, {'label': f"#{t['id']} {t['title']}", 'value': t['id']})
+        return True, rows, opts, default or None, {'hid': h['id']}, False, nu, nu, ''
+    # 등록
+    rows = [r for r in rows or [] if str(r.get('title') or '').strip()]
+    if not rows:
+        return True, nu, nu, nu, nu, True, nu, nu, '등록할 업무가 없습니다.'
+    bad = [r['title'] for r in rows if str(r.get('due') or '').strip()
+           and not re.match(r'^\d{4}-\d{2}-\d{2}$', str(r['due']).strip())]
+    if bad:  # 하나라도 틀리면 아무것도 만들지 않는다
+        return True, nu, nu, nu, nu, True, nu, nu, f"마감은 YYYY-MM-DD 로 적으세요: {', '.join(bad)}"
+    by = auth.current_name()
+    try:
+        for r in rows:
+            t = store.create_todo(str(r['title']).strip(), task_id=int(parent) if parent else None,
+                                  due_date=str(r.get('due') or '').strip(),
+                                  assignees=todo_ui.assignees_from([], str(r.get('assignee') or '')),
+                                  created_by=by, source_history_id=(meta or {}).get('hid'))
+            if r.get('idx') is not None and meta:
+                store.mark_ai_todo(meta['hid'], int(r['idx']), t['id'])
+    except ValueError as e:  # 마감 형식 등 — 앞 줄은 이미 등록됐을 수 있어 목록을 새로 그린다
+        return True, nu, nu, nu, nu, True, (n or 0) + 1, (hn or 0) + 1, f"'{r['title']}': {e}"
+    return False, [], nu, nu, nu, False, (n or 0) + 1, (hn or 0) + 1, ''
