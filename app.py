@@ -246,17 +246,23 @@ _NAV = [  # (이름, 주소, 아이콘, 주소 맞춤)
 ]
 
 
+def _review_count() -> int:
+    try:
+        return mailbox.counts().get('review', 0)
+    except Exception:  # noqa: BLE001  메뉴 숫자 때문에 화면이 안 뜨면 안 된다
+        return 0
+
+
 def _sidebar():
-    """왼쪽 사이드바 (좁은 화면에선 위쪽 가로 메뉴 — assets/style.css). 받은 메일은 확인할 건수를 붙인다."""
+    """왼쪽 사이드바 (좁은 화면에선 위쪽 가로 메뉴 — assets/style.css). 받은 메일은 확인할 건수를 붙인다
+    (화면 이동·메일 처리·1분마다 다시 셈 — _refresh_inbox_count)."""
     user = auth.current_user() or {}
     name = user.get('name', '')
-    try:
-        review = mailbox.counts().get('review', 0)
-    except Exception:  # noqa: BLE001  메뉴 숫자 때문에 화면이 안 뜨면 안 된다
-        review = 0
+    review = _review_count()
     links = []
     for label, href, icon, active in _NAV:
-        count = html.Span(review, className='nav-count hot', title='확인할 메일') if href == '/inbox' and review else None
+        count = html.Span(review or '', id='nav-inbox-count', className='nav-count hot' if review else 'nav-count',
+                          title='확인할 메일') if href == '/inbox' else None
         links.append(dbc.NavLink([html.I(className=f'bi {icon}'), html.Span(label), count], href=href,
                                  active=active))
     return html.Aside([
@@ -278,6 +284,9 @@ def serve_layout():
         dcc.Store(id='history-changed', data=0),  # 이력 수정/삭제 시 증가 (components/history_actions.py)
         history_edit_modal(),
         dcc.Store(id='mail-draft'),
+        dcc.Store(id='mail-changed', data=0),  # 받은 메일을 처리하면 증가 → 사이드바 숫자를 다시 셈
+        dcc.Location(id='app-url'),
+        dcc.Interval(id='app-tick', interval=60_000),
         compose_modal(),
         html.Div([
             _sidebar(),
@@ -287,6 +296,14 @@ def serve_layout():
 
 
 app.layout = serve_layout
+
+
+@app.callback(dash.Output('nav-inbox-count', 'children'), dash.Output('nav-inbox-count', 'className'),
+              dash.Input('app-url', 'pathname'), dash.Input('mail-changed', 'data'), dash.Input('app-tick', 'n_intervals'))
+def _refresh_inbox_count(*_):
+    """사이드바 '받은 메일'의 확인 필요 건수 — 화면을 옮길 때, 메일을 처리할 때, 1분마다."""
+    n = _review_count()
+    return (n or ''), 'nav-count hot' if n else 'nav-count'
 
 
 # POP3 받은 메일 주기 확인 (MAIL_POP3_* 설정 시, 여러 워커 중 하나만)

@@ -460,7 +460,11 @@ def test_ai_classifies_absence_and_manual_extract(monkeypatch):
     rows = mailbox.extract_absences(m['id'])
     assert len(rows) == 1 and mailbox.get_mail(m['id'])['suggestion']['absences'] == rows
     r = mailbox.apply_absences(m['id'], rows, '나')
-    assert r['added'] == 1 and mailbox.get_mail(m['id'])['status'] == 'done'
+    m = mailbox.get_mail(m['id'])
+    assert r['added'] == 1 and m['status'] == 'review'  # 항목 처리만으로는 끝나지 않음
+    assert m['suggestion']['done']['absence']['n'] == 1 and mailbox.pending_items(m) == []
+    mailbox.complete(m['id'], '나')
+    assert mailbox.get_mail(m['id'])['status'] == 'done'
 
 
 def test_user_picks_ai_actions(monkeypatch):
@@ -487,3 +491,43 @@ def test_user_picks_ai_actions(monkeypatch):
     mailbox.run_actions(m['id'], ['summary'], '나')
     sug = mailbox.get_mail(m['id'])['suggestion']
     assert sug['summary']['title'] == '주간 일정 안내' and sug['tasks'][0]['title'] == '보고 자료 준비'
+
+
+def test_items_handled_separately_then_complete(monkeypatch):
+    kim = store.create_person('김영수', position='상무', org='AI센터', aliases='김상무')
+    mailbox.fetch_new(connect=lambda cfg: FakePOP([_mail('인사 소식', 'hr@x.com', html=SCHEDULE_HTML,
+                                                         text='김상무 부사장 승진. 보고 자료 준비 부탁드립니다.')]))
+    m = mailbox.list_mails()[0]
+    mailbox.run_actions(m['id'], ['schedule', 'tasks'], '나')
+    m = mailbox.get_mail(m['id'])
+    assert set(mailbox.pending_items(m)) == {'업무로 등록', '일정에 반영'}
+    # 업무만 등록 — 메일은 아직 확인 필요
+    ids = mailbox.add_tasks(m['id'], [{'title': '보고 자료 준비하기'}], None, '나')
+    with pytest.raises(ValueError):
+        mailbox.add_tasks(m['id'], [{'title': '보고 자료 준비하기'}], None, '나')  # 같은 업무를 두 번 만들지 않음
+    m = mailbox.get_mail(m['id'])
+    assert m['status'] == 'review' and m['task_ids'] == ids and mailbox.pending_items(m) == ['일정에 반영']
+    assert m['suggestion']['done']['tasks']['n'] == 1
+    # 임원 동향으로 기록
+    h = mailbox.record_trend(m['id'], [kim['id']], '나', task_id=ids[0])
+    assert h['entry_type'] == '동향' and [p['id'] for p in h['people']] == [kim['id']] and h['task_id'] == ids[0]
+    # 임원 정보 변경 (AI 제안 → 고쳐서 반영)
+    monkeypatch.setattr(llm, 'is_configured', lambda: True)
+    monkeypatch.setattr(llm, 'chat', lambda system, user, **k: json.dumps({'updates': [
+        {'person': '김영수', 'field': '직위', 'value': '부사장', 'reason': '부사장 승진'},
+        {'person': '김영수', 'field': '수상', 'value': '2026 기술대상', 'reason': ''},
+        {'person': '홍길동', 'field': '소속', 'value': '전략실', 'reason': ''}]}))
+    mailbox.run_actions(m['id'], ['person'], '나')
+    rows = mailbox.person_update_rows(mailbox.get_mail(m['id'])['suggestion']['person_updates'])
+    assert [(r['field'], r['current'], r['state']) for r in rows] == [
+        ('직위', '상무', 'new'), ('수상', '', 'new'), ('소속', '', 'unknown')]
+    rows.append({'person': '김상무', 'field': '메모', 'value': '부사장 승진 축하 메일 발송'})
+    r = mailbox.apply_person_updates(m['id'], rows, '나')
+    assert r == {'changed': 3, 'skipped': 1}
+    p = store.get_person(kim['id'])
+    assert p['position'] == '부사장' and '부사장 승진 축하 메일 발송' in p['note'] and '(메일: 인사 소식)' in p['note']
+    from services import profile
+    assert profile.list_attributes(kim['id']) == [{'name': '수상', 'value': '2026 기술대상'}]
+    # 처리 완료 — 일정은 처리하지 않고 끝내도 됨
+    mailbox.complete(m['id'], '나')
+    assert mailbox.get_mail(m['id'])['status'] == 'done' and mailbox.counts().get('review', 0) == 0
