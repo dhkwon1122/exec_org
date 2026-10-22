@@ -132,6 +132,8 @@ def _note_activity():
         changed = (flask.request.get_json(silent=True) or {}).get('changedPropIds') or []
         if changed and all(c.startswith('app-tick.') for c in changed):
             return None
+    elif path.startswith('/_'):  # /_dash-layout·/_reload-hash(개발 모드 자동 새로고침 확인) 등 브라우저가 알아서 부르는 것
+        return None
     doc_worker.touch()
     return None
 
