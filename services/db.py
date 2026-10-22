@@ -360,6 +360,16 @@ class MailAttachment(Base):
     sha256 = Column(String(64), default='', index=True)
     doc_key = Column(String(300), default='', index=True)
     created_at = Column(DateTime, default=_now)
+    # 내용 읽기·AI 요약 (services/doc_text.py, services/doc_summary.py) — text_at 이 비어 있으면 아직 안 읽음
+    text = Column(Text, default='')
+    text_note = Column(String(300), default='')  # 글자를 못 뽑은 이유
+    text_at = Column(DateTime)
+    doc_type = Column(String(50), default='')
+    summary = Column(Text, default='')
+    tags = Column(String(500), default='')  # 쉼표로
+    key_dates = Column(Text, default='')  # JSON [{'date','what'}]
+    changes = Column(Text, default='')  # 앞 판과 달라진 점
+    analyzed_at = Column(DateTime)
 
 
 class OutboundMail(Base):

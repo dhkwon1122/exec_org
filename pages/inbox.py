@@ -589,7 +589,7 @@ def render_ai(sel, _):
     ai_on = llm.is_configured()
     opts = []
     for key, label in mailbox.AI_ACTIONS.items():
-        off = key == 'summary' and not ai_on
+        off = key in mailbox.LLM_ACTIONS and not ai_on
         opts.append({'label': html.Span([
             label,
             dbc.Badge('추천', color='warning', text_color='dark', className='ms-2') if key in rec else None,
@@ -597,7 +597,7 @@ def render_ai(sel, _):
             html.Span(f' — {rec[key]}', className='text-muted') if key in rec else None,
             html.Span(' (LLM 미설정)', className='text-muted') if off else None,
         ]), 'value': key, 'disabled': off})
-    value = [k for k in rec if not (k == 'summary' and not ai_on)] if not asked else []
+    value = [k for k in rec if not (k in mailbox.LLM_ACTIONS and not ai_on)] if not asked else []
     sm = m['suggestion'].get('summary')
     summary = dbc.Alert([
         html.Div(sm['title'], className='fw-semibold'),
@@ -605,6 +605,12 @@ def render_ai(sel, _):
         html.Div([dbc.Badge(f'#{k}', color='light', text_color='dark', className='me-1 border')
                   for k in sm.get('keywords', [])], className='mt-1') if sm.get('keywords') else None,
     ], color='light', className='small mb-0') if sm else None
+    skipped = m['suggestion'].get('docs_skipped') if 'docs' in asked else None
+    if skipped:
+        summary = html.Div([summary, html.Details([
+            html.Summary(f'요약하지 못한 첨부 {len(skipped)}개', className='small text-muted'),
+            html.Ul([html.Li(x) for x in skipped], className='small text-muted mb-0'),
+        ], className='mt-2')])
     return {}, opts, value, summary
 
 
@@ -621,8 +627,10 @@ def run_ai(n, sel, actions, refresh):
         done = mailbox.run_actions(sel, actions or [], auth.current_name())
     except (ValueError, llm.LLMError) as e:
         return no_update, str(e), True, 'warning', ''
-    parts = ['요약 완료' if k == 'summary' else f'{mailbox.AI_ACTIONS[k]} {v}건' for k, v in done.items()]
-    return (refresh or 0) + 1, '분석했습니다 — ' + ', '.join(parts) + '. 아래 항목마다 확인하고 등록하세요.', True, 'success', ''
+    parts = ['요약 완료' if k == 'summary' else f'첨부 문서 {v}개 요약 (첨부 목록에 표시)' if k == 'docs' else
+             f'{mailbox.AI_ACTIONS[k]} {v}건' for k, v in done.items()]
+    tail = '' if set(done) == {'docs'} else ' 아래 항목마다 확인하고 등록하세요.'
+    return (refresh or 0) + 1, '분석했습니다 — ' + ', '.join(parts) + '.' + tail, True, 'success', ''
 
 
 # ── 규칙 ──────────────────────────────────────────────────────────────
