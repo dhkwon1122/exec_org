@@ -165,6 +165,9 @@ def history_card(h: dict, terms: list[str] | None = None, show_task: bool = Fals
                                  size='sm', className='text-muted p-0 me-2',
                                  title='이 업무에서 빼기 (다른 업무에는 그대로 남음)'))
     if actions and not auto:
+        header.append(dbc.Button(html.I(className='bi bi-link-45deg'), id={'type': 'h-link', 'id': h['id']},
+                                 color='link', size='sm', className='text-muted p-0 me-2',
+                                 title='업무에 연결 (이 기록이 관련된 업무 고르기)'))
         header.append(dbc.Button(html.I(className='bi bi-pencil'), id={'type': 'h-edit', 'id': h['id']},
                                  color='link', size='sm', className='text-muted p-0 me-2', title='수정'))
     if actions:

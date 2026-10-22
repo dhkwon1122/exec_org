@@ -231,3 +231,53 @@ def review_todos(_one, _all, _c, _s, rows, parent, meta, n, hn):
     except ValueError as e:  # 마감 형식 등 — 앞 줄은 이미 등록됐을 수 있어 목록을 새로 그린다
         return True, nu, nu, nu, nu, True, (n or 0) + 1, (hn or 0) + 1, f"'{r['title']}': {e}"
     return False, [], nu, nu, nu, False, (n or 0) + 1, (hn or 0) + 1, ''
+
+
+# ── 기록을 업무에 연결 ─────────────────────────────────────────────────
+
+def history_link_modal():
+    """이력 카드의 연결 버튼 — 이 기록이 관련된 업무를 고른다(앱 레이아웃에 한 번, app.py)."""
+    return dbc.Modal([
+        dbc.ModalHeader(dbc.ModalTitle([html.I(className='bi bi-link-45deg me-2'), '이 기록을 업무에 연결'])),
+        dbc.ModalBody([
+            dcc.Store(id='hlk-id'),
+            html.Div(id='hlk-summary', className='small mb-2'),
+            dcc.Dropdown(id='hlk-tasks', multi=True, placeholder='관련 업무 (여러 개 가능)'),
+            html.Div('고른 업무마다 이력 목록에 이 기록이 보입니다. 빼면 그 업무에서만 빠집니다(기록은 그대로).',
+                     className='small text-muted mt-2'),
+            dbc.Alert(id='hlk-error', color='danger', is_open=False, className='small py-2 mt-2 mb-0'),
+        ]),
+        dbc.ModalFooter([
+            dbc.Button('취소', id='hlk-cancel', color='secondary', outline=True),
+            dbc.Button([html.I(className='bi bi-check2 me-1'), '저장'], id='hlk-save', color='primary'),
+        ]),
+    ], id='hlk-modal', is_open=False)
+
+
+@callback(Output('hlk-modal', 'is_open'), Output('hlk-id', 'data'), Output('hlk-summary', 'children'),
+          Output('hlk-tasks', 'options'), Output('hlk-tasks', 'value'), Output('hlk-error', 'children'),
+          Output('hlk-error', 'is_open'), Output('history-changed', 'data', allow_duplicate=True),
+          Input({'type': 'h-link', 'id': ALL}, 'n_clicks'), Input('hlk-cancel', 'n_clicks'),
+          Input('hlk-save', 'n_clicks'),
+          State('hlk-id', 'data'), State('hlk-tasks', 'value'), State('history-changed', 'data'),
+          prevent_initial_call=True)
+def link_history(_o, _c, _s, hid, task_ids, n):
+    nu = no_update
+    trig = ctx.triggered_id
+    if trig is None or not ctx.triggered[0]['value']:  # 목록이 다시 그려질 때의 빈 트리거
+        return (nu,) * 8
+    if trig == 'hlk-cancel':
+        return False, nu, nu, nu, nu, '', False, nu
+    if isinstance(trig, dict):
+        h = store.get_history(trig['id'])
+        if h is None:
+            return (nu,) * 8
+        current = ([h['task_id']] if h['task_id'] else []) + [t['id'] for t in h['also_tasks']]
+        summary = html.Div([html.Span(f"{h['occurred_at']} [{h['entry_type']}] ", className='text-muted'),
+                            h['title'] or h['content'][:80]])
+        return True, h['id'], summary, task_options(), current, '', False, nu
+    try:
+        store.update_history(hid, task_ids=task_ids or [])
+    except ValueError as e:
+        return True, nu, nu, nu, nu, str(e), True, nu
+    return False, nu, nu, nu, nu, '', False, (n or 0) + 1

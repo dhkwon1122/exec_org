@@ -201,3 +201,38 @@ def test_mark_ai_todo_after_editing_title():
     todos = store.get_history(h['id'])['ai_todos']
     assert todos[0]['task_id'] == sub['id'] and 'task_id' not in todos[1]
     store.mark_ai_todo(h['id'], 9, sub['id'])  # 범위 밖은 무시
+
+
+def test_task_from_ai_todo_keeps_source_history(tmp_path):
+    from sqlalchemy import create_engine, text
+    path = tmp_path / 'src.db'
+    db.configure('sqlite:///' + str(path))
+    t = store.create_task('2026 임원 인사')
+    h = store.add_history(t['id'], '회의: 심사위원 섭외 필요', '회의')
+    sub = store.create_todo('심사위원 섭외', task_id=t['id'], source_history_id=h['id'])
+    other = store.create_todo('조직도 공지', source_history_id=h['id'])  # 상위 없이 만든 업무
+    for x in (sub, other):  # 할 일을 찾은 기록이 새 업무 이력에도 보임
+        assert h['id'] in [e['id'] for e in store.list_history(x['id'])]
+    assert h['id'] in [e['id'] for e in store.list_history(t['id'])]  # 원래 업무에도 그대로
+    # 예전에 만든 업무(연결 없음)는 앱 시작 때 연결
+    with create_engine(f'sqlite:///{path}').begin() as c:
+        c.execute(text('DELETE FROM history_tasks'))
+    assert h['id'] not in [e['id'] for e in store.list_history(other['id'])]
+    db.configure('sqlite:///' + str(path))
+    assert h['id'] in [e['id'] for e in store.list_history(other['id'])]
+    db.configure('sqlite:///' + str(path))  # 다시 시작해도 한 번만
+    assert len(store.get_history(h['id'])['also_tasks']) == 2
+
+
+def test_link_existing_history_to_task():
+    a, b = store.create_task('A'), store.create_task('B')
+    h = store.add_history(a['id'], 'A 에서 남긴 기록', '메모')
+    assert store.link_history_task(h['id'], b['id']) is True
+    assert store.link_history_task(h['id'], b['id']) is False  # 이미 걸림
+    assert h['id'] in [e['id'] for e in store.list_history(b['id'])]
+    kim = store.create_person('김영수')
+    trend = store.add_history(None, '김영수 동향', '동향', person_ids=[kim['id']])
+    store.link_history_task(trend['id'], b['id'])  # 업무 없던 동향은 그 업무가 기록의 업무로
+    assert store.get_history(trend['id'])['task_id'] == b['id']
+    with pytest.raises(ValueError):
+        store.link_history_task(h['id'], 9999)
