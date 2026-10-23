@@ -262,11 +262,12 @@ class PersonAttribute(Base):
 
 
 class Schedule(Base):
-    """원장님 일정 — 비서실 메일을 AI 가 정리해 넣거나 직접 입력. 지난 일정이 곧 원장님 일정 이력이다.
-    날짜만 있고 시간이 없으면 종일 일정(start_time='')."""
+    """원장님·피플팀장 일정 — 비서실 메일을 AI 가 정리해 넣거나 직접 입력. 지난 일정이 곧 일정 이력이다.
+    날짜만 있고 시간이 없으면 종일 일정(start_time=''). owner: 누구 일정인지 (services/schedules.py OWNERS)."""
     __tablename__ = 'schedules'
 
     id = Column(Integer, primary_key=True)
+    owner = Column(String(20), default='director', index=True)
     date = Column(String(10), nullable=False, index=True)  # YYYY-MM-DD
     start_time = Column(String(5), default='')  # HH:MM ('' = 종일·시간 미정)
     end_time = Column(String(5), default='')
@@ -310,6 +311,7 @@ class ScheduleImport(Base):
     __tablename__ = 'schedule_imports'
 
     id = Column(Integer, primary_key=True)
+    owner = Column(String(20), default='director')  # 누구 일정 메일인지 — 반영하면 그 사람 일정으로 들어간다
     name = Column(String(300), default='')  # 메일 제목 또는 파일 이름
     mail_date = Column(String(10), default='')  # 메일 보낸 날 (상대 날짜 '다음주 월요일' 해석 기준)
     raw_text = Column(Text, default='')
@@ -450,6 +452,7 @@ def make_engine(url: str | None = None):
             _backfill_assignees(engine)
             _link_source_history(engine)
             _migrate_absences(engine)
+            _default_schedule_owner(engine)
             break
         except Exception:  # noqa: BLE001
             if attempt == 4:
@@ -477,6 +480,13 @@ def _add_missing_columns(engine):
                     default = ''
                 conn.execute(text(f'ALTER TABLE {table.name} ADD COLUMN {col.name} {coltype}{default}'))
 
+
+
+def _default_schedule_owner(engine):
+    """일정 주인(owner) 칸이 생기기 전의 일정·가져오기는 모두 원장님 일정이다."""
+    with engine.begin() as conn:
+        for table in ('schedules', 'schedule_imports'):
+            conn.execute(text(f"UPDATE {table} SET owner = 'director' WHERE owner IS NULL OR owner = ''"))
 
 
 def _migrate_absences(engine):

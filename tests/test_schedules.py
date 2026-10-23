@@ -378,3 +378,52 @@ def test_ai_gets_existing_schedules_as_reference(monkeypatch):
     monkeypatch.setattr(llm, 'chat', lambda system, user, **k: seen.append(user) or '{"events": []}')
     schedules.ai_parse('주간 일정 메일', '2026-10-20')
     assert '이미 등록된 일정' in seen[0] and '주간 임원 간담회 | 본관동 7층 대회의실' in seen[0]
+
+
+# ── 피플팀장 일정 (owner) ─────────────────────────────────────────────
+
+def test_people_lead_schedule_is_separate_from_director():
+    schedules.save({'date': '2026-10-27', 'start_time': '09:00', 'title': '주간 회의'}, by='나')
+    p = schedules.save({'date': '2026-10-27', 'start_time': '10:00', 'title': '주간 회의'}, by='나', owner='people')
+    assert p['owner'] == 'people'
+    assert [e['start_time'] for e in schedules.list_range('2026-10-27', '2026-10-27')] == ['09:00']
+    assert [e['start_time'] for e in schedules.list_range('2026-10-27', '2026-10-27', 'people')] == ['10:00']
+    assert len(schedules.search('주간', owner='people')) == 1
+    # 고칠 때는 주인 그대로
+    schedules.save({'date': '2026-10-27', 'start_time': '11:00', 'title': '주간 회의'}, p['id'], owner='director')
+    assert schedules.get(p['id'])['owner'] == 'people'
+    assert schedules.owner_of('없는값') == 'director'
+
+
+def test_people_lead_import_matches_only_own_schedules():
+    schedules.save({'date': '2026-10-28', 'start_time': '09:00', 'title': '팀장 회의'}, by='나')
+    iid = schedules.create_import('피플팀 일정', '2026-10-24', '10/28(수) 14:00 팀장 회의', 'ㄱ', owner='people')
+    schedules.parse_import(iid)
+    imp = schedules.get_import(iid)
+    assert imp['owner'] == 'people'
+    assert [i['id'] for i in schedules.list_imports(owner='people')] == [iid]
+    assert schedules.list_imports() == []
+    # 원장님의 같은 이름 일정과 섞이지 않고 피플팀장 새 일정으로 들어간다
+    assert [r['state'] for r in schedules.preview(imp['events'], 'people')] == ['new']
+    r = schedules.apply_events(imp['events'], iid, 'ㄱ')
+    assert r['added'] == 1
+    assert schedules.list_range('2026-10-28', '2026-10-28', 'people')[0]['start_time'] == '14:00'
+    assert schedules.list_range('2026-10-28', '2026-10-28')[0]['start_time'] == '09:00'
+
+
+def test_old_rows_become_director(tmp_path):
+    from sqlalchemy import text
+    url = 'sqlite:///' + str(tmp_path / 'old.db')
+    db.configure(url)
+    with db.SessionLocal() as s:
+        s.execute(text("UPDATE schedules SET owner = ''"))
+        s.execute(text("INSERT INTO schedules (date, title, owner) VALUES ('2026-10-01', '옛 일정', '')"))
+        s.commit()
+    db.configure(url)  # 앱 다시 시작
+    assert schedules.list_range('2026-10-01', '2026-10-01')[0]['title'] == '옛 일정'
+
+
+def test_mail_draft_uses_owner_name():
+    schedules.save({'date': '2026-10-27', 'title': '면담'}, owner='people')
+    d = __import__('services.outbox', fromlist=['x']).draft_schedule('2026-10-26', '2026-11-01', 'people')
+    assert d['subject'].startswith('[피플팀장 일정]') and '면담' in d['table_html']
