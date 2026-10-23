@@ -9,9 +9,11 @@ Researcher-board 와 같은 .env 를 그대로 쓸 수 있도록 LLM_* 가 없�
   LLM_TIMEOUT   초, 기본 300
   LLM_MAX_TOKENS 기본 4000 (추론형 모델은 사고 과정에도 토큰을 쓰므로 넉넉히)
 """
+import contextvars
 import json
 import os
 import re
+from contextlib import contextmanager
 from datetime import date
 
 import requests
@@ -31,7 +33,53 @@ def is_configured() -> bool:
     return bool(_env('API_URL'))
 
 
+# ── 다시 분석 (피드백) ────────────────────────────────────────────────
+# 결과가 틀려 다시 돌릴 때: with retry(피드백, 이전 결과): 안의 chat() 은 원래 질문 끝에 이전 결과와 피드백을 붙이고
+# 온도를 올려 같은 답을 되풀이하지 않게 한다. 부르는 쪽 함수(일정·부재·업무·요약…)는 손대지 않아도 된다.
+
+_retry = contextvars.ContextVar('llm_retry', default=None)
+RETRY_TEMPERATURE = 0.6
+MAX_PREVIOUS_CHARS = 3000
+
+RETRY_NOTE = """
+
+[다시 분석 요청]
+같은 원문을 앞서 분석했는데 결과가 맞지 않아 다시 요청한다.
+이전 결과:
+<<<
+{previous}
+>>>
+사용자 피드백:
+<<<
+{note}
+>>>
+피드백을 반영해 원문을 처음부터 다시 읽고 분석하라. 이전 결과에서 맞는 부분은 살리되 틀린 부분은 반드시 고친다.
+피드백이 원문과 어긋나면 원문을 따른다. 답 형식은 위에서 정한 그대로."""
+
+
+@contextmanager
+def retry(note: str = '', previous: str = ''):
+    token = _retry.set(((note or '').strip(), (previous or '').strip()))
+    try:
+        yield
+    finally:
+        _retry.reset(token)
+
+
+def _with_retry(user: str, temperature: float) -> tuple[str, float]:
+    r = _retry.get()
+    if r is None:
+        return user, temperature
+    note, previous = r
+    if len(previous) > MAX_PREVIOUS_CHARS:
+        previous = previous[:MAX_PREVIOUS_CHARS] + '\n…(이하 생략)'
+    return (user + RETRY_NOTE.format(previous=previous or '(기록 없음)',
+                                     note=note or '(없음 — 이전 결과를 되풀이하지 말고 원문을 다시 꼼꼼히 읽을 것)'),
+            max(temperature, RETRY_TEMPERATURE))
+
+
 def chat(system: str, user: str, temperature: float = 0.2) -> str:
+    user, temperature = _with_retry(user, temperature)
     url = _env('API_URL')
     if not url:
         raise LLMError('LLM 이 설정되지 않았습니다 (.env 의 LLM_API_URL).')

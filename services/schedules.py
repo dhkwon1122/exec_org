@@ -549,8 +549,9 @@ def create_import(name: str, mail_date: str, text: str, by: str = '', owner: str
         return x.id
 
 
-def parse_import(import_id: int) -> None:
-    """동기 처리 — AI(없거나 실패하면 규칙)로 일정 목록을 만들어 저장한다. 예외는 밖으로 내보내지 않는다."""
+def parse_import(import_id: int, prefer_ai: bool = False) -> None:
+    """동기 처리 — AI(없거나 실패하면 규칙)로 일정 목록을 만들어 저장한다. 예외는 밖으로 내보내지 않는다.
+    prefer_ai: 표·줄 규칙을 건너뛰고 AI 로 (피드백을 주고 다시 정리할 때 — 규칙은 피드백을 읽지 못한다)."""
     with db.SessionLocal() as s:
         x = s.get(ScheduleImport, import_id)
         if x is None:
@@ -558,6 +559,8 @@ def parse_import(import_id: int) -> None:
         text, mail_date, owner = x.raw_text, x.mail_date, owner_of(x.owner)
     status, error, events = 'done', '', []
     try:
+        if prefer_ai and llm.is_configured():
+            raise LookupError  # 규칙 건너뛰기
         events = table_parse(text, mail_date)  # 제목 행이 있는 표는 열 이름대로 그대로 읽는다 (AI 보다 정확)
         if events:
             error = '표의 제목 행(일자·시간·내용·장소…) 기준으로 읽었습니다.'

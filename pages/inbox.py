@@ -53,8 +53,13 @@ def layout(mail=None, **_):
                         html.Div([html.I(className='bi bi-stars me-1 text-warning'), 'AI 에게 맡기기'],
                                  className='fw-semibold small mb-1'),
                         html.Div('이 메일로 무엇을 할지 고르세요. 추천 표시는 AI 분류와 본문 모양을 보고 미리 골라 둔 것입니다. '
-                                 '결과는 아래에 항목별로 나오고, 항목마다 확인한 뒤 등록합니다.', className='small text-muted mb-2'),
+                                 '결과는 아래에 항목별로 나오고, 항목마다 확인한 뒤 등록합니다. 이미 돌린 분석을 다시 고르면 이전 결과와 '
+                                 '아래 피드백을 AI 에게 함께 주고 새로 분석합니다.', className='small text-muted mb-2'),
                         dbc.Checklist(id='ib-ai-actions', options=[], value=[], className='small'),
+                        dbc.Textarea(id='ib-ai-feedback', rows=2, className='small mt-2',
+                                     placeholder='결과가 틀렸으면 무엇이 틀렸는지 적고 다시 실행하세요 — 예: 10/28 일정은 '
+                                                 '피플팀장 일정이 아님 / 부재자는 김영수 부사장 / 업무는 자료 제출 하나뿐'),
+                        html.Div(id='ib-ai-history', className='small text-muted mt-1'),
                         html.Div([
                             dbc.Button([html.I(className='bi bi-magic me-1'), 'AI 분석 실행'], id='ib-ai-run',
                                        color='primary', size='sm', className='me-2'),
@@ -611,11 +616,13 @@ def notify_sidebar(_, n):
 # ── AI 에게 맡기기 ────────────────────────────────────────────────────
 
 @callback(Output('ib-ai-box', 'style'), Output('ib-ai-actions', 'options'), Output('ib-ai-actions', 'value'),
-          Output('ib-ai-summary', 'children'), Input('ib-sel', 'data'), Input('ib-refresh', 'data'))
+          Output('ib-ai-summary', 'children'), Output('ib-ai-run', 'children'), Output('ib-ai-history', 'children'),
+          Output('ib-ai-feedback', 'value'),
+          Input('ib-sel', 'data'), Input('ib-refresh', 'data'))
 def render_ai(sel, _):
     m = mailbox.get_mail(sel) if sel else None
     if m is None:
-        return {'display': 'none'}, [], [], None
+        return {'display': 'none'}, [], [], None, no_update, None, ''
     rec = dict(mailbox.recommend_actions(m))
     asked = m['suggestion'].get('requested') or []
     ai_on = llm.is_configured()
@@ -643,20 +650,28 @@ def render_ai(sel, _):
             html.Summary(f'요약하지 못한 첨부 {len(skipped)}개', className='small text-muted'),
             html.Ul([html.Li(x) for x in skipped], className='small text-muted mb-0'),
         ], className='mt-2')])
-    return {}, opts, value, summary
+    history = m['suggestion'].get('feedback') or []
+    hist = html.Details([
+        html.Summary(f'다시 분석한 기록 {len(history)}번'),
+        html.Ul([html.Li(f"{h['at']} {h['by']} · {', '.join(h['actions'])}" + (f" — “{h['note']}”" if h['note'] else ''))
+                 for h in reversed(history)], className='mb-0'),
+    ]) if history else None
+    run_label = [html.I(className='bi bi-arrow-repeat me-1'), '다시 분석'] if asked else \
+        [html.I(className='bi bi-magic me-1'), 'AI 분석 실행']
+    return {}, opts, value, summary, run_label, hist, ''
 
 
 @callback(Output('ib-refresh', 'data', allow_duplicate=True), Output('ib-msg', 'children', allow_duplicate=True),
           Output('ib-msg', 'is_open', allow_duplicate=True), Output('ib-msg', 'color', allow_duplicate=True),
           Output('ib-ai-busy', 'children'),
           Input('ib-ai-run', 'n_clicks'), State('ib-sel', 'data'), State('ib-ai-actions', 'value'),
-          State('ib-refresh', 'data'), prevent_initial_call=True)
-def run_ai(n, sel, actions, refresh):
+          State('ib-ai-feedback', 'value'), State('ib-refresh', 'data'), prevent_initial_call=True)
+def run_ai(n, sel, actions, feedback, refresh):
     """고른 분석을 돌린다 — 일정 표·부재 표·업무 후보·요약이 아래에 추천으로 나온다."""
     if not n or not sel:
         return no_update, no_update, no_update, no_update, ''
     try:
-        done = mailbox.run_actions(sel, actions or [], auth.current_name())
+        done = mailbox.run_actions(sel, actions or [], auth.current_name(), feedback=feedback or '')
     except (ValueError, llm.LLMError) as e:
         return no_update, str(e), True, 'warning', ''
     parts = ['요약 완료' if k == 'summary' else f'첨부 문서 {v}개 요약 (첨부 목록에 표시)' if k == 'docs' else
