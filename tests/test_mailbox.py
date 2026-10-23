@@ -531,3 +531,62 @@ def test_items_handled_separately_then_complete(monkeypatch):
     # 처리 완료 — 일정은 처리하지 않고 끝내도 됨
     mailbox.complete(m['id'], '나')
     assert mailbox.get_mail(m['id'])['status'] == 'done' and mailbox.counts().get('review', 0) == 0
+
+
+# ── 피플팀장 일정 메일 ────────────────────────────────────────────────
+
+PEOPLE_HTML = SCHEDULE_HTML.replace('원장님 일정입니다.', '피플팀장 주간 일정 공유드립니다.').replace('원장실', '피플팀 회의실')
+
+
+@pytest.mark.parametrize('subject, sender, body, ai, owner', [
+    ('피플팀장 주간 일정', 'a@x', '원장님 보고 포함', '', 'people'),  # 제목이 가장 확실
+    ('원장님 주간 일정', 'a@x', '피플팀장 배석', 'people', 'director'),
+    ('주간 일정', '피플팀 비서 <pa@x.com>', '', '', 'people'),  # 보낸 사람 (.env)
+    ('주간 일정', 'a@x', '', 'people', 'people'),  # AI 판단
+    ('주간 일정', 'a@x', '피플팀장 면담 일정', '', 'people'),  # 본문에 피플팀장만
+    ('주간 일정', 'a@x', '원장님 보고 — 피플팀장 배석', '', 'director'),
+    ('주간 일정', 'a@x', '회의', '', 'director'),  # 모르면 원장님
+])
+def test_schedule_owner(monkeypatch, subject, sender, body, ai, owner):
+    monkeypatch.setenv('MAIL_PEOPLE_SCHEDULE_SENDERS', 'pa@x.com')
+    assert mailbox.schedule_owner(subject, sender, body, ai)[0] == owner
+
+
+def test_people_lead_schedule_mail_goes_to_people_calendar(monkeypatch):
+    mailbox.save_rule({'field': 'sender', 'pattern': 'people-sec@', 'action': 'schedule_people', 'auto': True})
+    pop = FakePOP([
+        _mail('주간 일정', '피플팀 <people-sec@x.com>', PEOPLE_HTML, mid='<p1@x>'),  # 규칙 → 피플팀장(자동)
+        _mail('피플팀장 일정 변경', 'kim@x.com', PEOPLE_HTML, mid='<p2@x>'),  # 규칙 없음 → 제목으로 피플팀장
+        _mail('원장님 일정', 'b@x', SCHEDULE_HTML, mid='<p3@x>'),
+    ])
+    mailbox.fetch_new(connect=lambda cfg: pop)
+    by = {m['subject']: m for m in mailbox.list_mails()}
+    assert by['주간 일정']['status'] == 'auto'
+    assert [e['title'] for e in schedules.list_range('2026-10-27', '2026-10-28', 'people')] == ['주간 임원회의',
+                                                                                              'AI센터 보고']
+    assert schedules.list_range('2026-10-27', '2026-10-28') == []  # 원장님 일정엔 안 들어감
+    m = by['피플팀장 일정 변경']
+    assert m['status'] == 'review' and "피플팀장 일정(제목에 '피플팀장')" in m['reason']
+    assert schedules.get_import(m['schedule_import_id'])['owner'] == 'people'
+    assert schedules.get_import(by['원장님 일정']['schedule_import_id'])['owner'] == 'director'
+
+
+def test_change_owner_before_apply_only(monkeypatch):
+    pop = FakePOP([_mail('주간 일정', 'b@x', SCHEDULE_HTML, mid='<q1@x>')])
+    mailbox.fetch_new(connect=lambda cfg: pop)
+    m = mailbox.list_mails()[0]
+    assert mailbox.set_schedule_owner(m['id'], 'director') is False  # 이미 원장님
+    assert mailbox.set_schedule_owner(m['id'], 'people') is True
+    imp = schedules.get_import(m['schedule_import_id'])
+    r = mailbox.apply_schedule(m['id'], schedules.preview(imp['events'], 'people'), '나')
+    assert r['added'] == 2 and len(schedules.list_range('2026-10-27', '2026-10-28', 'people')) == 2
+    with pytest.raises(ValueError, match='이미 피플팀장 일정에 반영'):
+        mailbox.set_schedule_owner(m['id'], 'director')
+
+
+def test_ai_action_schedule_keeps_owner(monkeypatch):
+    pop = FakePOP([_mail('피플팀장 일정', 'b@x', PEOPLE_HTML, mid='<r1@x>')])
+    mailbox.fetch_new(connect=lambda cfg: pop)
+    m = mailbox.list_mails()[0]
+    mailbox.run_actions(m['id'], ['schedule'], '나')
+    assert schedules.get_import(mailbox.get_mail(m['id'])['schedule_import_id'])['owner'] == 'people'

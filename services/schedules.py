@@ -625,6 +625,15 @@ def get_import(import_id: int) -> dict | None:
         return _import_dict(x) if x else None
 
 
+def set_import_owner(import_id: int, owner: str) -> None:
+    """가져온 메일이 누구 일정인지 바꾼다 (반영 전 — 반영할 때 그 사람 일정과 대조한다)."""
+    with db.SessionLocal() as s:
+        x = s.get(ScheduleImport, import_id)
+        if x is not None:
+            x.owner = owner_of(owner)
+            s.commit()
+
+
 def delete_import(import_id: int) -> None:
     with db.SessionLocal() as s:
         x = s.get(ScheduleImport, import_id)

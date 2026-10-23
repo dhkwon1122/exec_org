@@ -1,5 +1,5 @@
 """받은 메일 — POP3 로 가져온 메일의 처리 결과(자동 처리)와 추천(확인 필요), 분류 규칙.
-추천 항목(업무 후보·원장님 일정·임원 부재·임원 정보 변경)은 항목마다 따로 처리하고, 다 봤으면 '처리 완료'."""
+추천 항목(업무 후보·일정(원장님·피플팀장)·임원 부재·임원 정보 변경)은 항목마다 따로 처리하고, 다 봤으면 '처리 완료'."""
 import dash
 import dash_bootstrap_components as dbc
 from dash import ALL, Input, Output, State, callback, ctx, dash_table, dcc, html, no_update
@@ -9,7 +9,7 @@ from services import absences, auth, doc_versions, doc_worker, llm, mailbox, out
 
 dash.register_page(__name__, path='/inbox', name='받은 메일', title='업무 기록 · 받은 메일')
 
-KIND = {'schedule': ('원장님 일정', 'primary'), 'task': ('업무', 'success'), 'both': ('일정+업무', 'info'),
+KIND = {'schedule': ('일정', 'primary'), 'task': ('업무', 'success'), 'both': ('일정+업무', 'info'),
         'absence': ('임원 부재', 'warning'), 'ignore': ('무시', 'secondary')}
 STATUS_COLOR = {'auto': 'success', 'review': 'warning', 'done': 'primary', 'ignored': 'secondary', 'failed': 'danger'}
 FILTERS = [('review', '확인 필요'), ('auto', '자동 처리'), ('done', '처리 완료'), ('ignored', '무시'), ('all', '전체')]
@@ -126,8 +126,13 @@ def layout(mail=None, **_):
                     ], className='mt-1 d-flex align-items-center flex-wrap'),
                 ]),
                 html.Div(id='ib-sched-box', style={'display': 'none'}, children=[
-                    html.H6([html.I(className='bi bi-calendar-event me-1'), '원장님 일정',
-                             html.Span(id='ib-sched-done', className='ms-2')], className='mt-3'),
+                    html.Div([
+                        html.H6([html.I(className='bi bi-calendar-event me-1'), '일정',
+                                 html.Span(id='ib-sched-done', className='ms-2')], className='mb-0 me-3'),
+                        dbc.RadioItems(id='ib-sched-owner', inline=True, className='small', value=None,
+                                       options=[{'label': f'{v} 일정', 'value': k}
+                                                for k, v in schedules.OWNERS.items()]),
+                    ], className='d-flex align-items-center flex-wrap mt-3 mb-1'),
                     html.Div(id='ib-sched-note', className='small text-muted mb-1'),
                     dash_table.DataTable(id='ib-sched', editable=True, row_deletable=True, data=[],
                                          columns=[{'name': '상태', 'id': 'state_label', 'editable': False},
@@ -282,13 +287,14 @@ def pick(_):
           Output('ib-sched', 'data'), Output('ib-sched-note', 'children'), Output('ib-actions', 'style'),
           Output('ib-complete', 'style'), Output('ib-ignore', 'style'), Output('ib-reopen', 'style'),
           Output('ib-body', 'children'), Output('ib-body-box', 'style'), Output('ib-parent-hint', 'children'),
+          Output('ib-sched-owner', 'value'),
           Input('ib-sel', 'data'), Input('ib-refresh', 'data'))
 def render_detail(sel, _):
     hide, show = {'display': 'none'}, {}
     m = mailbox.get_mail(sel) if sel else None
     if m is None:
         return (html.Div('왼쪽에서 메일을 고르세요.', className='text-muted small'), hide, [], [], None, hide, [], '',
-                hide, hide, hide, hide, '', hide, None)
+                hide, hide, hide, hide, '', hide, None, None)
     open_ = m['status'] in ('review', 'failed')
     kind = KIND.get(m['kind'])
     links = [dcc.Link(f'#{tid}', href=f'/task/{tid}', className='me-2') for tid in m['task_ids']]
@@ -308,11 +314,12 @@ def render_detail(sel, _):
     ]))
     wants_task = m['kind'] in ('task', 'both') or not m['kind'] or m['suggestion'].get('requested_tasks')
     tasks = m['suggestion'].get('tasks') or []
-    sched_rows, note = [], ''
+    sched_rows, note, owner = [], '', None
     if m['schedule_import_id']:
         imp = schedules.get_import(m['schedule_import_id'])
+        owner = imp['owner'] if imp else None
         if imp and imp['status'] == 'done':
-            sched_rows = schedules.preview(imp['events'])
+            sched_rows = schedules.preview(imp['events'], imp['owner'])
             for r in sched_rows:
                 r['state_label'] = {'new': '신규', 'changed': '변경', 'same': '동일', 'check': '확인 필요'}[r['state']] + (
                     f" ({', '.join(schedules.LABELS[f] for f in r['changed'])})" if r['changed'] else '')
@@ -326,7 +333,7 @@ def render_detail(sel, _):
     return (head, show if wants_task and (open_ or tasks) else hide, tasks, _task_options(), parent,
             show if show_sched else hide, sched_rows, note, show,
             show if open_ else hide, show if open_ else hide, hide if open_ else show,
-            m['body'], show, _parent_hint(sug))
+            m['body'], show, _parent_hint(sug), owner)
 
 
 def _parent_hint(sug: dict):
@@ -562,7 +569,8 @@ def item_actions(_t, _s, _p, _d, sel, tasks, parent, sched, person_rows, trend_p
             msg = ['업무 ', *[dcc.Link(f'#{i} ', href=f'/task/{i}') for i in ids], f'{len(ids)}건을 등록했습니다.']
         elif trig == 'ib-sched-apply':
             r = mailbox.apply_schedule(sel, sched or [], by)
-            msg = f"원장님 일정 — 새 일정 {r['added']}건, 바뀐 일정 {r['updated']}건, 이미 있음 {r['same']}건"
+            imp = schedules.get_import(mailbox.get_mail(sel)['schedule_import_id'])
+            msg = f"{schedules.OWNERS[imp['owner']]} 일정 — 새 일정 {r['added']}건, 바뀐 일정 {r['updated']}건, 이미 있음 {r['same']}건"
         elif trig == 'ib-person-apply':
             r = mailbox.apply_person_updates(sel, person_rows or [], by)
             msg = f"임원 정보 {r['changed']}건 반영" + (f" (건너뜀 {r['skipped']}건 — 같은 값·임원 모름)" if r['skipped'] else '')
@@ -574,6 +582,23 @@ def item_actions(_t, _s, _p, _d, sel, tasks, parent, sched, person_rows, trend_p
     except ValueError as e:
         return no_update, str(e), True, 'warning'
     return (n or 0) + 1, msg, True, 'success'
+
+
+@callback(Output('ib-refresh', 'data', allow_duplicate=True), Output('ib-msg', 'children', allow_duplicate=True),
+          Output('ib-msg', 'is_open', allow_duplicate=True), Output('ib-msg', 'color', allow_duplicate=True),
+          Input('ib-sched-owner', 'value'), State('ib-sel', 'data'), State('ib-refresh', 'data'),
+          prevent_initial_call=True)
+def change_owner(owner, sel, n):
+    """누구 일정인지 바꾸면 그 사람 일정과 다시 대조한다 (화면이 다시 그려지며 같은 값이 들어올 때는 그대로)."""
+    if not owner or not sel:
+        return no_update, no_update, no_update, no_update
+    try:
+        changed = mailbox.set_schedule_owner(sel, owner)
+    except ValueError as e:
+        return (n or 0) + 1, str(e), True, 'warning'
+    if not changed:
+        return no_update, no_update, no_update, no_update
+    return ((n or 0) + 1, f'{schedules.OWNERS[owner]} 일정으로 바꿨습니다 — 그 일정과 다시 대조했습니다.', True, 'info')
 
 
 @callback(Output('mail-changed', 'data', allow_duplicate=True), Input('ib-refresh', 'data'),
@@ -645,7 +670,7 @@ def run_ai(n, sel, actions, refresh):
 def _rules_view():
     rules = mailbox.list_rules()
     if not rules:
-        return html.Div('규칙이 없습니다. 예: 보낸 사람에 "비서실" → 원장님 일정(자동).', className='small text-muted')
+        return html.Div('규칙이 없습니다. 예: 보낸 사람에 "비서실" → 원장님 일정(자동), 제목에 "피플팀장" → 피플팀장 일정.', className='small text-muted')
     titles = {t['value']: t['label'] for t in _task_options()}
     return dbc.Table(html.Tbody([html.Tr([
         html.Td(r['name']),
@@ -677,7 +702,10 @@ def rules(_o, _m, _a, _d, sel, field, pattern, action, auto, parent, name):
         m = mailbox.get_mail(sel)
         from email.utils import parseaddr
         pat_out, field_out = parseaddr(m['sender'])[1] or m['sender'], 'sender'
-        action_out = 'task' if m['kind'] == 'task' else 'ignore' if m['kind'] == 'ignore' else 'schedule'
+        imp = schedules.get_import(m['schedule_import_id']) if m['schedule_import_id'] else None
+        action_out = ('task' if m['kind'] == 'task' else 'ignore' if m['kind'] == 'ignore' else
+                      'absence' if m['kind'] == 'absence' else
+                      'schedule_people' if imp and imp['owner'] == 'people' else 'schedule')
     elif trig == 'ib-r-add':
         try:
             mailbox.save_rule({'field': field, 'pattern': pattern, 'action': action, 'auto': auto,
