@@ -19,6 +19,7 @@ import poplib
 import re
 import threading
 import time
+from contextlib import nullcontext
 from datetime import date, datetime, timedelta
 from email.utils import parseaddr
 
@@ -357,9 +358,9 @@ def suggest_parent(subject: str, body: str, tasks: list[dict], exclude_id: int |
 
 # ── 반영 ──────────────────────────────────────────────────────────────
 
-def _make_schedule_import(m: dict, owner: str = schedules.DEFAULT_OWNER) -> int:
+def _make_schedule_import(m: dict, owner: str = schedules.DEFAULT_OWNER, prefer_ai: bool = False) -> int:
     iid = schedules.create_import(m['subject'], m['mail_date'], m['body'], MAIL_AUTHOR, owner)
-    schedules.parse_import(iid)
+    schedules.parse_import(iid, prefer_ai=prefer_ai)
     return iid
 
 
@@ -588,8 +589,22 @@ def recommend_actions(m: dict) -> list[tuple[str, str]]:
     return list(out.items())
 
 
-def run_actions(mail_id: int, actions: list[str], by: str = '') -> dict:
+def _previous_results(m: dict) -> dict:
+    """분석마다 지난번 결과 (다시 분석할 때 AI 에게 '이전 결과'로 보여 준다)."""
+    sug = m['suggestion']
+    imp = schedules.get_import(m['schedule_import_id']) if m['schedule_import_id'] else None
+    docs = [f"{f['filename']}: [{f['insight']['doc_type']}] {f['insight']['summary']} 태그: {', '.join(f['insight']['tags'])}"
+            for g in doc_versions.for_mails([m['id']]) for f in g['files'] if f['insight']['analyzed']]
+    prev = {'schedule': imp['events'] if imp and imp['events'] else None, 'absence': sug.get('absences'),
+            'tasks': sug.get('tasks'), 'person': sug.get('person_updates'), 'summary': sug.get('summary'),
+            'docs': '\n'.join(docs) or None}
+    return {k: v if isinstance(v, str) else json.dumps(v, ensure_ascii=False) for k, v in prev.items() if v}
+
+
+def run_actions(mail_id: int, actions: list[str], by: str = '', feedback: str = '') -> dict:
     """고른 분석을 돌려 추천으로 남긴다(바로 반영하지 않음 — 화면에서 확인 후 반영).
+    이미 돌린 분석을 다시 고르거나 feedback 을 주면 '다시 분석' — AI 에게 이전 결과와 피드백을 함께 주고(llm.retry),
+    일정은 표 규칙 대신 AI 로, 첨부 요약은 저장된 요약 대신 새로 묻는다.
     schedule: 일정 정리(표) / absence: 임원 부재 표 / tasks: 업무 후보 + 상위 업무 추천 / summary: 제목·요약·키워드·할 일 /
     docs: 첨부 문서 요약·태그(첨부 기록에 바로 남는다 — 이것만 고르면 메일 상태는 그대로).
     결과 {동작: 건수}. 메일은 '확인 필요'로 돌려 반영 버튼을 쓸 수 있게 한다."""
@@ -600,18 +615,29 @@ def run_actions(mail_id: int, actions: list[str], by: str = '') -> dict:
     if not actions:
         raise ValueError('맡길 일을 고르세요.')
     sug, done, fields = dict(m['suggestion']), {}, {}
+    feedback = (feedback or '').strip()[:2000]
+    asked_before = set(sug.get('requested') or [])
+    prev = _previous_results(m)
+    redo = {a for a in actions if feedback or a in asked_before}
+
+    def ctx(action):
+        return llm.retry(feedback, prev.get(action, '')) if action in redo else nullcontext()
+
     if 'schedule' in actions:
         old = schedules.get_import(m['schedule_import_id']) if m['schedule_import_id'] else None
         owner = old['owner'] if old else schedule_owner(m['subject'], m['sender'], m['body'])[0]
-        iid = _make_schedule_import(m, owner)
+        with ctx('schedule'):
+            iid = _make_schedule_import(m, owner, prefer_ai='schedule' in redo)
         imp = schedules.get_import(iid)
         fields['schedule_import_id'] = iid
         done['schedule'] = len(imp['events']) if imp else 0
     if 'absence' in actions:
-        sug['absences'], sug['absence_note'] = absences.extract(m['body'], m['mail_date'], m['subject'])
+        with ctx('absence'):
+            sug['absences'], sug['absence_note'] = absences.extract(m['body'], m['mail_date'], m['subject'])
         done['absence'] = len(sug['absences'])
     if 'tasks' in actions:
-        tasks = task_candidates(m['subject'], m['mail_date'], m['body'])
+        with ctx('tasks'):
+            tasks = task_candidates(m['subject'], m['mail_date'], m['body'])
         sug['tasks'] = tasks
         sug['requested_tasks'] = True
         sug.update(suggest_parent(m['subject'], m['body'], tasks, mail_id))
@@ -619,12 +645,14 @@ def run_actions(mail_id: int, actions: list[str], by: str = '') -> dict:
     if 'person' in actions:
         if not llm.is_configured():
             raise ValueError('임원 정보 변경 찾기는 LLM 이 설정돼 있어야 합니다.')
-        sug['person_updates'] = ai_person_updates(m)
+        with ctx('person'):
+            sug['person_updates'] = ai_person_updates(m)
         done['person'] = len(sug['person_updates'])
     if 'summary' in actions:
         if not llm.is_configured():
             raise ValueError('요약은 LLM 이 설정돼 있어야 합니다.')
-        r = llm.analyze_record(f"제목: {m['subject']}\n보낸 사람: {m['sender']}\n\n{m['body']}", entry_type='요청')
+        with ctx('summary'):
+            r = llm.analyze_record(f"제목: {m['subject']}\n보낸 사람: {m['sender']}\n\n{m['body']}", entry_type='요청')
         sug['summary'] = {k: r[k] for k in ('title', 'summary', 'keywords', 'todos')}
         if r['todos'] and 'tasks' not in actions:  # 요약에서 찾은 할 일도 업무 후보로
             sug['tasks'] = r['todos']
@@ -633,11 +661,16 @@ def run_actions(mail_id: int, actions: list[str], by: str = '') -> dict:
     if 'docs' in actions:
         if not llm.is_configured():
             raise ValueError('첨부 문서 요약은 LLM 이 설정돼 있어야 합니다.')
-        r = doc_summary.analyze_mail(mail_id)
+        with ctx('docs'):
+            r = doc_summary.analyze_mail(mail_id, force='docs' in redo)
         done['docs'] = r['done']
         if r['skipped']:
             sug['docs_skipped'] = [f'{name} — {why}' for name, why in r['skipped']]
-    sug['requested'] = actions
+    sug['requested'] = sorted(asked_before | set(actions), key=list(AI_ACTIONS).index)
+    if redo:  # 다시 분석한 기록 — 화면에 '지난 피드백'으로
+        sug['feedback'] = (sug.get('feedback') or [])[-9:] + [{
+            'at': datetime.now().strftime('%Y-%m-%d %H:%M'), 'by': by, 'note': feedback,
+            'actions': [AI_ACTIONS[a] for a in actions if a in redo]}]
     reason = 'AI 분석 요청: ' + ', '.join(AI_ACTIONS[a] for a in actions)
     if actions == ['docs']:
         _update(mail_id, suggestion=sug)

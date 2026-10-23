@@ -590,3 +590,61 @@ def test_ai_action_schedule_keeps_owner(monkeypatch):
     m = mailbox.list_mails()[0]
     mailbox.run_actions(m['id'], ['schedule'], '나')
     assert schedules.get_import(mailbox.get_mail(m['id'])['schedule_import_id'])['owner'] == 'people'
+
+
+# ── 피드백과 함께 다시 분석 ───────────────────────────────────────────
+
+def test_rerun_with_feedback_sends_previous_result_and_note(monkeypatch):
+    calls = []
+
+    def fake_chat(system, user, temperature=0.2):
+        user, temperature = llm._with_retry(user, temperature)  # chat() 이 하는 것과 같이
+        calls.append((system, user, temperature))
+        if '부재' in system:
+            n = len(calls)
+            return json.dumps({'absences': [{'person': '김영수' if n > 1 else '이철수', 'kind': '출장',
+                                             'start_date': '2026-10-27', 'end_date': '2026-10-28'}]})
+        return json.dumps({'kind': 'task', 'reason': '', 'tasks': [{'title': f'할 일 {len(calls)}'}]})
+
+    pop = FakePOP([_mail('출장 안내', 'a@x', text='김영수 부사장 10/27~28 출장, 이철수 상무 대결', mid='<f1@x>')])
+    mailbox.fetch_new(connect=lambda cfg: pop)
+    monkeypatch.setattr(llm, 'is_configured', lambda: True)
+    monkeypatch.setattr(llm, 'chat', fake_chat)
+    mid = mailbox.list_mails()[0]['id']
+
+    mailbox.run_actions(mid, ['absence'], '나')
+    assert '다시 분석 요청' not in calls[-1][1] and calls[-1][2] == 0.2  # 처음은 그냥
+    mailbox.run_actions(mid, ['absence'], '나', feedback='부재자는 김영수 부사장 (이철수는 대결자)')
+    sys_, user, temp = calls[-1]
+    assert '다시 분석 요청' in user and '부재자는 김영수 부사장' in user and '이철수' in user.split('이전 결과')[1]
+    assert temp == llm.RETRY_TEMPERATURE
+    m = mailbox.get_mail(mid)
+    assert m['suggestion']['absences'][0]['person'] == '김영수'
+    fb = m['suggestion']['feedback'][-1]
+    assert fb['note'].startswith('부재자는') and fb['actions'] == ['임원 부재 추출']
+    # 피드백 없이 다시 골라도 '다시 분석'으로 (이전 결과를 되풀이하지 말라고)
+    mailbox.run_actions(mid, ['absence', 'tasks'], '나')
+    users = [u for _, u, _ in calls[-2:]]
+    assert all('다시 분석 요청' in u for u in users[:1])  # 부재는 다시, 업무는 처음이라 그냥
+    assert '다시 분석 요청' not in users[1]
+    assert mailbox.get_mail(mid)['suggestion']['requested'] == ['absence', 'tasks']
+
+
+def test_rerun_schedule_skips_table_rules_and_uses_ai(monkeypatch):
+    pop = FakePOP([_mail('원장님 일정', 'b@x', SCHEDULE_HTML, mid='<f2@x>')])
+    mailbox.fetch_new(connect=lambda cfg: pop)
+    mid = mailbox.list_mails()[0]['id']
+    first = schedules.get_import(mailbox.get_mail(mid)['schedule_import_id'])
+    assert len(first['events']) == 2  # 표 규칙으로 읽음
+    seen = []
+
+    def fake_chat(system, user, temperature=0.2):
+        seen.append(llm._with_retry(user, temperature)[0])
+        return json.dumps({'events': [{'date': '2026-10-27', 'start_time': '09:30', 'title': '주간 임원회의'}]})
+
+    monkeypatch.setattr(llm, 'is_configured', lambda: True)
+    monkeypatch.setattr(llm, 'chat', fake_chat)
+    mailbox.run_actions(mid, ['schedule'], '나', feedback='임원회의는 9시 30분 시작')
+    imp = schedules.get_import(mailbox.get_mail(mid)['schedule_import_id'])
+    assert imp['id'] != first['id'] and imp['events'][0]['start_time'] == '09:30'
+    assert '임원회의는 9시 30분' in seen[0] and 'AI센터 보고' in seen[0]  # 이전 결과도 보여 줌
