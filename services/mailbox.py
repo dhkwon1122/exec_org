@@ -24,7 +24,7 @@ from email.utils import parseaddr
 from sqlalchemy import func, or_, select, update
 from sqlalchemy.exc import IntegrityError
 
-from services import absences, db, doc_versions, llm, mail_text, schedules, store
+from services import absences, db, doc_summary, doc_versions, llm, mail_text, schedules, store
 from services.db import InboundMail, MailRule, Task
 
 log = logging.getLogger(__name__)
@@ -512,7 +512,8 @@ def apply_review(mail_id: int, tasks: list[dict], parent_id: int | None, schedul
 # ── AI 에게 맡기기 (사람이 고르는 분석) ───────────────────────────────
 
 AI_ACTIONS = {'schedule': '원장님 일정 정리', 'absence': '임원 부재 추출', 'tasks': '할 일(업무) 추출',
-              'person': '임원 정보 변경 찾기', 'summary': '요약·키워드'}
+              'person': '임원 정보 변경 찾기', 'summary': '요약·키워드', 'docs': '첨부 문서 요약·태그'}
+LLM_ACTIONS = {'person', 'summary', 'docs'}  # LLM 이 없으면 고를 수 없는 분석
 
 
 def recommend_actions(m: dict) -> list[tuple[str, str]]:
@@ -534,12 +535,17 @@ def recommend_actions(m: dict) -> list[tuple[str, str]]:
         out['absence'] = '임원 이름과 휴가·출장 등 부재 낱말·날짜가 있음'
     if len(body) > 1500 and llm.is_configured():
         out.setdefault('summary', '본문이 길어 요약이 도움이 됨')
+    if llm.is_configured():
+        n = doc_summary.pending_count(m['id'])
+        if n:
+            out['docs'] = f'아직 요약하지 않은 첨부 문서 {n}개'
     return list(out.items())
 
 
 def run_actions(mail_id: int, actions: list[str], by: str = '') -> dict:
     """고른 분석을 돌려 추천으로 남긴다(바로 반영하지 않음 — 화면에서 확인 후 반영).
-    schedule: 일정 정리(표) / absence: 임원 부재 표 / tasks: 업무 후보 + 상위 업무 추천 / summary: 제목·요약·키워드·할 일.
+    schedule: 일정 정리(표) / absence: 임원 부재 표 / tasks: 업무 후보 + 상위 업무 추천 / summary: 제목·요약·키워드·할 일 /
+    docs: 첨부 문서 요약·태그(첨부 기록에 바로 남는다 — 이것만 고르면 메일 상태는 그대로).
     결과 {동작: 건수}. 메일은 '확인 필요'로 돌려 반영 버튼을 쓸 수 있게 한다."""
     m = get_mail(mail_id)
     if m is None:
@@ -576,9 +582,20 @@ def run_actions(mail_id: int, actions: list[str], by: str = '') -> dict:
             sug['tasks'] = r['todos']
             sug['requested_tasks'] = True
         done['summary'] = 1
+    if 'docs' in actions:
+        if not llm.is_configured():
+            raise ValueError('첨부 문서 요약은 LLM 이 설정돼 있어야 합니다.')
+        r = doc_summary.analyze_mail(mail_id)
+        done['docs'] = r['done']
+        if r['skipped']:
+            sug['docs_skipped'] = [f'{name} — {why}' for name, why in r['skipped']]
     sug['requested'] = actions
     reason = 'AI 분석 요청: ' + ', '.join(AI_ACTIONS[a] for a in actions)
-    _update(mail_id, suggestion=sug, status='review', reason=reason[:500], handled_at=None, handled_by='', **fields)
+    if actions == ['docs']:
+        _update(mail_id, suggestion=sug)
+    else:
+        _update(mail_id, suggestion=sug, status='review', reason=reason[:500], handled_at=None, handled_by='',
+                **fields)
     return done
 
 
@@ -821,7 +838,8 @@ def fetch_new(connect=None, process_now: bool = True) -> dict:
             else:
                 new_ids.append(mid)
                 try:  # 첨부 파일 저장 — 문서별 판(버전) 묶기는 services/doc_versions.py
-                    doc_versions.save(mid, mail_text.attachments(raw, cfg['max_attachment_mb'] * 1024 * 1024))
+                    if doc_versions.save(mid, mail_text.attachments(raw, cfg['max_attachment_mb'] * 1024 * 1024)):
+                        doc_summary.read_mail(mid)  # 글자만 뽑아 둔다 — AI 요약은 'AI 에게 맡기기'에서
                 except Exception:  # noqa: BLE001 — 첨부 때문에 메일을 놓치지 않게
                     log.exception('첨부 저장 실패 %s', mid)
             if cfg['delete']:

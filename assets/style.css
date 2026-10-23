@@ -314,3 +314,15 @@ body {
   .ab-cell { min-height: 64px; }
   .ab-chip { font-size: .66rem; padding: 0 3px; }
 }
+
+/* 첨부 문서 AI 요약 (components/doc_ui.py) */
+.doc-insight {
+  border-left: 3px solid var(--app-accent-soft);
+  padding: 4px 0 4px 10px;
+  margin-top: 4px;
+}
+.doc-changes {
+  background: #fff8e6;
+  border-radius: 6px;
+  padding: 4px 8px;
+}

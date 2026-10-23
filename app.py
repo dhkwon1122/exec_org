@@ -22,7 +22,7 @@ import components.todo_ui  # noqa: F401  업무 체크/삭제 공용 콜백 등�
 from services import mailbox
 from components.history_actions import history_edit_modal, history_link_modal, todo_review_modal  # 이력 수정·삭제·AI 할 일 등록 공용 콜백
 from components.mail_ui import compose_modal  # 메일 보내기 창 (화면은 'mail-draft' 에 초안을 넣어 연다)
-from services import auth, doc_versions, store, users
+from services import auth, doc_versions, doc_worker, store, users
 from services.db import DATA_DIR
 
 
@@ -118,6 +118,23 @@ def _require_login():
         if path.startswith('/_dash-') or flask.request.method != 'GET':
             return flask.Response('로그인이 필요합니다.', status=401)
         return flask.redirect('/login')
+    return None
+
+
+@server.before_request
+def _note_activity():
+    """사용자 입력이 있었다고 남긴다 — 쉬는 시간 첨부 요약(services/doc_worker.py)이 이걸 보고 기다린다.
+    사이드바 1분 갱신(app-tick)만 있는 요청은 사람이 한 것이 아니므로 치지 않는다."""
+    path = flask.request.path
+    if path.startswith(_PUBLIC_PREFIXES) or auth.current_user() is None:
+        return None
+    if path == '/_dash-update-component':
+        changed = (flask.request.get_json(silent=True) or {}).get('changedPropIds') or []
+        if changed and all(c.startswith('app-tick.') for c in changed):
+            return None
+    elif path.startswith('/_'):  # /_dash-layout·/_reload-hash(개발 모드 자동 새로고침 확인) 등 브라우저가 알아서 부르는 것
+        return None
+    doc_worker.touch()
     return None
 
 
@@ -310,6 +327,8 @@ def _refresh_inbox_count(*_):
 
 # POP3 받은 메일 주기 확인 (MAIL_POP3_* 설정 시, 여러 워커 중 하나만)
 mailbox.start_poller()
+# 사용자 입력이 한동안 없으면 요약하지 않은 첨부 문서를 백그라운드에서 요약 (DOC_SUMMARY_IDLE_MINUTES, 0 이면 끔)
+doc_worker.start()
 
 if __name__ == '__main__':
     app.run(debug=os.environ.get('DASH_DEBUG', '1') == '1', host='0.0.0.0', port=int(os.environ.get('PORT', 8050)))
