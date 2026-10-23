@@ -193,16 +193,17 @@ def draft_task(task_id: int) -> dict:
             'attachments': atts, 'related_kind': 'task', 'related_id': str(task_id)}
 
 
-def draft_schedule(date_from: str, date_to: str) -> dict:
-    """원장님 일정 — 기간의 일정을 표로."""
-    rows = schedules.list_range(date_from, date_to)
+def draft_schedule(date_from: str, date_to: str, owner: str = schedules.DEFAULT_OWNER) -> dict:
+    """원장님(또는 피플팀장) 일정 — 기간의 일정을 표로."""
+    rows = schedules.list_range(date_from, date_to, owner)
+    who = schedules.OWNERS[schedules.owner_of(owner)]
     wd = '월화수목금토일'
     table = _table(['날짜', '시간', '일정', '장소', '참석자', '세부'], [
         [f"{r['date'][5:].replace('-', '/')}({wd[date.fromisoformat(r['date']).weekday()]})",
          (r['start_time'] + ('~' + r['end_time'] if r['end_time'] else '')) or '종일', r['title'], r['location'],
          r['attendees'], r['details']] for r in rows]) if rows else '<p>등록된 일정이 없습니다.</p>'
     span = f"{date_from[5:].replace('-', '/')}~{date_to[5:].replace('-', '/')}"
-    return {'subject': f'[원장님 일정] {span}', 'text': f'원장님 일정({span}) 공유드립니다.', 'table_html': table,
+    return {'subject': f'[{who} 일정] {span}', 'text': f'{who} 일정({span}) 공유드립니다.', 'table_html': table,
             'to': '', 'attachments': [], 'related_kind': 'schedule', 'related_id': f'{date_from}~{date_to}'}
 
 

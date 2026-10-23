@@ -1,5 +1,5 @@
-"""캘린더 — '업무' 탭: 월 단위로 업무 마감·시작과 이력. '원장님 일정' 탭: components/director_ui.py.
-'임원 부재' 탭: components/absence_ui.py."""
+"""캘린더 — '업무' 탭: 월 단위로 업무 마감·시작과 이력. '원장님 일정'·'피플팀장 일정' 탭: components/director_ui.py
+(한 화면을 같이 쓰고, 탭에 따라 누구 일정인지만 바뀐다). '임원 부재' 탭: components/absence_ui.py."""
 import calendar as pycal
 from datetime import date
 
@@ -13,15 +13,28 @@ from services import store
 dash.register_page(__name__, path='/calendar', name='캘린더', title='업무 기록 · 캘린더')
 
 WEEKDAYS = ['월', '화', '수', '목', '금', '토', '일']
+_OWNER_TABS = {'director': 'director', 'people': 'people'}  # 탭 → schedules.OWNERS 열쇠
 MAX_ITEMS = 3
 
 
 def layout(tab=None, **_):
+    tab = tab if tab in ('director', 'people', 'absence') else 'work'
     return html.Div([ui.page_head('캘린더'), dbc.Tabs([
         dbc.Tab(_work_layout(), label='업무 캘린더', tab_id='work', className='pt-3'),
-        dbc.Tab(director_ui.layout(), label='원장님 일정', tab_id='director', className='pt-3'),
+        dbc.Tab(label='원장님 일정', tab_id='director'),
+        dbc.Tab(label='피플팀장 일정', tab_id='people'),
         dbc.Tab(absence_ui.layout(), label='임원 부재', tab_id='absence', className='pt-3'),
-    ], id='cal-tabs', active_tab=tab if tab in ('director', 'absence') else 'work')])
+    ], id='cal-tabs', active_tab=tab),
+        # 일정 화면은 하나 — 두 탭이 같이 쓴다 (화면 요소 이름이 겹치지 않게 탭 밖에 두고 보이기만 바꾼다)
+        html.Div(director_ui.layout(), id='cal-dr-wrap', className='pt-3',
+                 style={} if tab in _OWNER_TABS else {'display': 'none'})])
+
+
+@callback(Output('cal-dr-wrap', 'style'), Output('dr-owner', 'data'), Input('cal-tabs', 'active_tab'))
+def switch_owner(tab):
+    if tab in _OWNER_TABS:
+        return {}, _OWNER_TABS[tab]
+    return {'display': 'none'}, no_update
 
 
 def _work_layout():

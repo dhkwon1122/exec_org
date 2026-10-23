@@ -3,10 +3,11 @@
 흐름 (메일 한 통):
   1) 분류 규칙(mail_rules: 보낸 사람/제목/본문에 글자 포함 → 일정·업무·무시)에 맞으면 그 동작.
      규칙이 '자동'이면 확인 없이 바로 반영(status=auto), 아니면 추천만(review).
-  2) 맞는 규칙이 없으면 AI 가 '원장님 일정 / 업무 / 둘 다 / 무시'로 나누고 업무 후보를 뽑아 추천(review).
+  2) 맞는 규칙이 없으면 AI 가 '일정 / 업무 / 둘 다 / 부재 / 무시'로 나누고 업무 후보를 뽑아 추천(review).
+     일정이면 누구 일정인지(원장님·피플팀장)도 정한다 — schedule_owner().
      LLM 이 없으면 일정표가 보이면 일정, 아니면 제목을 업무 후보로.
   3) '받은 메일' 화면에서 추천을 고쳐 반영하거나 무시한다.
-일정은 원장님 일정 가져오기(schedules)와 같은 길로 정리·반영하고, 업무는 하위 업무로 만들면서 메일 원문을
+일정은 캘린더의 일정 가져오기(schedules)와 같은 길로 정리·반영하고, 업무는 하위 업무로 만들면서 메일 원문을
 그 업무의 '요청' 기록으로 남긴다. POP3 고유 번호(UIDL)로 같은 메일을 두 번 가져오지 않는다.
 """
 import fcntl
@@ -28,7 +29,9 @@ from services import absences, db, doc_summary, doc_versions, llm, mail_text, sc
 from services.db import InboundMail, MailRule, Task
 
 log = logging.getLogger(__name__)
-ACTIONS = {'schedule': '원장님 일정', 'task': '업무', 'absence': '임원 부재', 'ignore': '무시'}
+ACTIONS = {'schedule': '원장님 일정', 'schedule_people': '피플팀장 일정', 'task': '업무', 'absence': '임원 부재',
+           'ignore': '무시'}
+RULE_OWNER = {'schedule': 'director', 'schedule_people': 'people'}  # 일정 규칙 → 누구 일정
 FIELDS = {'sender': '보낸 사람', 'subject': '제목', 'body': '본문'}
 STATUS = {'auto': '자동 처리', 'review': '확인 필요', 'done': '처리 완료', 'ignored': '무시', 'failed': '실패',
           'skipped': '건너뜀'}
@@ -155,14 +158,15 @@ def sender_name(sender: str) -> str:
 # ── 분류 ──────────────────────────────────────────────────────────────
 
 CLASSIFY_SYSTEM = """너는 임원조직 담당자의 메일을 정리하는 비서다. 받은 메일을 읽고 무엇으로 처리할지 정한다.
-- schedule: 원장님(기관장) 일정을 알리거나 바꾸는 메일 (비서실 주간 일정, 회의·행사 일시 안내 등)
+- schedule: 원장님(기관장) 또는 피플팀장의 일정을 알리거나 바꾸는 메일 (비서실 주간 일정, 회의·행사 일시 안내 등)
 - task: 담당자가 해야 할 일이 있는 메일 (요청·지시·자료 제출·검토·회신 요청 등)
 - both: 둘 다
 - absence: 임원의 휴가·출장·교육·병가 등 부재(자리 비움)를 알리는 메일 (부재 현황, 휴가·출장 신청·안내)
 - ignore: 공지·광고·자동 발송·참고용이라 할 일이 없는 메일
 task 나 both 면 해야 할 일을 tasks 에 넣는다(제목은 동사로 끝나는 한 문장, 기한은 YYYY-MM-DD — '금요일까지' 같은
 상대 표현은 메일 날짜 기준, 없으면 빈 문자열, 담당자는 메일에 이름이 있을 때만, 여러 명이면 쉼표로).
-반드시 JSON 만 출력: {"kind": "schedule|task|both|absence|ignore", "reason": "한 줄 근거",
+schedule 이나 both 면 owner 에 누구 일정인지 넣는다: 원장님이면 director, 피플팀장이면 people (아니면 빈 문자열).
+반드시 JSON 만 출력: {"kind": "schedule|task|both|absence|ignore", "owner": "director|people|", "reason": "한 줄 근거",
 "tasks": [{"title": "", "due": "", "assignee": ""}]}"""
 
 
@@ -187,7 +191,9 @@ def ai_classify(subject: str, sender: str, mail_date: str, body: str) -> dict:
     kind = str(data.get('kind') or '').strip().lower()
     if kind not in ('schedule', 'task', 'both', 'absence', 'ignore'):
         raise llm.LLMError(f'알 수 없는 분류: {kind}')
-    return {'kind': kind, 'reason': str(data.get('reason') or '')[:300], 'tasks': _clean_tasks(data.get('tasks'))}
+    owner = str(data.get('owner') or '').strip().lower()
+    return {'kind': kind, 'reason': str(data.get('reason') or '')[:300], 'tasks': _clean_tasks(data.get('tasks')),
+            'owner': owner if owner in schedules.OWNERS else ''}
 
 
 def guess(subject: str, mail_date: str, body: str) -> dict:
@@ -199,6 +205,42 @@ def guess(subject: str, mail_date: str, body: str) -> dict:
         return {'kind': 'absence', 'reason': '임원 이름과 휴가·출장 등 부재 낱말·날짜가 있음', 'tasks': []}
     return {'kind': 'task', 'reason': 'LLM 미설정 — 제목을 업무 후보로', 'tasks': [{'title': subject[:300], 'due': '',
                                                                                   'assignee': ''}]}
+
+
+# ── 누구 일정인지 ─────────────────────────────────────────────────────
+# 1) 제목에 '피플팀장'·'원장' 같은 낱말 2) 보낸 사람이 그 사람(비서) 주소 3) AI 판단 4) 본문에 한쪽 낱말만 있음
+# 5) 그래도 모르면 원장님. 낱말·주소는 .env 로 더할 수 있다 (MAIL_PEOPLE_SCHEDULE_KEYWORDS 등).
+
+_OWNER_WORDS = {'people': ['피플팀장', '피플 팀장', 'people팀장', 'people 팀장', '피플팀 팀장'],
+                'director': ['원장님', '원장 ', '원장실', '기관장']}
+_OWNER_ENV = {'people': 'PEOPLE_SCHEDULE', 'director': 'DIRECTOR_SCHEDULE'}
+
+
+def _owner_words(owner: str) -> list[str]:
+    extra = [w.strip() for w in _env(f'{_OWNER_ENV[owner]}_KEYWORDS').split(',') if w.strip()]
+    return [w.lower() for w in _OWNER_WORDS[owner] + extra]
+
+
+def _owner_senders(owner: str) -> list[str]:
+    return [w.strip().lower() for w in _env(f'{_OWNER_ENV[owner]}_SENDERS').split(',') if w.strip()]
+
+
+def schedule_owner(subject: str, sender: str, body: str, ai_owner: str = '') -> tuple[str, str]:
+    """일정 메일이 누구 일정인지 → (owner, 근거)."""
+    subj, frm, text = (subject or '').lower(), (sender or '').lower(), (body or '').lower()
+    hits = {o: [w for w in _owner_words(o) if w in subj] for o in _OWNER_WORDS}
+    if bool(hits['people']) != bool(hits['director']):
+        o = 'people' if hits['people'] else 'director'
+        return o, f"제목에 '{hits[o][0].strip()}'"
+    for o in ('people', 'director'):
+        if any(s in frm for s in _owner_senders(o)):
+            return o, '보낸 사람'
+    if ai_owner in schedules.OWNERS:
+        return ai_owner, 'AI 판단'
+    counts = {o: sum(text.count(w) for w in _owner_words(o)) for o in _OWNER_WORDS}
+    if counts['people'] and not counts['director']:
+        return 'people', '본문에 피플팀장'
+    return schedules.DEFAULT_OWNER, '기본(원장님)'
 
 
 def task_candidates(subject: str, mail_date: str, body: str) -> list[dict]:
@@ -315,8 +357,8 @@ def suggest_parent(subject: str, body: str, tasks: list[dict], exclude_id: int |
 
 # ── 반영 ──────────────────────────────────────────────────────────────
 
-def _make_schedule_import(m: dict) -> int:
-    iid = schedules.create_import(m['subject'], m['mail_date'], m['body'], MAIL_AUTHOR)
+def _make_schedule_import(m: dict, owner: str = schedules.DEFAULT_OWNER) -> int:
+    iid = schedules.create_import(m['subject'], m['mail_date'], m['body'], MAIL_AUTHOR, owner)
     schedules.parse_import(iid)
     return iid
 
@@ -430,13 +472,17 @@ def process(mail_id: int) -> None:
                 guess(m['subject'], m['mail_date'], m['body'])
         except Exception as e:  # noqa: BLE001
             c = {**guess(m['subject'], m['mail_date'], m['body']), 'reason': f'AI 분류 실패({str(e)[:100]}) — 추정'}
-        iid = _make_schedule_import(m) if c['kind'] in ('schedule', 'both') else None
+        iid, reason = None, c['reason']
+        if c['kind'] in ('schedule', 'both'):
+            owner, why = schedule_owner(m['subject'], m['sender'], m['body'], c.get('owner', ''))
+            iid = _make_schedule_import(m, owner)
+            reason = f"{reason} · {schedules.OWNERS[owner]} 일정({why})"
         sug = {'tasks': c['tasks']}
         if c['kind'] == 'absence':
             sug['absences'], sug['absence_note'] = absences.extract(m['body'], m['mail_date'], m['subject'])
         if c['kind'] in ('task', 'both') and c['tasks']:
             sug.update(suggest_parent(m['subject'], m['body'], c['tasks'], mail_id))
-        _update(mail_id, status='review', kind=c['kind'], reason=c['reason'], suggestion=sug,
+        _update(mail_id, status='review', kind=c['kind'], reason=reason[:500], suggestion=sug,
                 schedule_import_id=iid)
     except Exception as e:  # noqa: BLE001
         log.exception('메일 처리 실패 %s', mail_id)
@@ -449,8 +495,8 @@ def _apply_rule(m: dict, rule: dict) -> None:
         _update(m['id'], status='ignored', kind='ignore', rule_id=rule['id'], reason=reason,
                 handled_at=datetime.now().replace(microsecond=0), handled_by=MAIL_AUTHOR)
         return
-    if rule['action'] == 'schedule':
-        iid = _make_schedule_import(m)
+    if rule['action'] in RULE_OWNER:
+        iid = _make_schedule_import(m, RULE_OWNER[rule['action']])
         imp = schedules.get_import(iid)
         if rule['auto'] and imp['status'] == 'done':
             r = schedules.apply_events(imp['events'], iid, MAIL_AUTHOR)
@@ -511,7 +557,7 @@ def apply_review(mail_id: int, tasks: list[dict], parent_id: int | None, schedul
 
 # ── AI 에게 맡기기 (사람이 고르는 분석) ───────────────────────────────
 
-AI_ACTIONS = {'schedule': '원장님 일정 정리', 'absence': '임원 부재 추출', 'tasks': '할 일(업무) 추출',
+AI_ACTIONS = {'schedule': '일정 정리 (원장님·피플팀장)', 'absence': '임원 부재 추출', 'tasks': '할 일(업무) 추출',
               'person': '임원 정보 변경 찾기', 'summary': '요약·키워드', 'docs': '첨부 문서 요약·태그'}
 LLM_ACTIONS = {'person', 'summary', 'docs'}  # LLM 이 없으면 고를 수 없는 분석
 
@@ -555,7 +601,9 @@ def run_actions(mail_id: int, actions: list[str], by: str = '') -> dict:
         raise ValueError('맡길 일을 고르세요.')
     sug, done, fields = dict(m['suggestion']), {}, {}
     if 'schedule' in actions:
-        iid = _make_schedule_import(m)
+        old = schedules.get_import(m['schedule_import_id']) if m['schedule_import_id'] else None
+        owner = old['owner'] if old else schedule_owner(m['subject'], m['sender'], m['body'])[0]
+        iid = _make_schedule_import(m, owner)
         imp = schedules.get_import(iid)
         fields['schedule_import_id'] = iid
         done['schedule'] = len(imp['events']) if imp else 0
@@ -631,8 +679,23 @@ def add_tasks(mail_id: int, items: list[dict], parent_id: int | None, by: str) -
     return ids
 
 
+def set_schedule_owner(mail_id: int, owner: str) -> bool:
+    """메일의 일정이 누구 일정인지 바꾼다 (반영 전에만). 바뀌었으면 True."""
+    m = get_mail(mail_id)
+    if m is None or not m['schedule_import_id']:
+        raise ValueError('이 메일에는 정리된 일정이 없습니다.')
+    owner = schedules.owner_of(owner)
+    imp = schedules.get_import(m['schedule_import_id'])
+    if imp is None or imp['owner'] == owner:
+        return False
+    if imp['applied'] or (m['suggestion'].get('done') or {}).get('schedule'):
+        raise ValueError(f"이미 {schedules.OWNERS[imp['owner']]} 일정에 반영했습니다 — 캘린더에서 지우고 다시 반영하세요.")
+    schedules.set_import_owner(imp['id'], owner)
+    return True
+
+
 def apply_schedule(mail_id: int, rows: list[dict], by: str) -> dict:
-    """원장님 일정 표 → 일정에 반영 (기존 일정과 대조해 정말 바뀐 칸만)."""
+    """일정 표 → 그 사람(원장님·피플팀장) 일정에 반영 (기존 일정과 대조해 정말 바뀐 칸만)."""
     m = get_mail(mail_id)
     if m is None:
         raise ValueError('메일을 찾을 수 없습니다.')

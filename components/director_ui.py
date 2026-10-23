@@ -1,4 +1,5 @@
-"""원장님 일정 — 캘린더 화면의 '원장님 일정' 탭.
+"""원장님·피플팀장 일정 — 캘린더 화면의 '원장님 일정'·'피플팀장 일정' 탭이 이 화면 하나를 같이 쓴다.
+누구 일정인지는 'dr-owner' (services/schedules.py OWNERS 열쇠) — 캘린더 탭을 고르면 바뀐다.
 
 월 보기: 날짜 칸에 일정 제목. 주 보기: 요일별 시간 타임라인(겹치는 일정은 나란히).
 일정을 누르면 시작/종료·장소·참석자·세부 사항을 보고 고친다.
@@ -42,6 +43,7 @@ def layout():
         dbc.Alert(id='dr-f-error', color='danger', is_open=False, className='mt-2 mb-0 py-2'),
     ]
     return html.Div([
+        dcc.Store(id='dr-owner', data=schedules.DEFAULT_OWNER),
         dcc.Store(id='dr-anchor', data=today),
         dcc.Store(id='dr-refresh', data=0),
         dcc.Store(id='dr-edit-id'),
@@ -77,9 +79,9 @@ def layout():
             ]),
         ], id='dr-modal', is_open=False, size='lg'),
         dbc.Modal([
-            dbc.ModalHeader(dbc.ModalTitle('비서실 메일로 일정 가져오기')),
+            dbc.ModalHeader(dbc.ModalTitle(id='dr-imp-title')),
             dbc.ModalBody([
-                html.Div(['비서실 메일 파일(.eml)을 여러 개 한꺼번에 올리거나, 메일 본문을 그대로 붙여넣으세요(표 포함, 보낸 날짜·제목 '
+                html.Div(['일정 메일 파일(.eml)을 여러 개 한꺼번에 올리거나, 메일 본문을 그대로 붙여넣으세요(표 포함, 보낸 날짜·제목 '
                           '줄도 같이 붙이면 연도·요일 판단이 정확해집니다). .msg .html .txt 도 됩니다. ',
                           'AI 가 일정으로 정리하면 확인한 뒤 반영합니다.' if llm.is_configured() else
                           'LLM 이 설정되지 않아 날짜·시간이 보이는 줄만 규칙으로 읽습니다.'],
@@ -286,8 +288,8 @@ def list_view(events: list[dict], empty: str):
     ])
 
 
-def search_view(q: str):
-    return list_view(schedules.search(q), '검색 결과가 없습니다.')
+def search_view(q: str, owner: str = schedules.DEFAULT_OWNER):
+    return list_view(schedules.search(q, owner=owner), '검색 결과가 없습니다.')
 
 
 @callback(Output('dr-sel', 'value'), Input('dr-sel-all', 'n_clicks'), Input('dr-sel-none', 'n_clicks'),
@@ -329,13 +331,14 @@ def move(_p, _n, _t, _d, anchor, view):
 
 
 @callback(Output('dr-body', 'children'), Output('dr-title', 'children'),
-          Input('dr-anchor', 'data'), Input('dr-view', 'value'), Input('dr-refresh', 'data'), Input('dr-q', 'value'))
-def render(anchor, view, _, q):
+          Input('dr-anchor', 'data'), Input('dr-view', 'value'), Input('dr-refresh', 'data'), Input('dr-q', 'value'),
+          Input('dr-owner', 'data'))
+def render(anchor, view, _, q, owner):
     a = date.fromisoformat(anchor)
     if (q or '').strip():
-        return search_view(q.strip()), f'검색: {q.strip()}'
+        return search_view(q.strip(), owner), f'검색: {q.strip()}'
     start, end = _range(view, a)
-    events = schedules.list_range(start.isoformat(), end.isoformat())
+    events = schedules.list_range(start.isoformat(), end.isoformat(), owner)
     if view == 'month':
         return month_view(a, events), f'{a.year}년 {a.month}월'
     if view == 'list':
@@ -367,8 +370,9 @@ def _people_chips(text: str):
           State('dr-edit-id', 'data'), State('dr-anchor', 'data'), State('dr-f-date', 'value'),
           State('dr-f-start', 'value'), State('dr-f-end', 'value'), State('dr-f-title', 'value'),
           State('dr-f-location', 'value'), State('dr-f-category', 'value'), State('dr-f-attendees', 'value'),
-          State('dr-f-details', 'value'), State('dr-refresh', 'data'), prevent_initial_call=True)
-def edit(_e, _a, _c, _s, _d, sid, anchor, d, start, end, title, loc, cat, att, details, n):
+          State('dr-f-details', 'value'), State('dr-refresh', 'data'), State('dr-owner', 'data'),
+          prevent_initial_call=True)
+def edit(_e, _a, _c, _s, _d, sid, anchor, d, start, end, title, loc, cat, att, details, n, owner):
     nu = no_update
     trig = ctx.triggered_id
     if trig is None or not ctx.triggered[0]['value']:
@@ -381,7 +385,7 @@ def edit(_e, _a, _c, _s, _d, sid, anchor, d, start, end, title, loc, cat, att, d
         return (True, f"{e['date']} 일정", e['id'], e['date'], e['start_time'], e['end_time'], e['title'],
                 e['location'], e['category'], e['attendees'], e['details'], meta, {}, '', False, nu)
     if trig == 'dr-add':
-        return (True, '일정 추가', None, anchor, '', '', '', '', '', '', '', '', {'display': 'none'}, '', False, nu)
+        return (True, f"{schedules.OWNERS[schedules.owner_of(owner)]} 일정 추가", None, anchor, '', '', '', '', '', '', '', '', {'display': 'none'}, '', False, nu)
     if trig == 'dr-cancel':
         return (False,) + (nu,) * 12 + ('', False, nu)
     if trig == 'dr-del' and sid:
@@ -390,7 +394,8 @@ def edit(_e, _a, _c, _s, _d, sid, anchor, d, start, end, title, loc, cat, att, d
     if trig == 'dr-save':
         try:
             schedules.save({'date': d, 'start_time': start, 'end_time': end, 'title': title, 'location': loc,
-                            'category': cat, 'attendees': att, 'details': details}, sid, by=auth.current_name())
+                            'category': cat, 'attendees': att, 'details': details}, sid, by=auth.current_name(),
+                           owner=owner)
         except ValueError as ex:
             return (nu,) * 13 + (str(ex), True, nu)
         return (False,) + (nu,) * 12 + ('', False, (n or 0) + 1)
@@ -447,6 +452,13 @@ def open_import(n):
     return bool(n) or no_update
 
 
+@callback(Output('dr-imp-title', 'children'), Output('dr-imp-sel', 'data', allow_duplicate=True),
+          Input('dr-owner', 'data'), prevent_initial_call='initial_duplicate')
+def owner_changed(owner):
+    """탭을 바꾸면 가져오기 창 제목을 바꾸고, 다른 사람 메일을 보던 미리보기는 닫는다."""
+    return f"메일로 {schedules.OWNERS[schedules.owner_of(owner)]} 일정 가져오기", None
+
+
 @callback(Output('dr-imp-list', 'children'), Output('dr-imp-poll', 'disabled'), Output('dr-imp-msg', 'children'),
           Output('dr-imp-msg', 'is_open'), Output('dr-imp-msg', 'color'), Output('dr-imp-text', 'value'),
           Output('dr-imp-sel', 'data'), Output('dr-refresh', 'data', allow_duplicate=True),
@@ -457,8 +469,9 @@ def open_import(n):
           Input({'type': 'dr-imp-view', 'id': ALL}, 'n_clicks'), Input('dr-imp-apply', 'n_clicks'),
           State('dr-imp-text', 'value'), State('dr-imp-date', 'value'), State('dr-imp-files', 'filename'),
           State('dr-imp-sel', 'data'), State('dr-imp-table', 'data'), State('dr-refresh', 'data'),
-          prevent_initial_call=True)
-def imports(is_open, _go, files, _poll, _all, _redo, _del, _undo, _view, _apply, text, mail_date, names, sel, rows, n):
+          State('dr-owner', 'data'), prevent_initial_call=True)
+def imports(is_open, _go, files, _poll, _all, _redo, _del, _undo, _view, _apply, text, mail_date, names, sel, rows, n,
+            owner):
     nu = no_update
     trig = ctx.triggered_id
     msg, color, clear, refresh = nu, 'info', nu, nu
@@ -471,7 +484,7 @@ def imports(is_open, _go, files, _poll, _all, _redo, _del, _undo, _view, _apply,
             msg, color = '붙여넣은 내용이 없습니다.', 'warning'
         else:
             m = mail_text.from_pasted(text)
-            iid = schedules.create_import(m['name'], mail_date or m['mail_date'], m['text'], by)
+            iid = schedules.create_import(m['name'], mail_date or m['mail_date'], m['text'], by, owner)
             schedules.submit_import(iid)
             msg, clear, sel = '정리를 시작했습니다. 끝나면 "확인"을 눌러 반영하세요.', '', iid
     elif trig == 'dr-imp-files' and files:
@@ -482,12 +495,12 @@ def imports(is_open, _go, files, _poll, _all, _redo, _del, _undo, _view, _apply,
             except ValueError as e:
                 errors.append(str(e))
                 continue
-            schedules.submit_import(schedules.create_import(m['name'], m['mail_date'], m['text'], by))
+            schedules.submit_import(schedules.create_import(m['name'], m['mail_date'], m['text'], by, owner))
             ok += 1
         msg = f'메일 {ok}통 정리를 시작했습니다.' + (' 읽지 못한 파일: ' + ' / '.join(errors) if errors else '')
         color = 'warning' if errors else 'info'
     elif trig == 'dr-imp-all':
-        r = schedules.apply_all_pending(by)
+        r = schedules.apply_all_pending(by, owner)
         msg, color, refresh = (f"메일 {r['mails']}통 반영 — 새 일정 {r['added']}건, 바뀐 일정 {r['updated']}건, "
                                f"이미 있음 {r['same']}건" + (f", 칸이 밀려 건너뜀 {r['skipped']}건" if r['skipped'] else '')
                                ), 'success', (n or 0) + 1
@@ -510,7 +523,7 @@ def imports(is_open, _go, files, _poll, _all, _redo, _del, _undo, _view, _apply,
                                'success', (n or 0) + 1)
     elif trig not in ('dr-imp-modal', 'dr-imp-poll'):
         return (nu,) * 8
-    imps = schedules.list_imports()
+    imps = schedules.list_imports(owner=owner)
     pending = any(i['status'] == 'pending' for i in imps)
     sel_out = sel if trig not in ('dr-imp-modal', 'dr-imp-poll') else nu  # 주기 갱신으로는 고치던 표를 건드리지 않음
     return (_imports_view(imps, sel), not pending, msg, msg is not nu and bool(msg), color, clear, sel_out, refresh)
@@ -526,7 +539,7 @@ def show_preview(sel, _list, shown):
     key = [imp['id'], imp['status'], imp['applied_at']]
     if ctx.triggered_id == 'dr-imp-list' and shown == key:
         return no_update, no_update, no_update, no_update  # 목록만 다시 그려진 것 — 고치던 표는 그대로
-    rows = schedules.preview(imp['events'])
+    rows = schedules.preview(imp['events'], imp['owner'])
     for r in rows:
         label, _ = _STATE[r['state']]
         r['state_label'] = label + (f" ({', '.join(schedules.LABELS[f] for f in r['changed'])})" if r['changed'] else '')
@@ -547,10 +560,10 @@ def show_preview(sel, _list, shown):
 
 
 @callback(Output('mail-draft', 'data', allow_duplicate=True), Input('dr-mail', 'n_clicks'),
-          State('dr-view', 'value'), State('dr-anchor', 'data'), prevent_initial_call=True)
-def mail_schedule(n, view, anchor):
-    """보고 있는 주(월·목록 보기면 그달 1일~말일)의 원장님 일정을 메일로."""
+          State('dr-view', 'value'), State('dr-anchor', 'data'), State('dr-owner', 'data'), prevent_initial_call=True)
+def mail_schedule(n, view, anchor, owner):
+    """보고 있는 주(월·목록 보기면 그달 1일~말일)의 일정을 메일로."""
     if not n:
         return no_update
     lo, hi = _range('week' if view == 'week' else 'list', date.fromisoformat(anchor))
-    return outbox.draft_schedule(lo.isoformat(), hi.isoformat())
+    return outbox.draft_schedule(lo.isoformat(), hi.isoformat(), owner)

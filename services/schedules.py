@@ -1,4 +1,5 @@
-"""원장님 일정 — 저장·조회, 비서실 일정 메일을 AI 로 정리해 가져오기.
+"""원장님·피플팀장 일정 — 저장·조회, 비서실 일정 메일을 AI 로 정리해 가져오기.
+일정과 가져온 메일은 owner(OWNERS 의 열쇠)로 나뉜다 — 같은 일정 찾기·검색·반영도 그 사람 일정 안에서만.
 
 흐름: 메일 붙여넣기/파일 → schedule_imports 에 원문 저장(status=pending) → 백그라운드에서 AI 가 일정 목록으로
 정리(done/failed) → 화면에서 확인(신규·변경·동일) → 반영하면 schedules 에 들어간다.
@@ -18,6 +19,8 @@ from services import db, llm
 from services.db import Schedule, ScheduleImport
 
 CATEGORIES = ['회의', '보고', '면담', '행사', '외부', '출장', '기타']
+OWNERS = {'director': '원장님', 'people': '피플팀장'}
+DEFAULT_OWNER = 'director'
 FIELDS = ('date', 'start_time', 'end_time', 'title', 'location', 'attendees', 'category', 'details')
 
 _executor = ThreadPoolExecutor(max_workers=int(os.environ.get('LLM_MAX_CONCURRENT', '2')),
@@ -26,8 +29,13 @@ _executor = ThreadPoolExecutor(max_workers=int(os.environ.get('LLM_MAX_CONCURREN
 
 # ── 일정 ──────────────────────────────────────────────────────────────
 
+def owner_of(v) -> str:
+    return v if v in OWNERS else DEFAULT_OWNER
+
+
 def _dict(s: Schedule) -> dict:
-    return {'id': s.id, **{f: getattr(s, f) or '' for f in FIELDS}, 'source': s.source or '',
+    return {'id': s.id, **{f: getattr(s, f) or '' for f in FIELDS}, 'owner': owner_of(s.owner),
+            'source': s.source or '',
             'import_id': s.import_id, 'updated_at': s.updated_at.strftime('%Y-%m-%d %H:%M') if s.updated_at else ''}
 
 
@@ -69,10 +77,11 @@ def clean_event(e: dict) -> dict | None:
             ('기타' if cat else ''), 'details': str(e.get('details') or '').strip()}
 
 
-def list_range(date_from: str, date_to: str) -> list[dict]:
-    """기간 안의 일정 — 날짜, 시작 시각(종일·미정이 먼저) 순."""
+def list_range(date_from: str, date_to: str, owner: str = DEFAULT_OWNER) -> list[dict]:
+    """기간 안의 그 사람 일정 — 날짜, 시작 시각(종일·미정이 먼저) 순."""
     with db.SessionLocal() as s:
-        rows = s.scalars(select(Schedule).where(Schedule.date >= date_from, Schedule.date <= date_to))
+        rows = s.scalars(select(Schedule).where(Schedule.owner == owner_of(owner), Schedule.date >= date_from,
+                                                Schedule.date <= date_to))
         out = [_dict(x) for x in rows]
     return sorted(out, key=lambda x: (x['date'], x['start_time'], x['title']))
 
@@ -83,7 +92,8 @@ def get(sid: int) -> dict | None:
         return _dict(x) if x else None
 
 
-def save(data: dict, sid: int | None = None, by: str = '') -> dict:
+def save(data: dict, sid: int | None = None, by: str = '', owner: str = DEFAULT_OWNER) -> dict:
+    """owner 는 새로 만들 때만 쓴다 (고칠 때는 원래 주인 그대로)."""
     ev = clean_event(data)
     if ev is None:
         raise ValueError('날짜와 일정 제목을 입력하세요.')
@@ -92,7 +102,7 @@ def save(data: dict, sid: int | None = None, by: str = '') -> dict:
         if sid and x is None:
             raise ValueError('일정을 찾을 수 없습니다.')
         if x is None:
-            x = Schedule(source='manual', created_by=by)
+            x = Schedule(owner=owner_of(owner), source='manual', created_by=by)
             s.add(x)
         for f in FIELDS:
             setattr(x, f, ev[f])
@@ -135,11 +145,11 @@ def delete_by_import(import_id: int) -> int:
         return len(rows)
 
 
-def search(query: str, limit: int = 200) -> list[dict]:
-    """제목·장소·참석자·세부 사항에서 찾는다 (최근 일정이 위)."""
+def search(query: str, limit: int = 200, owner: str = DEFAULT_OWNER) -> list[dict]:
+    """그 사람 일정의 제목·장소·참석자·세부 사항에서 찾는다 (최근 일정이 위)."""
     terms = [t for t in (query or '').split() if t]
     with db.SessionLocal() as s:
-        stmt = select(Schedule)
+        stmt = select(Schedule).where(Schedule.owner == owner_of(owner))
         for t in terms:
             like = f'%{t}%'
             stmt = stmt.where(Schedule.title.like(like) | Schedule.location.like(like) |
@@ -167,13 +177,13 @@ PARSE_SYSTEM = f"""너는 원장님 비서실의 일정 담당자다. 비서가 
 "attendees": "", "category": "", "details": ""}}]}}"""
 
 
-def _known_events_hint(mail_date: str, limit: int = 80) -> str:
+def _known_events_hint(mail_date: str, limit: int = 80, owner: str = DEFAULT_OWNER) -> str:
     """이미 등록된(사람이 정제한) 메일 날짜 전후 일정 — AI 가 같은 일정의 제목·장소 표기를 그대로 맞추도록 참고로 준다."""
     try:
         d = date.fromisoformat(mail_date)
     except ValueError:
         return ''
-    rows = list_range((d - timedelta(days=7)).isoformat(), (d + timedelta(days=45)).isoformat())[:limit]
+    rows = list_range((d - timedelta(days=7)).isoformat(), (d + timedelta(days=45)).isoformat(), owner)[:limit]
     if not rows:
         return ''
     lines = [f"- {r['date']} {r['start_time'] or '종일'}{'-' + r['end_time'] if r['end_time'] else ''} | {r['title']}"
@@ -182,11 +192,13 @@ def _known_events_hint(mail_date: str, limit: int = 80) -> str:
             'attendees 표기를 이것과 똑같이 맞춘다. 메일에 없는 일정은 만들지 않는다:\n' + '\n'.join(lines))
 
 
-def ai_parse(text: str, mail_date: str) -> list[dict]:
+def ai_parse(text: str, mail_date: str, owner: str = DEFAULT_OWNER) -> list[dict]:
     today = mail_date or date.today().isoformat()
     wd = '월화수목금토일'[date.fromisoformat(today).weekday()]
-    raw = llm.chat(PARSE_SYSTEM, f'메일 보낸 날짜: {today} ({wd})\n\n메일 본문:\n{text[:llm.MAX_INPUT_CHARS]}'
-                   + _known_events_hint(today))
+    who = OWNERS[owner_of(owner)]
+    system = PARSE_SYSTEM.replace('원장님 비서실의 일정 담당자', f'{who} 일정 담당자').replace('원장님 일정', f'{who} 일정')
+    raw = llm.chat(system, f'메일 보낸 날짜: {today} ({wd})\n\n메일 본문:\n{text[:llm.MAX_INPUT_CHARS]}'
+                   + _known_events_hint(today, owner=owner))
     events = [clean_event(e) for e in llm._extract_json(raw).get('events') or [] if isinstance(e, dict)]
     return [e for e in events if e]
 
@@ -519,16 +531,18 @@ def _import_dict(x: ScheduleImport) -> dict:
         events = json.loads(x.events or '[]')
     except ValueError:
         events = []
-    return {'id': x.id, 'name': x.name or '', 'mail_date': x.mail_date or '', 'status': x.status or '',
+    return {'id': x.id, 'owner': owner_of(x.owner), 'name': x.name or '', 'mail_date': x.mail_date or '',
+            'status': x.status or '',
             'events': events, 'error': x.error or '', 'applied': x.applied_at is not None,
             'applied_at': x.applied_at.strftime('%Y-%m-%d %H:%M') if x.applied_at else '',
             'created_at': x.created_at.strftime('%Y-%m-%d %H:%M') if x.created_at else '',
             'raw_text': x.raw_text or ''}
 
 
-def create_import(name: str, mail_date: str, text: str, by: str = '') -> int:
+def create_import(name: str, mail_date: str, text: str, by: str = '', owner: str = DEFAULT_OWNER) -> int:
     with db.SessionLocal() as s:
-        x = ScheduleImport(name=(name or '')[:300], mail_date=mail_date or '', raw_text=text or '',
+        x = ScheduleImport(owner=owner_of(owner), name=(name or '')[:300], mail_date=mail_date or '',
+                           raw_text=text or '',
                            status='pending', created_by=by)
         s.add(x)
         s.commit()
@@ -541,7 +555,7 @@ def parse_import(import_id: int) -> None:
         x = s.get(ScheduleImport, import_id)
         if x is None:
             return
-        text, mail_date = x.raw_text, x.mail_date
+        text, mail_date, owner = x.raw_text, x.mail_date, owner_of(x.owner)
     status, error, events = 'done', '', []
     try:
         events = table_parse(text, mail_date)  # 제목 행이 있는 표는 열 이름대로 그대로 읽는다 (AI 보다 정확)
@@ -559,7 +573,7 @@ def parse_import(import_id: int) -> None:
             pass
         elif llm.is_configured():
             try:
-                events = ai_parse(text, mail_date)
+                events = ai_parse(text, mail_date, owner)
             except Exception as e:  # noqa: BLE001
                 error = f'AI 정리 실패({str(e)[:200]}) — 규칙으로 읽었습니다.'
                 events = rule_parse(text, mail_date)
@@ -595,12 +609,13 @@ def reparse(import_id: int) -> None:
     submit_import(import_id)
 
 
-def list_imports(limit: int = 100) -> list[dict]:
-    """최근 메일부터. n_events = 이 메일로 들어간(또는 마지막으로 고쳐진) 일정 수."""
+def list_imports(limit: int = 100, owner: str = DEFAULT_OWNER) -> list[dict]:
+    """그 사람 일정 메일, 최근 메일부터. n_events = 이 메일로 들어간(또는 마지막으로 고쳐진) 일정 수."""
     with db.SessionLocal() as s:
         counts = dict(s.execute(select(Schedule.import_id, func.count()).where(Schedule.import_id.is_not(None))
                                 .group_by(Schedule.import_id)).all())
-        rows = s.scalars(select(ScheduleImport).order_by(ScheduleImport.id.desc()).limit(limit))
+        rows = s.scalars(select(ScheduleImport).where(ScheduleImport.owner == owner_of(owner))
+                         .order_by(ScheduleImport.id.desc()).limit(limit))
         return [{**_import_dict(x), 'n_events': counts.get(x.id, 0)} for x in rows]
 
 
@@ -608,6 +623,15 @@ def get_import(import_id: int) -> dict | None:
     with db.SessionLocal() as s:
         x = s.get(ScheduleImport, import_id)
         return _import_dict(x) if x else None
+
+
+def set_import_owner(import_id: int, owner: str) -> None:
+    """가져온 메일이 누구 일정인지 바꾼다 (반영 전 — 반영할 때 그 사람 일정과 대조한다)."""
+    with db.SessionLocal() as s:
+        x = s.get(ScheduleImport, import_id)
+        if x is not None:
+            x.owner = owner_of(owner)
+            s.commit()
 
 
 def delete_import(import_id: int) -> None:
@@ -649,11 +673,12 @@ def _digits(t: str) -> list[str]:
     return re.findall(r'\d+', t or '')
 
 
-def _match(s, ev: dict, taken: set | None = None) -> tuple[Schedule | None, str]:
+def _match(s, ev: dict, taken: set | None = None, owner: str = DEFAULT_OWNER) -> tuple[Schedule | None, str]:
     """이미 있는 같은 일정 찾기 → (일정, 어떻게 찾았나). 칸이 밀려 제목이 달라도 같은 날의 기존 일정으로 알아보도록:
     1) 날짜·제목 일치 2) 기존 제목이 새 일정의 어느 칸엔가 들어 있음 3) 제목이 비슷함 4) 같은 시작 시간에 제목도 꽤 비슷.
     제목 속 숫자가 다르면('일정 1' / '일정 2') 다른 일정. taken: 이번 메일의 다른 줄이 이미 차지한 일정 id."""
-    all_rows = list(s.scalars(select(Schedule).where(Schedule.date == ev['date'])))
+    all_rows = list(s.scalars(select(Schedule).where(Schedule.owner == owner_of(owner),
+                                                     Schedule.date == ev['date'])))
     key = _norm_title(ev['title'])
     for x in all_rows:
         if _norm_title(x.title) == key:
@@ -728,7 +753,7 @@ def _ignored_note(ignored: list[dict]) -> str:
     return ' · '.join(f"{LABELS[i['field']]} '{i['value'][:20]}' 무시({i['reason']})" for i in ignored)
 
 
-def preview(events: list[dict]) -> list[dict]:
+def preview(events: list[dict], owner: str = DEFAULT_OWNER) -> list[dict]:
     """일정마다 상태 — new(신규) / changed(정말 바뀐 칸) / same(이미 같은 내용) / check(칸이 밀린 듯, 확인 필요).
     기존 일정과 같은 일정이면, 잘못 읽은 것으로 보이는 칸은 기존 값으로 되돌려 보여 준다(그대로 반영해도 안전).
     'match_id' 는 대응하는 기존 일정, 'note' 는 검증 내용."""
@@ -738,7 +763,7 @@ def preview(events: list[dict]) -> list[dict]:
             ev = clean_event(e)
             if ev is None:
                 continue
-            x, how = _match(s, ev, taken)
+            x, how = _match(s, ev, taken, owner)
             if x is None:
                 bad = is_date_only(ev['title'])
                 out.append({**ev, 'state': 'check' if bad else 'new', 'changed': [], 'match_id': None,
@@ -760,13 +785,18 @@ def preview(events: list[dict]) -> list[dict]:
     return out
 
 
-def apply_events(events: list[dict], import_id: int | None = None, by: str = '', *, session=None) -> dict:
-    """일정 목록을 반영. 'match_id' 가 있는 줄(미리보기에서 사람이 확인한 줄)은 그 일정을 줄 내용대로 고치고,
+def apply_events(events: list[dict], import_id: int | None = None, by: str = '', *, session=None,
+                 owner: str | None = None) -> dict:
+    """일정 목록을 반영 — 누구 일정인지는 owner, 없으면 가져온 메일의 owner, 그것도 없으면 원장님. 'match_id' 가 있는 줄(미리보기에서 사람이 확인한 줄)은 그 일정을 줄 내용대로 고치고,
     없는 줄은 같은 일정을 찾아 정말 바뀐 칸만 고친다(verify_changes) — 같은 일정이 없으면 새로 만든다.
     제목이 날짜·시간뿐인 새 일정(칸이 밀린 줄)은 넣지 않는다(skipped)."""
     added = updated = same = skipped = 0
     taken = set()
     with db.transaction(session) as s:
+        if owner is None:
+            imp = s.get(ScheduleImport, import_id) if import_id else None
+            owner = imp.owner if imp is not None else DEFAULT_OWNER
+        owner = owner_of(owner)
         for e in events:
             ev = clean_event(e)
             if ev is None:
@@ -775,7 +805,7 @@ def apply_events(events: list[dict], import_id: int | None = None, by: str = '',
             if x is not None:
                 fields = [f for f in FIELDS if ev[f] and (getattr(x, f) or '') != ev[f]]
             else:
-                x, how = _match(s, ev, taken)
+                x, how = _match(s, ev, taken, owner)
                 fields = verify_changes(x, ev, how)[0] if x is not None else []
             if x is not None:
                 taken.add(x.id)
@@ -783,7 +813,8 @@ def apply_events(events: list[dict], import_id: int | None = None, by: str = '',
                 if is_date_only(ev['title']):
                     skipped += 1
                     continue
-                s.add(Schedule(**ev, source='mail' if import_id else 'manual', import_id=import_id, created_by=by))
+                s.add(Schedule(**ev, owner=owner, source='mail' if import_id else 'manual', import_id=import_id,
+                               created_by=by))
                 s.flush()
                 added += 1
                 continue
@@ -803,9 +834,9 @@ def apply_events(events: list[dict], import_id: int | None = None, by: str = '',
     return {'added': added, 'updated': updated, 'same': same, 'skipped': skipped}
 
 
-def apply_all_pending(by: str = '') -> dict:
-    """정리가 끝났는데 아직 반영하지 않은 메일을 보낸 날짜 순(옛 메일 먼저 → 최신 메일이 덮어씀)으로 모두 반영."""
-    todo = [i for i in list_imports(limit=10000) if i['status'] == 'done' and not i['applied']]
+def apply_all_pending(by: str = '', owner: str = DEFAULT_OWNER) -> dict:
+    """그 사람 일정 메일 중 정리가 끝났는데 아직 반영하지 않은 메일을 보낸 날짜 순(옛 메일 먼저 → 최신 메일이 덮어씀)으로 모두 반영."""
+    todo = [i for i in list_imports(limit=10000, owner=owner) if i['status'] == 'done' and not i['applied']]
     todo.sort(key=lambda i: (i['mail_date'] or '9999', i['id']))
     total = {'mails': 0, 'added': 0, 'updated': 0, 'same': 0, 'skipped': 0}
     for i in todo:
