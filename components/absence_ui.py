@@ -5,13 +5,12 @@
 '메일로 등록': 부재 안내 메일을 붙여넣으면 임원·종류·기간을 뽑아 표로 보여 주고, 확인한 뒤 등록한다
 (POP3 로 받은 메일은 받은 메일 화면에서 같은 방식으로).
 """
-import calendar as pycal
 from datetime import date
 
 import dash_bootstrap_components as dbc
 from dash import ALL, Input, Output, State, callback, ctx, dash_table, dcc, html, no_update
 
-from services import absences, auth, outbox, store
+from services import absences, auth, outbox, schedules, store
 
 WEEKDAYS = ['월', '화', '수', '목', '금', '토', '일']
 KIND_COLOR = {'휴가': '#16a34a', '출장': '#2563eb', '해외출장': '#7c3aed', '교육': '#d97706', '외부 일정': '#db2777',
@@ -144,7 +143,7 @@ def _chip(r: dict):
 def _month_grid(y: int, m: int, rows: list[dict], selected: str):
     today = date.today().isoformat()
     weeks = []
-    for week in pycal.Calendar().monthdatescalendar(y, m):
+    for week in schedules.month_weeks(y, m):
         cells = []
         for d in week:
             iso = d.isoformat()
@@ -159,7 +158,7 @@ def _month_grid(y: int, m: int, rows: list[dict], selected: str):
                 if len(day_rows) > MAX_IN_CELL else None,
             ], id={'type': 'ab-cell', 'day': iso}, n_clicks=0, className=cls))
         weeks.append(html.Div(cells, className='ab-week'))
-    head = html.Div([html.Div(w, className='ab-wd') for w in WEEKDAYS], className='ab-week ab-head')
+    head = html.Div([html.Div(w, className='ab-wd') for w in schedules.WEEK_HEAD], className='ab-week ab-head')
     legend = html.Div([html.Span([html.Span(className='ab-dot', style={'background': c}), k], className='me-3')
                        for k, c in KIND_COLOR.items()], className='small text-muted mt-2')
     return html.Div([head, *weeks, legend], className='ab-grid')
@@ -243,7 +242,7 @@ def pick_day(_):
 def render(ym, view, kinds, q, day, _):
     y, m = ym
     first = date(y, m, 1)
-    weeks = pycal.Calendar().monthdatescalendar(y, m)
+    weeks = schedules.month_weeks(y, m)
     lo, hi = weeks[0][0].isoformat(), weeks[-1][-1].isoformat()
     rows = absences.list_range(lo, hi, kinds=kinds or None, query=q or '')
     month_rows = [r for r in rows if r['start_date'] <= f'{y:04d}-{m:02d}-31' and r['end_date'] >= first.isoformat()]

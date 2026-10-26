@@ -496,3 +496,13 @@ def test_multi_day_boxes_have_unique_ids():
     walk(director_ui.week_view(_date(2026, 10, 26), events))
     walk(director_ui.month_view(_date(2026, 10, 26), events))
     assert len(ids) == 6 and len(set(ids[:3])) == 3 and len(set(ids[3:])) == 3
+
+
+def test_calendar_weeks_start_on_sunday():
+    from datetime import date as _date
+    assert schedules.week_start(_date(2026, 10, 28)) == _date(2026, 10, 25)  # 수 → 그 주 일요일
+    assert schedules.week_start(_date(2026, 10, 25)) == _date(2026, 10, 25)  # 일요일은 그대로
+    assert schedules.week_start(_date(2026, 10, 31)) == _date(2026, 10, 25)  # 토요일
+    weeks = schedules.month_weeks(2026, 10)
+    assert weeks[0][0] == _date(2026, 9, 27) and weeks[0][0].weekday() == 6 and weeks[-1][-1].weekday() == 5
+    assert schedules.WEEK_HEAD[0] == '일' and schedules.WEEK_HEAD[-1] == '토'
