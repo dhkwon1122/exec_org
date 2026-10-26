@@ -142,7 +142,7 @@ def _range(view: str, anchor: date) -> tuple[date, date]:
         last = pycal.monthrange(anchor.year, anchor.month)[1]
         return anchor.replace(day=1), anchor.replace(day=last)
     if view == 'month':
-        weeks = pycal.Calendar(firstweekday=0).monthdatescalendar(anchor.year, anchor.month)
+        weeks = schedules.month_weeks(anchor.year, anchor.month)
         return weeks[0][0], weeks[-1][-1]
     start = schedules.week_start(anchor)
     return start, start + timedelta(days=6)
@@ -222,8 +222,8 @@ def week_view(start: date, events: list[dict]):
     today = date.today()
     head = html.Div([html.Div(style={'width': '48px'})] + [
         html.Div([html.Span(WEEKDAYS[d.weekday()], className='me-1'), html.Span(f'{d.month}/{d.day}')],
-                 className='flex-fill text-center small fw-semibold' + (' text-primary' if d == today else '') +
-                 (' text-danger' if d.weekday() == 6 else ''), style={'width': 0})
+                 className='flex-fill text-center small fw-semibold' + schedules.day_color(d) +
+                 (' text-decoration-underline' if d == today else ''), style={'width': 0})
         for d in days], className='d-flex border-bottom pb-1')
     allday = html.Div([html.Div('종일', className='small text-muted', style={'width': '48px'})] + [
         html.Div([_ev_box(e, {'marginBottom': '2px'}, compact=True, day=d.isoformat()) for e in events
@@ -257,7 +257,7 @@ def month_view(anchor: date, events: list[dict]):
         first, last = (date.fromisoformat(x) for x in _days(e))
         for i in range((last - first).days + 1):
             by_day.setdefault((first + timedelta(days=i)).isoformat(), []).append(e)
-    weeks = pycal.Calendar(firstweekday=0).monthdatescalendar(anchor.year, anchor.month)
+    weeks = schedules.month_weeks(anchor.year, anchor.month)
     today = date.today().isoformat()
     rows = []
     for week in weeks:
@@ -276,7 +276,7 @@ def month_view(anchor: date, events: list[dict]):
                 className='p-1', style={'width': '14.28%', 'verticalAlign': 'top'}))
         rows.append(html.Tr(cells))
     return html.Table([html.Thead(html.Tr([html.Th(w, className='text-center small text-muted fw-normal')
-                                           for w in WEEKDAYS])), html.Tbody(rows)],
+                                           for w in schedules.WEEK_HEAD])), html.Tbody(rows)],
                       className='w-100', style={'tableLayout': 'fixed'})
 
 

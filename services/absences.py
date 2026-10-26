@@ -139,7 +139,8 @@ def for_person(person_id: int, limit: int = 20) -> list[dict]:
 
 
 def week_of(d: date) -> tuple[str, str]:
-    start = d - timedelta(days=d.weekday())
+    """그 날이 든 주 (일요일~토요일)."""
+    start = d - timedelta(days=(d.weekday() + 1) % 7)
     return start.isoformat(), (start + timedelta(days=6)).isoformat()
 
 

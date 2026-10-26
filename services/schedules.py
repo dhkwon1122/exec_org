@@ -921,5 +921,21 @@ def apply_all_pending(by: str = '', owner: str = DEFAULT_OWNER) -> dict:
     return total
 
 
+# 달력은 일요일부터 토요일까지 (캘린더 화면 공통)
+WEEK_HEAD = ['일', '월', '화', '수', '목', '금', '토']
+
+
 def week_start(d: date) -> date:
-    return d - timedelta(days=d.weekday())
+    """그 주의 일요일."""
+    return d - timedelta(days=(d.weekday() + 1) % 7)
+
+
+def month_weeks(year: int, month: int) -> list[list[date]]:
+    """그달 달력의 주들 (주마다 일요일~토요일, 앞뒤 달 날짜 포함)."""
+    import calendar
+    return calendar.Calendar(firstweekday=6).monthdatescalendar(year, month)
+
+
+def day_color(d: date) -> str:
+    """일요일 빨강·토요일 파랑 글자 클래스."""
+    return ' text-danger' if d.weekday() == 6 else ' text-primary' if d.weekday() == 5 else ''

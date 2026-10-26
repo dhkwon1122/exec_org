@@ -1,6 +1,5 @@
 """캘린더 — '업무' 탭: 월 단위로 업무 마감·시작과 이력. '원장님 일정'·'피플팀장 일정' 탭: components/director_ui.py
 (한 화면을 같이 쓰고, 탭에 따라 누구 일정인지만 바뀐다). '임원 부재' 탭: components/absence_ui.py."""
-import calendar as pycal
 from datetime import date
 
 import dash
@@ -8,7 +7,7 @@ import dash_bootstrap_components as dbc
 from dash import ALL, Input, Output, State, callback, ctx, dcc, html, no_update
 
 from components import absence_ui, director_ui, todo_ui, ui
-from services import store
+from services import schedules, store
 
 dash.register_page(__name__, path='/calendar', name='캘린더', title='업무 기록 · 캘린더')
 
@@ -124,14 +123,15 @@ def _cell(d: date, month: int, info: dict | None, selected: str):
 def render(ym, selected, _):
     y, m = ym
     days = store.calendar_month(y, m)
-    weeks = pycal.Calendar(firstweekday=0).monthdatescalendar(y, m)
+    weeks = schedules.month_weeks(y, m)
     # 앞뒤 달 날짜 칸에도 내용을 보여주기 위해 이웃 달도 읽는다
     for d in (weeks[0][0], weeks[-1][-1]):
         if d.month != m:
             days.update({k: v for k, v in store.calendar_month(d.year, d.month).items()})
     grid = html.Table([
         html.Thead(html.Tr([html.Th(w, className='text-center small text-muted fw-normal' +
-                                    (' text-danger' if w == '일' else '')) for w in WEEKDAYS])),
+                                    (' text-danger' if w == '일' else ' text-primary' if w == '토' else ''))
+                            for w in schedules.WEEK_HEAD])),
         html.Tbody([html.Tr([_cell(d, m, days.get(d.isoformat()), selected) for d in week]) for week in weeks]),
     ], className='w-100', style={'tableLayout': 'fixed'})
     return grid, f'{y}년 {m}월', _detail(selected)
