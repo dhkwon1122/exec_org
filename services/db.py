@@ -268,7 +268,8 @@ class Schedule(Base):
 
     id = Column(Integer, primary_key=True)
     owner = Column(String(20), default='director', index=True)
-    date = Column(String(10), nullable=False, index=True)  # YYYY-MM-DD
+    date = Column(String(10), nullable=False, index=True)  # YYYY-MM-DD (여러 날 일정이면 첫날)
+    end_date = Column(String(10), default='', index=True)  # 여러 날에 걸친 일정(휴가·출장)의 마지막 날 ('' = 하루)
     start_time = Column(String(5), default='')  # HH:MM ('' = 종일·시간 미정)
     end_time = Column(String(5), default='')
     title = Column(String(300), nullable=False)

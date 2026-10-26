@@ -199,7 +199,9 @@ def draft_schedule(date_from: str, date_to: str, owner: str = schedules.DEFAULT_
     who = schedules.OWNERS[schedules.owner_of(owner)]
     wd = '월화수목금토일'
     table = _table(['날짜', '시간', '일정', '장소', '참석자', '세부'], [
-        [f"{r['date'][5:].replace('-', '/')}({wd[date.fromisoformat(r['date']).weekday()]})",
+        [f"{r['date'][5:].replace('-', '/')}({wd[date.fromisoformat(r['date']).weekday()]})"
+         + (f"~{r['end_date'][5:].replace('-', '/')}({wd[date.fromisoformat(r['end_date']).weekday()]})"
+            if r['end_date'] else ''),
          (r['start_time'] + ('~' + r['end_time'] if r['end_time'] else '')) or '종일', r['title'], r['location'],
          r['attendees'], r['details']] for r in rows]) if rows else '<p>등록된 일정이 없습니다.</p>'
     span = f"{date_from[5:].replace('-', '/')}~{date_to[5:].replace('-', '/')}"
