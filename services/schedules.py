@@ -13,7 +13,7 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import date, datetime, timedelta
 from difflib import SequenceMatcher
 
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 
 from services import db, llm
 from services.db import Schedule, ScheduleImport
@@ -21,7 +21,7 @@ from services.db import Schedule, ScheduleImport
 CATEGORIES = ['회의', '보고', '면담', '행사', '외부', '출장', '기타']
 OWNERS = {'director': '원장님', 'people': '피플팀장'}
 DEFAULT_OWNER = 'director'
-FIELDS = ('date', 'start_time', 'end_time', 'title', 'location', 'attendees', 'category', 'details')
+FIELDS = ('date', 'end_date', 'start_time', 'end_time', 'title', 'location', 'attendees', 'category', 'details')
 
 _executor = ThreadPoolExecutor(max_workers=int(os.environ.get('LLM_MAX_CONCURRENT', '2')),
                                thread_name_prefix='schedule')
@@ -57,13 +57,23 @@ def norm_time(v) -> str:
     return f'{h:02d}:{mi:02d}' if 0 <= h < 24 and 0 <= mi < 60 else ''
 
 
-def clean_event(e: dict) -> dict | None:
-    """AI·화면·규칙에서 온 일정 한 건을 저장 형식으로. 날짜·제목이 없으면 None."""
-    d = str(e.get('date') or '').strip()[:10].replace('.', '-').replace('/', '-')
+def _iso(v) -> str:
+    v = str(v or '').strip()[:10].replace('.', '-').replace('/', '-')
     try:
-        d = date.fromisoformat(d).isoformat()
+        return date.fromisoformat(v).isoformat()
     except ValueError:
+        return ''
+
+
+def clean_event(e: dict) -> dict | None:
+    """AI·화면·규칙에서 온 일정 한 건을 저장 형식으로. 날짜·제목이 없으면 None.
+    end_date 는 여러 날 일정의 마지막 날 — 첫날과 같거나 앞이면 '' (하루 일정)."""
+    d = _iso(e.get('date'))
+    if not d:
         return None
+    end_date = _iso(e.get('end_date'))
+    if end_date <= d:
+        end_date = ''
     title = re.sub(r'\s+', ' ', str(e.get('title') or '')).strip()[:300]
     if not title:
         return None
@@ -71,17 +81,18 @@ def clean_event(e: dict) -> dict | None:
     if start and end and end <= start:
         end = ''
     cat = str(e.get('category') or '').strip()
-    return {'date': d, 'start_time': start, 'end_time': end if start else '', 'title': title,
+    return {'date': d, 'end_date': end_date, 'start_time': start, 'end_time': end if start else '', 'title': title,
             'location': str(e.get('location') or '').strip()[:300],
             'attendees': str(e.get('attendees') or '').strip(), 'category': cat if cat in CATEGORIES else
             ('기타' if cat else ''), 'details': str(e.get('details') or '').strip()}
 
 
 def list_range(date_from: str, date_to: str, owner: str = DEFAULT_OWNER) -> list[dict]:
-    """기간 안의 그 사람 일정 — 날짜, 시작 시각(종일·미정이 먼저) 순."""
+    """기간과 겹치는 그 사람 일정 (여러 날 일정은 기간 앞에서 시작했어도) — 날짜, 시작 시각(종일·미정이 먼저) 순."""
     with db.SessionLocal() as s:
-        rows = s.scalars(select(Schedule).where(Schedule.owner == owner_of(owner), Schedule.date >= date_from,
-                                                Schedule.date <= date_to))
+        rows = s.scalars(select(Schedule).where(
+            Schedule.owner == owner_of(owner), Schedule.date <= date_to,
+            or_(Schedule.date >= date_from, Schedule.end_date >= date_from)))
         out = [_dict(x) for x in rows]
     return sorted(out, key=lambda x: (x['date'], x['start_time'], x['title']))
 
@@ -163,6 +174,8 @@ def search(query: str, limit: int = 200, owner: str = DEFAULT_OWNER) -> list[dic
 PARSE_SYSTEM = f"""너는 원장님 비서실의 일정 담당자다. 비서가 보낸 일정 메일(표가 '칸 | 칸 | 칸' 한 줄로 바뀌어 있을 수 있음)을 읽고
 원장님 일정을 한 건씩 뽑는다.
 규칙:
+- 여러 날에 걸친 일정(휴가·해외 출장·워크숍 등 '10/27~10/31')은 한 건으로 — date 에 첫날, end_date 에 마지막 날.
+  하루 일정이면 end_date 는 빈 문자열. 날마다 따로 나누지 않는다.
 - 날짜는 YYYY-MM-DD. 메일에 연도가 없으면 메일 보낸 날짜의 연도로(12월 메일에 1월 일정이면 다음 해). '오늘·내일·다음주 월요일'은 메일 날짜 기준.
 - 시간은 24시간 HH:MM. 종료 시간을 모르면 빈 문자열, 시간이 없는 일정(종일·미정)은 둘 다 빈 문자열.
 - 표에서 날짜 칸이 비어 있거나(병합된 칸) 아예 빠져 시간으로 시작하는 행은 바로 위 일정과 같은 날짜다.
@@ -173,7 +186,7 @@ PARSE_SYSTEM = f"""너는 원장님 비서실의 일정 담당자다. 비서가 
 - category 는 {', '.join(CATEGORIES)} 중 하나.
 - 취소·연기된 일정은 details 에 '취소' 또는 '연기'를 적고 그대로 넣는다. 일정이 아닌 인사말·서명은 무시한다.
 - 입력에 없는 내용은 만들지 않는다.
-반드시 JSON 만 출력: {{"events": [{{"date": "", "start_time": "", "end_time": "", "title": "", "location": "",
+반드시 JSON 만 출력: {{"events": [{{"date": "", "end_date": "", "start_time": "", "end_time": "", "title": "", "location": "",
 "attendees": "", "category": "", "details": ""}}]}}"""
 
 
@@ -220,6 +233,48 @@ _ROW_STARTS_WITH_TIME = re.compile(r'^\s*(?:\|\s*)*(?:오전|오후)?\s*\d{1,2}\
 
 def _find_date(line: str, base: date) -> tuple[str, str] | None:
     """줄에서 처음 보이는 날짜 → (YYYY-MM-DD, 날짜를 뺀 나머지). 날짜가 안 되는 숫자 조합(26.10 의 26월 등)은 건너뛴다."""
+    found = _find_date_span(line, base)
+    return (found[0], line[:found[1]] + ' ' + line[found[2]:]) if found else None
+
+
+_RANGE_SEP = re.compile(r'^\s*(?:[(（][월화수목금토일][)）])?\s*(?:~|∼|〜|-|–|부터)\s*')
+_RANGE_DAY = re.compile(r'^(?P<d>\d{1,2})\s*일?(?:\s*[(（][월화수목금토일][)）])?(?![\d:;.시/])')
+_RANGE_TAIL = re.compile(r'^\s*(?:[(（][월화수목금토일][)）])?\s*(?:까지)?')
+
+
+def find_date_range(line: str, base: date) -> tuple[str, str, str] | None:
+    """줄에서 처음 보이는 날짜(와 바로 이어지는 '~ 마지막 날') → (첫날, 마지막 날 또는 '', 날짜를 뺀 나머지).
+    '10/27~10/31', '10.27(월)-31(금)', '10월 27일부터 11월 2일까지', '27~31일'(첫날이 달을 정함)."""
+    first = _find_date_span(line, base)
+    if not first:
+        return None
+    start, a, b = first
+    sep = _RANGE_SEP.match(line[b:])
+    end = ''
+    if sep:
+        tail_at = b + sep.end()
+        tail = line[tail_at:]
+        second = _find_date_span(tail, date.fromisoformat(start))
+        if second and second[1] == 0:
+            end, b = second[0], tail_at + second[2]
+        else:
+            m = _RANGE_DAY.match(tail)
+            if m:
+                s = date.fromisoformat(start)
+                y, mo, d = s.year, s.month, int(m.group('d'))
+                if d < s.day:
+                    y, mo = (y + 1, 1) if mo == 12 else (y, mo + 1)
+                try:
+                    end, b = date(y, mo, d).isoformat(), tail_at + m.end()
+                except ValueError:
+                    pass
+        if end:
+            b += _RANGE_TAIL.match(line[b:]).end()
+    return start, (end if end > start else ''), line[:a] + ' ' + line[b:]
+
+
+def _find_date_span(line: str, base: date) -> tuple[str, int, int] | None:
+    """줄에서 처음 보이는 날짜 → (YYYY-MM-DD, 시작 위치, 끝 위치)."""
     for pat in _DATE_PATTERNS:
         for m in pat.finditer(line):
             g = m.groupdict()
@@ -235,7 +290,7 @@ def _find_date(line: str, base: date) -> tuple[str, str] | None:
                 elif base.month == 1 and mo == 12:
                     y -= 1
             try:
-                return date(y, mo, d).isoformat(), line[:m.start()] + ' ' + line[m.end():]
+                return date(y, mo, d).isoformat(), m.start(), m.end()
             except ValueError:
                 continue
     return None
@@ -268,19 +323,19 @@ def fill_dates(text: str, mail_date: str) -> str:
 def rule_parse(text: str, mail_date: str) -> list[dict]:
     """규칙 초안 — 날짜가 나온 뒤 시간이 있는 줄을 일정으로. 표 행이면 칸을 제목/장소/참석자로 나눈다."""
     base = date.fromisoformat(mail_date) if mail_date else date.today()
-    cur, out = None, []
+    cur, cur_end, out = None, '', []
     for line in (text or '').splitlines():
         if not line.strip() or _HEADER_LINE.match(line):
             continue
-        found = _find_date(line, base)
+        found = find_date_range(line, base)
         rest = line
         if found:
-            cur, rest = found
+            cur, cur_end, rest = found
         elif '|' not in line and not _ROW_STARTS_WITH_TIME.match(line):
             cur = None  # 표 밖 문장 — 앞 표의 날짜를 이어 쓰지 않는다
             continue
         t = _TIME_RANGE.search(rest)
-        all_day = not (t and norm_time(t.group(1))) and re.search(r'종일|하루', rest)
+        all_day = not (t and norm_time(t.group(1))) and (re.search(r'종일|하루', rest) or (found and cur_end))
         if not cur or not (all_day or (t and norm_time(t.group(1)))):
             continue
         if all_day:
@@ -290,7 +345,7 @@ def rule_parse(text: str, mail_date: str) -> list[dict]:
         cells = [c.strip() for c in re.split(r'\s*\|\s*', rest) if c.strip() and not re.fullmatch(r'[(월화수목금토일)]+', c.strip())]
         if not cells:
             continue
-        ev = clean_event({'date': cur, 'start_time': '' if all_day else t.group(1),
+        ev = clean_event({'date': cur, 'end_date': cur_end if found else '', 'start_time': '' if all_day else t.group(1),
                           'end_time': '' if all_day else t.group(2) or '', 'title': cells[0],
                           'location': cells[1] if len(cells) > 1 else '',
                           'attendees': cells[2] if len(cells) > 2 else '',
@@ -342,10 +397,19 @@ _DAY_ONLY = re.compile(r'^\s*(?P<d>\d{1,2})\s*일?\s*(?:\(?[월화수목금토�
 def parse_date_cell(cell: str, base: date, prev: str | None) -> str | None:
     """날짜 칸 → YYYY-MM-DD. '10/21(화)', '10.21', '10월 21일', '2026-10-21' 외에 '21일(화)', '21(화)' 처럼
     일만 있으면 앞 행(없으면 메일)의 달로, 날이 줄면 다음 달로."""
+    return parse_date_cell_range(cell, base, prev)[0]
+
+
+def parse_date_cell_range(cell: str, base: date, prev: str | None) -> tuple[str | None, str]:
+    """날짜 칸 → (첫날, 마지막 날 또는 '') — '10/27~10/31' 같은 기간 칸도."""
     cell = (cell or '').replace(' / ', ' ')
-    found = _find_date(cell, base)
+    found = find_date_range(cell, base)
     if found:
-        return found[0]
+        return found[0], found[1]
+    return _day_only(cell, base, prev), ''
+
+
+def _day_only(cell: str, base: date, prev: str | None) -> str | None:
     m = _DAY_ONLY.match(cell)
     if not m:
         return None
@@ -389,19 +453,20 @@ def table_parse(text: str, mail_date: str) -> list[dict]:
                 col[k] += ' / ' + c  # 같은 뜻의 열이 둘이면 이어 붙인다
             else:
                 col[k] = c
-        start = end = ''
+        start = end = end_date = ''
         if 'datetime' in col:  # '10/21(화) 09:00~10:00' 한 칸
-            found = _find_date(col['datetime'], base)
+            found = find_date_range(col['datetime'], base)
             d = found[0] if found else parse_date_cell(col['datetime'], base, cur)
             if d:
                 cur = d
-            t = _TIME_RANGE.search(found[1] if found else col['datetime'])
+                end_date = found[1] if found else ''
+            t = _TIME_RANGE.search(found[2] if found else col['datetime'])
             if t and norm_time(t.group(1)):
                 start, end = t.group(1), t.group(2) or ''
         if 'date' in col:
-            d = parse_date_cell(col['date'], base, cur)
+            d, d_end = parse_date_cell_range(col['date'], base, cur)
             if d:
-                cur = d
+                cur, end_date = d, d_end
         if 'time' in col:
             t = _TIME_RANGE.search(col['time'])
             if t and norm_time(t.group(1)):
@@ -412,7 +477,7 @@ def table_parse(text: str, mail_date: str) -> list[dict]:
         if not cur or not title:
             continue
         details = ' / '.join(x for x in [col.get('details', ''), *extra] if x)
-        ev = clean_event({'date': cur, 'start_time': start, 'end_time': end, 'title': title,
+        ev = clean_event({'date': cur, 'end_date': end_date, 'start_time': start, 'end_time': end, 'title': title,
                           'location': col.get('location', ''), 'attendees': col.get('attendees', ''),
                           'category': col.get('category', ''), 'details': details})
         if ev:
@@ -466,7 +531,7 @@ def is_column_table(text: str) -> bool:
 
 def block_parse(text: str, mail_date: str) -> list[dict]:
     base = date.fromisoformat(mail_date) if mail_date else date.today()
-    out, cur_date, ev = [], None, None
+    out, cur_date, cur_end, ev = [], None, '', None
 
     def close():
         nonlocal ev
@@ -486,23 +551,29 @@ def block_parse(text: str, mail_date: str) -> list[dict]:
             close()
             cur_date = None
             continue
-        found = _find_date(line, base)
+        found = find_date_range(line, base)
         if found:
             close()
-            cur_date, line = found[0], found[1].strip(' ,-~|')
+            cur_date, cur_end, line = found[0], found[1], found[2].strip(' ,-~|')
             if not line or re.fullmatch(r'[(（]?[월화수목금토일][)）]?', line):
+                continue
+            if cur_end and not _TIME_AT_START.match(line):  # '10/27~10/31 해외 출장' — 여러 날 일정 한 줄
+                ev = {'date': cur_date, 'end_date': cur_end, 'title': line, 'location': '', 'attendees': '',
+                      'details': ''}
                 continue
         t = _TIME_AT_START.match(line)
         if t and cur_date and norm_time(t.group(1)):
             close()
             title = t.group(3).strip(' -:|')
-            ev = {'date': cur_date, 'start_time': t.group(1), 'end_time': t.group(2) or '', 'title': title,
+            ev = {'date': cur_date, 'end_date': cur_end, 'start_time': t.group(1), 'end_time': t.group(2) or '',
+                  'title': title,
                   'location': '', 'attendees': '', 'details': ''}
             continue
         if ev is None:
             if cur_date and re.search(r'종일|하루', line):  # '종일 해외 출장'
                 close()
-                ev = {'date': cur_date, 'title': re.sub(r'\s*(하루\s*)?종일\s*', ' ', line).strip(), 'location': '',
+                ev = {'date': cur_date, 'end_date': cur_end,
+                      'title': re.sub(r'\s*(하루\s*)?종일\s*', ' ', line).strip(), 'location': '',
                       'attendees': '', 'details': ''}
             continue
         kv = _KV.match(line)
@@ -649,7 +720,7 @@ def _norm_title(t: str) -> str:
     return re.sub(r'[\s\W_]+', '', (t or '').lower())
 
 
-LABELS = {'date': '날짜', 'start_time': '시작', 'end_time': '종료', 'title': '일정', 'location': '장소',
+LABELS = {'date': '날짜', 'end_date': '마지막 날', 'start_time': '시작', 'end_time': '종료', 'title': '일정', 'location': '장소',
           'attendees': '참석자', 'category': '구분', 'details': '세부'}
 _TEXT_FIELDS = ('title', 'location', 'attendees', 'details')
 # 날짜·시간·요일 글자만 있는 값 — 칸이 밀려 날짜 줄이 제목 등에 들어간 경우
@@ -717,8 +788,8 @@ def verify_changes(x: Schedule, ev: dict, how: str = 'title') -> tuple[list[str]
         new, old = ev.get(f) or '', old_vals[f]
         if not new or new == old or f == 'date':
             continue
-        if f in ('start_time', 'end_time'):
-            changed.append(f)  # 시간이 바뀌는 건 실제 변경 (칸이 밀려도 시간 칸엔 시간만 들어온다)
+        if f in ('start_time', 'end_time', 'end_date'):
+            changed.append(f)  # 시간·기간이 바뀌는 건 실제 변경 (칸이 밀려도 시간 칸엔 시간만 들어온다)
             continue
         if f == 'category':
             if old:

@@ -26,9 +26,10 @@ def layout():
     today = date.today().isoformat()
     form = [
         dbc.Row([
-            dbc.Col([dbc.Label('날짜'), dbc.Input(id='dr-f-date', type='date')], md=4),
-            dbc.Col([dbc.Label('시작'), dbc.Input(id='dr-f-start', type='time')], md=4),
-            dbc.Col([dbc.Label('종료'), dbc.Input(id='dr-f-end', type='time')], md=4),
+            dbc.Col([dbc.Label('날짜'), dbc.Input(id='dr-f-date', type='date')], md=3),
+            dbc.Col([dbc.Label('마지막 날 (여러 날이면)'), dbc.Input(id='dr-f-end-date', type='date')], md=3),
+            dbc.Col([dbc.Label('시작'), dbc.Input(id='dr-f-start', type='time')], md=3),
+            dbc.Col([dbc.Label('종료'), dbc.Input(id='dr-f-end', type='time')], md=3),
         ], className='g-2 mb-2'),
         dbc.Label('일정'), dbc.Input(id='dr-f-title', className='mb-2'),
         dbc.Row([
@@ -111,7 +112,8 @@ def layout():
                     dash_table.DataTable(
                         id='dr-imp-table', editable=True, row_deletable=True, data=[],
                         columns=[{'name': '상태', 'id': 'state_label', 'editable': False},
-                                 {'name': '날짜', 'id': 'date'}, {'name': '시작', 'id': 'start_time'},
+                                 {'name': '날짜', 'id': 'date'}, {'name': '마지막 날', 'id': 'end_date'},
+                                 {'name': '시작', 'id': 'start_time'},
                                  {'name': '종료', 'id': 'end_time'}, {'name': '일정', 'id': 'title'},
                                  {'name': '장소', 'id': 'location'}, {'name': '참석자', 'id': 'attendees'},
                                  {'name': '구분', 'id': 'category'}, {'name': '세부', 'id': 'details'},
@@ -146,15 +148,32 @@ def _range(view: str, anchor: date) -> tuple[date, date]:
     return start, start + timedelta(days=6)
 
 
-def _ev_box(e: dict, style: dict | None = None, compact: bool = False):
+def _md(d: str) -> str:
+    return f'{int(d[5:7])}/{int(d[8:10])}'
+
+
+def _days(e: dict) -> tuple[str, str]:
+    """일정이 걸친 첫날·마지막 날 (하루 일정이면 같은 날)."""
+    return e['date'], e['end_date'] or e['date']
+
+
+def on_day(e: dict, d: str) -> bool:
+    first, last = _days(e)
+    return first <= d <= last
+
+
+def _ev_box(e: dict, style: dict | None = None, compact: bool = False, day: str = ''):
+    """day: 이 상자가 놓인 날 — 여러 날 일정은 날마다 상자가 있어 id 가 겹치지 않게."""
     color = CAT_COLOR.get(e['category'], CAT_COLOR[''])
     time = f"{e['start_time']}" + (f"~{e['end_time']}" if e['end_time'] else '') if e['start_time'] else '종일'
+    if e['end_date']:  # 여러 날 일정
+        time = f"{_md(e['date'])}~{_md(e['end_date'])}" + (f" {e['start_time']}" if e['start_time'] else '')
     body = [html.Span(time, className='me-1 opacity-75') if not compact or not e['start_time'] else None,
             html.Span(e['title'], className='fw-semibold')]
     if not compact and e['location']:
         body += [html.Div(e['location'], className='opacity-75 text-truncate')]
     cancelled = '취소' in e['details'] or '연기' in e['details']
-    return html.Div(body, id={'type': 'dr-ev', 'id': e['id']}, n_clicks=0, title=f"{time} {e['title']} {e['location']}",
+    return html.Div(body, id={'type': 'dr-ev', 'id': e['id'], 'd': day or e['date']}, n_clicks=0, title=f"{time} {e['title']} {e['location']}",
                     className='rounded px-1 text-truncate', style={
                         'background': color + '22', 'borderLeft': f'3px solid {color}', 'cursor': 'pointer',
                         'fontSize': '0.75rem', 'lineHeight': '1.25',
@@ -196,7 +215,7 @@ def _lanes(events: list[dict]) -> list[tuple[dict, int, int]]:
 
 def week_view(start: date, events: list[dict]):
     days = [start + timedelta(days=i) for i in range(7)]
-    timed = [e for e in events if e['start_time']]
+    timed = [e for e in events if e['start_time'] and not e['end_date']]  # 여러 날 일정은 위 '종일' 줄에 날마다
     h0 = min([7] + [_minutes(e['start_time']) // 60 for e in timed])
     h1 = max([21] + [(_minutes(e['end_time'] or e['start_time']) + 59) // 60 for e in timed])
     height = (h1 - h0) * HOUR_PX
@@ -207,8 +226,8 @@ def week_view(start: date, events: list[dict]):
                  (' text-danger' if d.weekday() == 6 else ''), style={'width': 0})
         for d in days], className='d-flex border-bottom pb-1')
     allday = html.Div([html.Div('종일', className='small text-muted', style={'width': '48px'})] + [
-        html.Div([_ev_box(e, {'marginBottom': '2px'}, compact=True) for e in events
-                  if e['date'] == d.isoformat() and not e['start_time']],
+        html.Div([_ev_box(e, {'marginBottom': '2px'}, compact=True, day=d.isoformat()) for e in events
+                  if on_day(e, d.isoformat()) and e not in timed],
                  className='flex-fill px-1', style={'width': 0}) for d in days],
         className='d-flex border-bottom py-1', style={'minHeight': '26px'})
     hours = html.Div([html.Div(f'{h:02d}:00', className='small text-muted text-end pe-1',
@@ -234,8 +253,10 @@ def week_view(start: date, events: list[dict]):
 
 def month_view(anchor: date, events: list[dict]):
     by_day: dict[str, list] = {}
-    for e in events:
-        by_day.setdefault(e['date'], []).append(e)
+    for e in events:  # 여러 날 일정은 걸친 날마다
+        first, last = (date.fromisoformat(x) for x in _days(e))
+        for i in range((last - first).days + 1):
+            by_day.setdefault((first + timedelta(days=i)).isoformat(), []).append(e)
     weeks = pycal.Calendar(firstweekday=0).monthdatescalendar(anchor.year, anchor.month)
     today = date.today().isoformat()
     rows = []
@@ -247,7 +268,7 @@ def month_view(anchor: date, events: list[dict]):
                 html.Div(d.day, id={'type': 'dr-day', 'd': d.isoformat()}, n_clicks=0, title='이 주 보기',
                          className='small fw-bold' + (' text-primary' if d.isoformat() == today else '') +
                          (' text-muted' if d.month != anchor.month else ''), style={'cursor': 'pointer'}),
-                *[_ev_box(e, {'marginBottom': '2px'}, compact=True) for e in items[:4]],
+                *[_ev_box(e, {'marginBottom': '2px'}, compact=True, day=d.isoformat()) for e in items[:4]],
                 html.Div(f'+{len(items) - 4}', id={'type': 'dr-day', 'd': d.isoformat() + '#'}, n_clicks=0,
                          className='small text-muted', style={'cursor': 'pointer'}) if len(items) > 4 else None,
             ], className='p-1 h-100 border rounded', style={'minHeight': '96px', 'background':
@@ -262,6 +283,9 @@ def month_view(anchor: date, events: list[dict]):
 def _label(e: dict) -> str:
     d = date.fromisoformat(e['date'])
     time = (e['start_time'] + (f"~{e['end_time']}" if e['end_time'] else '')) if e['start_time'] else '종일'
+    if e['end_date']:
+        last = date.fromisoformat(e['end_date'])
+        time = f"~{last.month}/{last.day}({WEEKDAYS[last.weekday()]})" + (f" {e['start_time']}" if e['start_time'] else '')
     rest = ' · '.join(x for x in (e['location'], e['attendees']) if x)
     src = ' [메일]' if e['source'] == 'mail' else ''
     return f"{d.month}/{d.day}({WEEKDAYS[d.weekday()]}) {time}  {e['title']}" + (f'  — {rest}' if rest else '') + src
@@ -360,46 +384,50 @@ def _people_chips(text: str):
 
 
 @callback(Output('dr-modal', 'is_open'), Output('dr-modal-title', 'children'), Output('dr-edit-id', 'data'),
-          Output('dr-f-date', 'value'), Output('dr-f-start', 'value'), Output('dr-f-end', 'value'),
+          Output('dr-f-date', 'value'), Output('dr-f-end-date', 'value'), Output('dr-f-start', 'value'), Output('dr-f-end', 'value'),
           Output('dr-f-title', 'value'), Output('dr-f-location', 'value'), Output('dr-f-category', 'value'),
           Output('dr-f-attendees', 'value'), Output('dr-f-details', 'value'), Output('dr-f-meta', 'children'),
           Output('dr-del', 'style'), Output('dr-f-error', 'children'), Output('dr-f-error', 'is_open'),
           Output('dr-refresh', 'data', allow_duplicate=True),
-          Input({'type': 'dr-ev', 'id': ALL}, 'n_clicks'), Input('dr-add', 'n_clicks'), Input('dr-cancel', 'n_clicks'),
+          Input({'type': 'dr-ev', 'id': ALL, 'd': ALL}, 'n_clicks'), Input('dr-add', 'n_clicks'), Input('dr-cancel', 'n_clicks'),
           Input('dr-save', 'n_clicks'), Input('dr-del', 'n_clicks'),
           State('dr-edit-id', 'data'), State('dr-anchor', 'data'), State('dr-f-date', 'value'),
-          State('dr-f-start', 'value'), State('dr-f-end', 'value'), State('dr-f-title', 'value'),
+          State('dr-f-end-date', 'value'), State('dr-f-start', 'value'), State('dr-f-end', 'value'), State('dr-f-title', 'value'),
           State('dr-f-location', 'value'), State('dr-f-category', 'value'), State('dr-f-attendees', 'value'),
           State('dr-f-details', 'value'), State('dr-refresh', 'data'), State('dr-owner', 'data'),
           prevent_initial_call=True)
-def edit(_e, _a, _c, _s, _d, sid, anchor, d, start, end, title, loc, cat, att, details, n, owner):
+def edit(_e, _a, _c, _s, _d, sid, anchor, d, end_date, start, end, title, loc, cat, att, details, n, owner):
     nu = no_update
     trig = ctx.triggered_id
     if trig is None or not ctx.triggered[0]['value']:
-        return (nu,) * 16  # 보기가 다시 그려지며 일정 상자가 새로 생길 때의 빈 트리거
+        return (nu,) * 17  # 보기가 다시 그려지며 일정 상자가 새로 생길 때의 빈 트리거
     if isinstance(trig, dict):
         e = schedules.get(trig['id'])
         if e is None:
-            return (nu,) * 15 + ((n or 0) + 1,)
+            return (nu,) * 16 + ((n or 0) + 1,)
         meta = f"{'메일에서 가져옴' if e['source'] == 'mail' else '직접 입력'} · 최근 수정 {e['updated_at']}"
-        return (True, f"{e['date']} 일정", e['id'], e['date'], e['start_time'], e['end_time'], e['title'],
+        when = f"{e['date']} ~ {e['end_date']}" if e['end_date'] else e['date']
+        return (True, f"{when} 일정", e['id'], e['date'], e['end_date'], e['start_time'], e['end_time'], e['title'],
                 e['location'], e['category'], e['attendees'], e['details'], meta, {}, '', False, nu)
     if trig == 'dr-add':
-        return (True, f"{schedules.OWNERS[schedules.owner_of(owner)]} 일정 추가", None, anchor, '', '', '', '', '', '', '', '', {'display': 'none'}, '', False, nu)
+        return (True, f"{schedules.OWNERS[schedules.owner_of(owner)]} 일정 추가", None, anchor, '', '', '', '', '', '',
+                '', '', '', {'display': 'none'}, '', False, nu)
     if trig == 'dr-cancel':
-        return (False,) + (nu,) * 12 + ('', False, nu)
+        return (False,) + (nu,) * 13 + ('', False, nu)
     if trig == 'dr-del' and sid:
         schedules.delete(sid)
-        return (False,) + (nu,) * 12 + ('', False, (n or 0) + 1)
+        return (False,) + (nu,) * 13 + ('', False, (n or 0) + 1)
     if trig == 'dr-save':
+        if end_date and d and end_date < d:
+            return (nu,) * 14 + ('마지막 날이 첫날보다 앞입니다.', True, nu)
         try:
-            schedules.save({'date': d, 'start_time': start, 'end_time': end, 'title': title, 'location': loc,
+            schedules.save({'date': d, 'end_date': end_date, 'start_time': start, 'end_time': end, 'title': title, 'location': loc,
                             'category': cat, 'attendees': att, 'details': details}, sid, by=auth.current_name(),
                            owner=owner)
         except ValueError as ex:
-            return (nu,) * 13 + (str(ex), True, nu)
-        return (False,) + (nu,) * 12 + ('', False, (n or 0) + 1)
-    return (nu,) * 16
+            return (nu,) * 14 + (str(ex), True, nu)
+        return (False,) + (nu,) * 13 + ('', False, (n or 0) + 1)
+    return (nu,) * 17
 
 
 @callback(Output('dr-f-people', 'children'), Input('dr-f-attendees', 'value'), Input('dr-f-title', 'value'))

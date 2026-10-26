@@ -427,3 +427,72 @@ def test_mail_draft_uses_owner_name():
     schedules.save({'date': '2026-10-27', 'title': '면담'}, owner='people')
     d = __import__('services.outbox', fromlist=['x']).draft_schedule('2026-10-26', '2026-11-01', 'people')
     assert d['subject'].startswith('[피플팀장 일정]') and '면담' in d['table_html']
+
+
+# ── 여러 날 일정 ──────────────────────────────────────────────────────
+
+@pytest.mark.parametrize('line, start, end', [
+    ('10/27~10/31 미국 출장', '2026-10-27', '2026-10-31'),
+    ('10.27(월)-31(금) 하계 휴가', '2026-10-27', '2026-10-31'),
+    ('10월 30일부터 11월 3일까지 유럽 순방', '2026-10-30', '2026-11-03'),
+    ('10/30 ~ 3일 워크숍', '2026-10-30', '2026-11-03'),  # 일만 있으면 다음 달
+    ('2026-12-28 ~ 2027-01-02 연말 휴가', '2026-12-28', '2027-01-02'),
+    ('10/27 14:00-15:00 보고', '2026-10-27', ''),  # 시간 범위는 기간이 아님
+    ('10/27(월) 주간회의', '2026-10-27', ''),
+])
+def test_find_date_range(line, start, end):
+    from datetime import date
+    s, e, rest = schedules.find_date_range(line, date(2026, 10, 24))
+    assert (s, e) == (start, end)
+    assert line.split()[-1] in rest and '~' not in rest and '부터' not in rest
+
+
+def test_multi_day_event_saved_and_listed_on_overlap():
+    e = schedules.save({'date': '2026-10-27', 'end_date': '2026-10-31', 'title': '미국 출장'})
+    assert e['end_date'] == '2026-10-31'
+    assert schedules.save({'date': '2026-10-27', 'end_date': '2026-10-27', 'title': '하루'})['end_date'] == ''
+    # 다음 주 화면(10/29~)에도 걸친 일정이 보인다
+    assert [x['title'] for x in schedules.list_range('2026-10-29', '2026-11-04')] == ['미국 출장']
+    assert schedules.list_range('2026-11-01', '2026-11-04') == []
+    assert director_ui.on_day(e, '2026-10-30') and not director_ui.on_day(e, '2026-11-01')
+    week = str(director_ui.week_view(__import__('datetime').date(2026, 10, 26), schedules.list_range('2026-10-26', '2026-11-01')))
+    assert week.count('미국 출장') == 5 * 2  # 화~토 종일 줄에 날마다 (제목·title 속성)
+
+
+def test_rule_parsers_read_ranges():
+    tbl = '일자 | 시간 | 내용 | 장소\n10/27~10/31 |  | 미국 출장 | 워싱턴\n10/28 | 14:00 | 보고 | 원장실'
+    ev = schedules.table_parse(tbl, '2026-10-24')
+    assert [(e['date'], e['end_date'], e['title']) for e in ev] == [
+        ('2026-10-27', '2026-10-31', '미국 출장'), ('2026-10-28', '', '보고')]
+    blk = '26.10.27(월)~26.10.31(금) 해외 출장 (미국)\n26.11.03(화)\n 09:00-10:00 임원회의\n본관 7층 대회의실'
+    ev = schedules.block_parse(blk, '2026-10-24')
+    assert [(e['date'], e['end_date'], e['title'], e['start_time']) for e in ev] == [
+        ('2026-10-27', '2026-10-31', '해외 출장 (미국)', ''), ('2026-11-03', '', '임원회의', '09:00')]
+    assert schedules.rule_parse('10/27~10/31 | 종일 | 휴가', '2026-10-24')[0]['end_date'] == '2026-10-31'
+
+
+def test_apply_updates_end_date_of_same_event():
+    schedules.apply_events([{'date': '2026-10-27', 'end_date': '2026-10-30', 'title': '미국 출장'}])
+    r = schedules.apply_events([{'date': '2026-10-27', 'end_date': '2026-10-31', 'title': '미국 출장'}])
+    assert r['updated'] == 1
+    assert schedules.list_range('2026-10-27', '2026-10-27')[0]['end_date'] == '2026-10-31'
+    rows = schedules.preview([{'date': '2026-10-27', 'end_date': '2026-11-01', 'title': '미국 출장'}])
+    assert rows[0]['state'] == 'changed' and rows[0]['changed'] == ['end_date']
+
+
+def test_multi_day_boxes_have_unique_ids():
+    import json as _json
+    from datetime import date as _date
+    schedules.save({'date': '2026-10-27', 'end_date': '2026-10-29', 'title': '출장'})
+    events = schedules.list_range('2026-10-26', '2026-11-01')
+    ids = []
+
+    def walk(c):
+        if hasattr(c, 'id') and isinstance(getattr(c, 'id', None), dict) and c.id.get('type') == 'dr-ev':
+            ids.append(_json.dumps(c.id, sort_keys=True))
+        for ch in (getattr(c, 'children', None) or []) if isinstance(getattr(c, 'children', None), list) else \
+                ([c.children] if hasattr(c, 'children') and c.children is not None and not isinstance(c.children, str) else []):
+            walk(ch)
+    walk(director_ui.week_view(_date(2026, 10, 26), events))
+    walk(director_ui.month_view(_date(2026, 10, 26), events))
+    assert len(ids) == 6 and len(set(ids[:3])) == 3 and len(set(ids[3:])) == 3
