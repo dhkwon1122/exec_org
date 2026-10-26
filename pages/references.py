@@ -14,7 +14,7 @@ def layout(**_):
         ui.page_head('참고자료', '업무와 이력에 붙은 링크·파일·메모'),
         dbc.Row([
             dbc.Col(dbc.Input(id='rq', type='search', debounce=True,
-                              placeholder='검색: 자료 제목·메모·URL·파일명·업무명'), md=8),
+                              placeholder='검색: 자료 제목·메모·URL·파일명·업무명·컨플루언스 내용'), md=8),
             dbc.Col(dbc.Select(id='rkind', value='', options=[
                 {'label': '전체 유형', 'value': ''}, {'label': '링크', 'value': 'link'},
                 {'label': '파일', 'value': 'file'}, {'label': '메모', 'value': 'note'}]), md=4),
@@ -36,6 +36,7 @@ def search(q, kind):
                 html.Span(r['created_at'], className='small text-muted'),
             ], className='d-flex align-items-center'),
             ui.ref_target(r),
+            ui.confluence_box(r),
             html.Div(r['note'][:200], className='small mt-1', style={'whiteSpace': 'pre-wrap'}) if r['note'] else None,
             html.Div([*(['업무: ', dcc.Link(f"#{r['task_id']} {r['task_title']}", href=f"/task/{r['task_id']}")]
                         if r['task_id'] else ['임원 동향 기록']),

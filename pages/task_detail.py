@@ -8,7 +8,7 @@ from dash import ALL, Input, Output, State, callback, ctx, dcc, html, no_update
 from components import doc_ui, todo_ui, ui
 from components.history_form import (decode_text_upload, history_form, register_form_callbacks, save_history,
                                      task_options)
-from services import auth, doc_versions, llm, mailbox, outbox, store
+from services import auth, confluence, doc_versions, llm, mailbox, outbox, store
 
 dash.register_page(__name__, path_template='/task/<task_id>', name='업무 상세', title='업무 기록 · 상세')
 
@@ -294,6 +294,7 @@ def render(_, _t, _h, tid):
                            size='sm', className='text-muted p-0', title='삭제'),
             ], className='d-flex align-items-center'),
             ui.ref_target(r),
+            ui.confluence_box(r, {'type': 'r-conf', 'id': r['id']}),
             html.Div(r['note'], className='small mt-1', style={'whiteSpace': 'pre-wrap'}) if r['note'] else None,
             html.Div([html.I(className='bi bi-clock-history me-1'), '이력에 첨부: ',
                       hist_titles.get(r['history_id'], f"#{r['history_id']}")]
@@ -482,10 +483,29 @@ def add_reference(_, tid, kind, title, url, note, contents, fname, n):
     if kind == 'file' and contents:
         data = base64.b64decode(contents.split(',', 1)[1])
     try:
-        store.add_reference(tid, kind, title or '', url or '', note or '', fname or '', data, author or '')
+        ref = store.add_reference(tid, kind, title or '', url or '', note or '', fname or '', data, author or '')
     except ValueError as e:
         return (no_update,) * 6 + (str(e), True)
+    if kind == 'link' and confluence.is_configured() and confluence.is_confluence_url(ref['url']):
+        try:  # 컨플루언스 페이지면 바로 읽어 붙인다 (실패해도 자료는 남고, 목록에서 이유와 '다시 읽기')
+            confluence.refresh_reference(ref['id'])
+        except confluence.ConfluenceError:
+            pass
     return (n or 0) + 1, '', '', '', None, None, '', False
+
+
+@callback(Output('td-refresh', 'data', allow_duplicate=True), Input({'type': 'r-conf', 'id': ALL}, 'n_clicks'),
+          State('td-refresh', 'data'), prevent_initial_call=True)
+def reread_confluence(_, n):
+    """컨플루언스 링크 참고자료 다시 읽기 (실패 이유는 목록에 남는다)."""
+    trig = ctx.triggered_id
+    if not trig or not ctx.triggered[0]['value']:
+        return no_update
+    try:
+        confluence.refresh_reference(trig['id'])
+    except confluence.ConfluenceError:
+        pass
+    return (n or 0) + 1
 
 
 # ── 업무 연결 ─────────────────────────────────────────────────────────

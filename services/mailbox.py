@@ -26,7 +26,7 @@ from email.utils import parseaddr
 from sqlalchemy import func, or_, select, update
 from sqlalchemy.exc import IntegrityError
 
-from services import absences, db, doc_summary, doc_versions, llm, mail_text, schedules, store
+from services import absences, confluence, db, doc_summary, doc_versions, llm, mail_text, schedules, store
 from services.db import InboundMail, MailRule, Task
 
 log = logging.getLogger(__name__)
@@ -615,6 +615,12 @@ def run_actions(mail_id: int, actions: list[str], by: str = '', feedback: str = 
     if not actions:
         raise ValueError('맡길 일을 고르세요.')
     sug, done, fields = dict(m['suggestion']), {}, {}
+    if llm.is_configured():  # 본문의 컨플루언스 링크는 페이지 내용까지 AI 에게 (메일 원문은 그대로 둔다)
+        extra, notes = confluence.text_for_ai(m['body'])
+        if notes:
+            sug['confluence'] = notes
+        if extra:
+            m = {**m, 'body': m['body'] + extra}
     feedback = (feedback or '').strip()[:2000]
     asked_before = set(sug.get('requested') or [])
     prev = _previous_results(m)

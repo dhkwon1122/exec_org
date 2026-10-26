@@ -10,7 +10,7 @@ from dash import ALL, Input, Output, State, callback, ctx, dash_table, dcc, html
 
 from components import todo_ui, ui
 from components.history_form import parse_uploads, people_options, register_form_callbacks, task_options
-from services import auth, db, enrich, llm, store
+from services import auth, confluence, db, enrich, llm, store
 
 
 def _opts(values):
@@ -128,6 +128,7 @@ def edit_history(_e, _c, _s, _r, _d, eid, etype, when, title, summary, keywords,
                                     history_id=eid, session=s)
     except ValueError as e:
         return (True,) + (nu,) * 7 + (str(e), True) + (nu,) * 10
+    confluence.read_new_references_later()
     if trig == 'he-regen':
         enrich.submit(eid)
     return (False,) + (nu,) * 7 + ('', False, (n or 0) + 1, nu, '') + clear_new + (nu,) * 4

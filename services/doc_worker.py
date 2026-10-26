@@ -17,7 +17,7 @@ from datetime import datetime
 
 from sqlalchemy import and_, func, or_, select
 
-from services import db, doc_summary, doc_text, llm
+from services import confluence, db, doc_summary, doc_text, llm
 from services.db import InboundMail, MailAttachment
 
 log = logging.getLogger(__name__)
@@ -122,7 +122,7 @@ def step(now: float | None = None) -> bool:
     minutes = idle_minutes_setting()
     if not minutes or idle_seconds(now) < minutes * 60 or now < _pause_until:
         return False
-    if _fill_texts():
+    if _fill_texts() or confluence.read_new_references(limit=3):  # 예전 첨부 글자 · 아직 안 읽은 컨플루언스 링크
         return True
     if not llm.is_configured():
         return False

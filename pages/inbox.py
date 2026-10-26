@@ -646,6 +646,11 @@ def render_ai(sel, _):
         html.Div([dbc.Badge(f'#{k}', color='light', text_color='dark', className='me-1 border')
                   for k in sm.get('keywords', [])], className='mt-1') if sm.get('keywords') else None,
     ], color='light', className='small mb-0') if sm else None
+    conf = m['suggestion'].get('confluence')
+    if conf:  # 본문 속 컨플루언스 링크 — 페이지 내용까지 AI 에게 줬는지
+        summary = html.Div([summary, html.Div([html.I(className='bi bi-journal-text me-1'),
+                                               '함께 읽은 컨플루언스: ' + ' · '.join(conf)],
+                                              className='small text-muted mt-1')])
     skipped = m['suggestion'].get('docs_skipped') if 'docs' in asked else None
     if skipped:
         summary = html.Div([summary, html.Details([

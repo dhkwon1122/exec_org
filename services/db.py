@@ -130,8 +130,27 @@ class Reference(Base):
     file_path = Column(String(500), default='')  # UPLOAD_DIR 기준 저장 경로
     note = Column(Text, default='')
     created_at = Column(DateTime, default=_now)
+    # 컨플루언스 링크면 읽어 온 페이지 내용 (services/confluence.py) — content_at 이 비면 아직 안 읽음
+    content = Column(Text, default='')
+    content_at = Column(DateTime)
+    content_error = Column(String(500), default='')
 
     task = relationship('Task', back_populates='references')
+
+
+class ConfluencePage(Base):
+    """읽어 온 컨플루언스 페이지 (주소마다) — 같은 페이지를 거듭 부르지 않게 (services/confluence.py)."""
+    __tablename__ = 'confluence_pages'
+
+    id = Column(Integer, primary_key=True)
+    url = Column(String(1000), nullable=False, unique=True)
+    page_id = Column(String(30), default='', index=True)
+    title = Column(String(500), default='')
+    space = Column(String(100), default='')
+    version = Column(Integer, default=0)
+    text = Column(Text, default='')
+    error = Column(String(500), default='')
+    fetched_at = Column(DateTime)
 
 
 class TaskLink(Base):
