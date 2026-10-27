@@ -12,14 +12,26 @@ tea-meeting-agenda(confluence_agenda/web/docx_export.py)의 사내 Confluence �
 
 페이지 주소 형태: …/pages/123456/…, ?pageId=123456, /display/SPACE/제목, /x/AbCd(짧은 링크), 페이지 id 숫자.
 읽은 내용은 confluence_pages 에 남겨(CACHE_MINUTES 동안) 같은 페이지를 거듭 부르지 않는다.
+
+호출 한도: 사내 API 는 분당 CONFLUENCE_RATE_PER_MINUTE(기본 15)회. 모든 호출이 _acquire() 를 거치고, 여러 gunicorn
+워커·스레드가 같이 세도록 DATA_DIR/.confluence_rate.json 에 최근 1분 호출 시각을 파일 잠금으로 남긴다.
+  - 화면에서 부르는 호출(interactive): 자리가 날 때까지 최대 INTERACTIVE_WAIT 초 기다리고, 그래도 없으면 RateLimited.
+  - 백그라운드(with background(): — 워치 확인·링크 읽기·기록 AI 정리): 한도에서 CONFLUENCE_RATE_RESERVE(기본 3)회를
+    화면용으로 남겨 두고 자리가 날 때까지 기다린다.
+  - 429 를 받으면 Retry-After(없으면 60초) 동안 모두 멈추고, 백그라운드는 그 뒤 한 번 다시 부른다.
 연결이 안 될 때: python -m services.confluence <페이지 주소>
 """
 import base64
+import contextvars
+import fcntl
+import json
 import logging
 import os
 import re
 import sys
+import time
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 from datetime import datetime, timedelta
 from pathlib import Path
 from urllib.parse import unquote_plus, urlparse
@@ -67,6 +79,34 @@ def is_confluence_url(url: str) -> bool:
 _URL = re.compile(r'https?://[^\s<>"\'\])}]+')
 
 
+def browser_base() -> str:
+    """사용자가 브라우저로 여는 위키 주소 — REST 게이트웨이 주소(CONFLUENCE_URL)와 다를 수 있다."""
+    return (_env('BROWSER_BASE_URL') or _normalize_base_url(_env('URL'))).rstrip('/')
+
+
+def page_url(page_id: str) -> str:
+    """페이지를 브라우저로 여는 주소."""
+    base = browser_base()
+    return f'{base}/pages/viewpage.action?pageId={page_id}' if base and page_id else ''
+
+
+def _is_api_url(url: str) -> bool:
+    """REST 호출 주소인지 — /rest/api/ 이거나, 브라우저 주소와 다른 REST 게이트웨이 주소로 시작."""
+    u = (url or '').lower()
+    rest = _normalize_base_url(_env('URL')).lower()
+    return '/rest/api/' in u or bool(rest and rest != browser_base().lower() and u.startswith(rest))
+
+
+def display_url(url: str, page_id: str = '') -> str:
+    """화면·메일에 보여 줄 주소 — API 주소면 그 페이지를 브라우저로 여는 주소로. 컨플루언스가 아니면 그대로."""
+    if not url or not is_confluence_url(url) or not _is_api_url(url):
+        return url
+    if not page_id:
+        m = re.search(r'/rest/api/content/(\d+)', url)
+        page_id = m.group(1) if m else (page_ref(url)[1] if page_ref(url)[0] == 'id' else '')
+    return page_url(page_id) or url
+
+
 def find_urls(text: str) -> list[str]:
     """글 속 컨플루언스 주소 (순서대로, 중복 없이)."""
     out = []
@@ -95,7 +135,7 @@ def page_ref(url: str) -> tuple:
     url = (url or '').strip()
     if url.isdigit():
         return 'id', url
-    for pat in (r'/pages/(\d+)(?:/|$|\?|#)', r'[?&]pageId=(\d+)'):
+    for pat in (r'/pages/(\d+)(?:/|$|\?|#)', r'[?&]pageId=(\d+)', r'/rest/api/content/(\d+)'):
         m = re.search(pat, url)
         if m:
             return 'id', m.group(1)
@@ -152,9 +192,122 @@ class ConfluenceError(RuntimeError):
     """설정 없음·연결 실패·권한 없음 — 메시지는 화면에 그대로 보여 준다."""
 
 
+class RateLimited(ConfluenceError):
+    """호출 한도 — 잠시 뒤 다시 하면 된다 (백그라운드가 이어서 읽는다)."""
+
+
+# ── 호출 한도 ─────────────────────────────────────────────────────────
+
+INTERACTIVE_WAIT = 15  # 초 — 화면이 이보다 오래 기다리지 않게
+BACKGROUND_WAIT = 15 * 60
+_background = contextvars.ContextVar('confluence_background', default=False)
+
+
+def rate_per_minute() -> int:
+    try:
+        return max(1, int(_env('RATE_PER_MINUTE', '15')))
+    except ValueError:
+        return 15
+
+
+def _reserve() -> int:
+    try:
+        return max(0, min(rate_per_minute() - 1, int(_env('RATE_RESERVE', '3'))))
+    except ValueError:
+        return 3
+
+
+@contextmanager
+def background():
+    """이 안의 호출은 백그라운드 몫 — 화면용 몫을 남기고, 자리가 날 때까지 기다린다."""
+    token = _background.set(True)
+    try:
+        yield
+    finally:
+        _background.reset(token)
+
+
+def _rate_file() -> str:
+    return os.path.join(db.DATA_DIR, '.confluence_rate.json')
+
+
+def _with_rate_state(fn):
+    """잠근 상태 파일 {'calls': [시각…], 'blocked_until': 시각} 을 fn(state, now) 로 고치고 그 결과를 돌려준다."""
+    os.makedirs(db.DATA_DIR, exist_ok=True)
+    with open(_rate_file(), 'a+', encoding='utf-8') as f:
+        fcntl.flock(f, fcntl.LOCK_EX)
+        try:
+            f.seek(0)
+            try:
+                state = json.loads(f.read() or '{}')
+            except ValueError:
+                state = {}
+            now = time.time()
+            state['calls'] = [t for t in state.get('calls', []) if now - t < 60]
+            result = fn(state, now)
+            f.seek(0)
+            f.truncate()
+            f.write(json.dumps(state))
+            f.flush()
+            return result
+        finally:
+            fcntl.flock(f, fcntl.LOCK_UN)
+
+
+def _acquire() -> None:
+    """호출 한 번 자리를 잡는다 — 없으면 기다리고, 기다릴 수 있는 시간을 넘으면 RateLimited."""
+    bg = _background.get()
+    limit = rate_per_minute() - (_reserve() if bg else 0)
+    deadline = time.time() + (BACKGROUND_WAIT if bg else INTERACTIVE_WAIT)
+
+    def take(state, now):
+        calls = state['calls']
+        blocked = state.get('blocked_until', 0)
+        if now >= blocked and len(calls) < limit:
+            calls.append(now)
+            return 0.0
+        free_at = sorted(calls)[len(calls) - limit] + 60 if len(calls) >= limit else now
+        return max(blocked, free_at) - now
+
+    while True:
+        wait = _with_rate_state(take)
+        if wait <= 0:
+            return
+        if time.time() + wait > deadline:
+            raise RateLimited(f'컨플루언스 호출 한도(분당 {rate_per_minute()}회) — 약 {int(wait) + 1}초 뒤 다시 하세요. '
+                              '읽지 못한 링크는 백그라운드에서 이어서 읽습니다.')
+        time.sleep(min(wait, 5) + 0.05)
+
+
+def _block(seconds: float) -> None:
+    def put(state, now):
+        state['blocked_until'] = max(state.get('blocked_until', 0), now + seconds)
+    _with_rate_state(put)
+
+
+def calls_last_minute() -> int:
+    return _with_rate_state(lambda state, now: len(state['calls']))
+
+
 def _get(path: str, params: dict | None = None) -> dict:
     if not is_configured():
         raise ConfluenceError('컨플루언스가 설정되지 않았습니다 (.env 의 CONFLUENCE_URL·CONFLUENCE_API_TOKEN).')
+    for attempt in range(2):
+        _acquire()
+        resp = _request(path, params)
+        if resp.status_code != 429:
+            break
+        try:
+            retry = float(resp.headers.get('Retry-After') or 60)
+        except (TypeError, ValueError):
+            retry = 60.0
+        _block(retry)  # 다른 워커·스레드도 같이 멈춘다
+        if attempt or not _background.get():
+            raise RateLimited(f'컨플루언스 호출 한도 초과(429) — 약 {int(retry)}초 뒤 다시 하세요.')
+    return _parse(resp)
+
+
+def _request(path: str, params: dict | None):
     url = f"{_normalize_base_url(_env('URL'))}/rest/api/{path}"
     try:
         resp = requests.get(url, params=params, headers=_headers(), timeout=30, verify=_ssl_verify(),
@@ -165,6 +318,10 @@ def _get(path: str, params: dict | None = None) -> dict:
         raise ConfluenceError(f'컨플루언스 연결 실패(SSL){hint}') from e
     except (requests.RequestException, OSError) as e:
         raise ConfluenceError(f'컨플루언스 연결 실패: {type(e).__name__} — 주소·프록시(CONFLUENCE_NO_PROXY)를 확인하세요.') from e
+    return resp
+
+
+def _parse(resp) -> dict:
     if resp.status_code == 401:
         raise ConfluenceError('컨플루언스 인증 실패(401) — CONFLUENCE_API_TOKEN 을 확인하세요.')
     if resp.status_code == 403:
@@ -223,9 +380,9 @@ def read(url: str, force: bool = False) -> dict:
         if fresh and not force:
             return _page_dict(p)
         try:
-            data, error = _fetch(url), ''
+            data, error, failure = _fetch(url), '', None
         except ConfluenceError as e:
-            data, error = {}, str(e)
+            data, error, failure = {}, str(e), e
         if p is None:
             p = ConfluencePage(url=url[:1000])
             s.add(p)
@@ -235,8 +392,8 @@ def read(url: str, force: bool = False) -> dict:
         p.error = error[:500]
         p.fetched_at = datetime.now().replace(microsecond=0)
         s.commit()
-        if error:
-            raise ConfluenceError(error)
+        if failure is not None:
+            raise failure  # 호출 한도(RateLimited)인지 그대로 알 수 있게
         return _page_dict(p)
 
 
@@ -259,30 +416,62 @@ def text_for_ai(text: str) -> tuple[str, list[str]]:
 
 # ── 참고자료 링크 ─────────────────────────────────────────────────────
 
+SUMMARY_SYSTEM = """너는 임원실 직원이 참고자료로 붙인 컨플루언스 페이지를 요약하는 비서다.
+무엇에 관한 문서인지와 핵심 내용(결론·결정·수치·일정·담당)을 한국어 3~5문장으로 쓴다. 문서에 없는 내용은 쓰지 않는다.
+요약 글만 출력한다."""
+
+
+def summarize_text(title: str, text: str) -> str:
+    """페이지 내용 → AI 요약 (LLM 이 없으면 '')."""
+    from services import llm
+    if not llm.is_configured() or not (text or '').strip():
+        return ''
+    body = text[:llm.MAX_INPUT_CHARS]
+    try:
+        return llm.chat(SUMMARY_SYSTEM, f"페이지 제목: {title}\n\n본문:\n<<<\n{body}\n>>>").strip()[:3000]
+    except llm.LLMError as e:
+        return f'요약 실패: {str(e)[:200]}'
+
+
 def refresh_reference(ref_id: int) -> dict:
-    """컨플루언스 링크 참고자료의 내용을 (다시) 읽어 붙인다. 제목이 주소 그대로면 페이지 제목으로."""
+    """컨플루언스 링크 참고자료의 내용을 (다시) 읽어 붙인다. 제목이 주소 그대로면 페이지 제목으로,
+    주소가 API 주소면 브라우저로 여는 주소로 바꾸고, 내용이 바뀌었거나 요약이 없으면 AI 요약을 붙인다."""
     with db.SessionLocal() as s:
         r = s.get(Reference, ref_id)
         if r is None or r.kind != 'link' or not is_confluence_url(r.url):
             raise ConfluenceError('컨플루언스 링크가 아닙니다.')
         url = r.url
+    limited = False
     try:
         p, error = read(url, force=True), ''
+    except RateLimited as e:
+        p, error, limited = None, str(e), True
     except ConfluenceError as e:
         p, error = None, str(e)
     with db.SessionLocal() as s:
         r = s.get(Reference, ref_id)
         if r is None:
             raise ConfluenceError('참고자료를 찾을 수 없습니다.')
-        r.content_at = datetime.now().replace(microsecond=0)
+        # 한도에 걸린 것은 '아직 안 읽음'으로 둬서 백그라운드(read_new_references)가 이어 읽는다
+        r.content_at = None if limited else datetime.now().replace(microsecond=0)
         r.content_error = error[:500]
         if p:
+            changed = p['text'] != (r.content or '') or not r.content_summary
             r.content = p['text']
             if p['title'] and (not r.title or r.title == r.url):
                 r.title = p['title'][:300]
+            r.url = display_url(r.url, p['page_id'])  # 사용자에게는 페이지 주소로
         s.commit()
+    if p and changed:  # AI 요약은 DB 를 잡지 않은 채로 (몇 초 걸린다)
+        summary = summarize_text(p['title'], p['text'])
+        if summary:
+            with db.SessionLocal() as s:
+                r = s.get(Reference, ref_id)
+                if r is not None:
+                    r.content_summary = summary
+                    s.commit()
     if error:
-        raise ConfluenceError(error)
+        raise (RateLimited if limited else ConfluenceError)(error)
     return p
 
 
@@ -300,16 +489,43 @@ def read_new_references(limit: int = 10) -> int:
         if is_confluence_url(url):
             try:
                 refresh_reference(ref_id)
+            except RateLimited:
+                break  # 한도 — 다음 기회에
             except ConfluenceError:
                 pass  # 실패도 content_at·content_error 로 남아 화면에서 다시 읽을 수 있다
             n += 1
     return n
 
 
+def summarize_missing(limit: int = 3) -> int:
+    """읽어 둔 내용은 있는데 AI 요약이 없는 컨플루언스 참고자료(요약 기능 전에 읽은 것 등)를 요약 — 컨플루언스는 부르지 않는다."""
+    from services import llm
+    if not llm.is_configured():
+        return 0
+    with db.SessionLocal() as s:
+        rows = s.execute(select(Reference.id, Reference.title, Reference.content).where(
+            Reference.kind == 'link', Reference.content != '', Reference.content.is_not(None),
+            (Reference.content_summary == '') | Reference.content_summary.is_(None))
+            .order_by(Reference.id.desc()).limit(limit)).all()
+    for ref_id, title, text in rows:
+        summary = summarize_text(title, text) or '요약 없음'
+        with db.SessionLocal() as s:
+            r = s.get(Reference, ref_id)
+            if r is not None:
+                r.content_summary = summary
+                s.commit()
+    return len(rows)
+
+
+def _read_new_references_bg() -> int:
+    with background():
+        return read_new_references()
+
+
 def read_new_references_later() -> None:
     """저장 화면이 기다리지 않게 백그라운드에서."""
     if is_configured():
-        _executor.submit(read_new_references)
+        _executor.submit(_read_new_references_bg)
 
 
 def main(argv: list[str]) -> int:
@@ -321,6 +537,7 @@ def main(argv: list[str]) -> int:
     print('컨플루언스로 볼 주소:', ', '.join(prefixes()) or '-')
     print('SSL 검증:', _ssl_verify(), '| 프록시 무시:', bool(_proxies()))
     print('보낼 헤더:', ', '.join(sorted(_headers())))
+    print(f'호출 한도: 분당 {rate_per_minute()}회 (백그라운드는 {_reserve()}회를 화면용으로 남김) · 최근 1분 호출 {calls_last_minute()}회')
     if not argv:
         return 0
     url = argv[0]

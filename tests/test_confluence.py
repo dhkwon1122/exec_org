@@ -139,3 +139,144 @@ def test_mail_ai_reads_linked_page(env, monkeypatch, tmp_path):
     assert '장비 | 2억' in seen[0]
     m = mailbox.get_mail(mid)
     assert m['suggestion']['confluence'] == ["컨플루언스 '2027 예산 지침'"] and '장비' not in m['body']
+
+
+# ── 호출 한도 (분당 N회) ──────────────────────────────────────────────
+
+class Clock:
+    def __init__(self):
+        self.t = 1_000_000.0
+
+    def time(self):
+        return self.t
+
+    def sleep(self, s):
+        self.t += s
+
+
+@pytest.fixture
+def clock(monkeypatch):
+    c = Clock()
+    monkeypatch.setattr(confluence.time, 'time', c.time)
+    monkeypatch.setattr(confluence.time, 'sleep', c.sleep)
+    return c
+
+
+def test_interactive_calls_wait_briefly_then_rate_limited(env, clock, monkeypatch):
+    monkeypatch.setenv('CONFLUENCE_RATE_PER_MINUTE', '5')
+    for i in range(5):
+        confluence._get(f'content/{i}')
+    assert confluence.calls_last_minute() == 5
+    with pytest.raises(confluence.RateLimited, match='분당 5회'):
+        confluence._get('content/9')  # 자리가 나려면 60초 — 화면은 15초까지만 기다린다
+    assert len(env) == 5 and clock.t == 1_000_000.0
+    clock.t += 50  # 50초 뒤엔 10초만 기다리면 된다
+    confluence._get('content/9')
+    assert len(env) == 6 and 1_000_060 <= clock.t < 1_000_061
+
+
+def test_background_leaves_room_for_screen(env, clock, monkeypatch):
+    monkeypatch.setenv('CONFLUENCE_RATE_PER_MINUTE', '5')
+    monkeypatch.setenv('CONFLUENCE_RATE_RESERVE', '2')
+    with confluence.background():
+        for i in range(3):
+            confluence._get(f'content/{i}')
+        start = clock.t
+        confluence._get('content/3')  # 백그라운드 몫(3회)을 다 써서 1분 기다림
+        assert clock.t - start >= 59
+    clock.t = start + 1  # (같은 1분 안의) 화면 호출은 남겨 둔 몫으로 바로
+    confluence._get('content/4')
+    assert len(env) == 5
+
+
+def test_429_blocks_everyone_and_background_retries(env, clock, monkeypatch):
+    calls = []
+
+    class R429:
+        status_code, text, headers = 429, '', {'Retry-After': '30'}
+
+    real = confluence.requests.get
+
+    def flaky(url, params=None, **kw):
+        calls.append(url)
+        return R429() if len(calls) == 1 else real(url, params, **kw)
+
+    monkeypatch.setattr(confluence.requests, 'get', flaky)
+    with pytest.raises(confluence.RateLimited, match='429'):
+        confluence._get('content/1')  # 화면 호출은 다시 하지 않고 알림
+    with pytest.raises(confluence.RateLimited):
+        confluence._get('content/2')  # 30초 동안 모두 멈춤 (15초 넘게 기다려야 함)
+    calls.clear()
+    with confluence.background():
+        t0 = clock.t
+        assert confluence._get('content/3')['id'] == '3'  # 429 → 30초 기다렸다 다시
+        assert clock.t - t0 >= 30 and len(calls) == 2
+
+
+def test_rate_limited_reference_is_left_for_background(env, clock, monkeypatch):
+    monkeypatch.setenv('CONFLUENCE_RATE_PER_MINUTE', '1')
+    t = store.create_task('예산')
+    a = store.add_reference(t['id'], 'link', url=f'{WIKI}/pages/1')
+    b = store.add_reference(t['id'], 'link', url=f'{WIKI}/pages/2')
+    confluence.refresh_reference(a['id'])
+    with pytest.raises(confluence.RateLimited):
+        confluence.refresh_reference(b['id'])
+    r = store.get_reference(b['id'])
+    assert r['content_at'] == '' and '호출 한도' in r['content_error']  # 아직 안 읽음 → 백그라운드가 이어 읽음
+    assert confluence.read_new_references() == 0  # 화면 몫으로는 여전히 한도 — 다음 기회에
+    with confluence.background():
+        monkeypatch.setenv('CONFLUENCE_RATE_RESERVE', '0')
+        assert confluence.read_new_references() == 1
+    assert store.get_reference(b['id'])['content']
+
+
+# ── 참고자료 요약 · 보여 줄 주소 ─────────────────────────────────────
+
+def test_display_url_maps_api_address_to_page(monkeypatch):
+    # CONFLUENCE_URL 은 REST 게이트웨이(api.wiki…), 사용자는 wiki… 로 연다
+    assert confluence.page_url('5') == f'{WIKI}/pages/viewpage.action?pageId=5'
+    assert confluence.display_url('https://api.wiki.example.com/rest/api/content/123?expand=body') == \
+        f'{WIKI}/pages/viewpage.action?pageId=123'
+    assert confluence.display_url('https://api.wiki.example.com/pages/viewpage.action?pageId=7') == \
+        f'{WIKI}/pages/viewpage.action?pageId=7'
+    keep = f'{WIKI}/display/EXEC/주간보고'
+    assert confluence.display_url(keep) == keep  # 이미 페이지 주소
+    assert confluence.display_url('https://naver.com/rest/api/x') == 'https://naver.com/rest/api/x'
+
+
+def test_reference_gets_summary_and_page_url(env, monkeypatch):
+    asked = []
+    monkeypatch.setattr(llm, 'is_configured', lambda: True)
+    monkeypatch.setattr(llm, 'chat', lambda system, user, temperature=0.2: asked.append(user) or
+                        '2027 예산 지침 — 총액 3억 이내, 장비 2억.')
+    t = store.create_task('예산')
+    ref = store.add_reference(t['id'], 'link', url='https://api.wiki.example.com/rest/api/content/123456')
+    confluence.refresh_reference(ref['id'])
+    r = store.get_reference(ref['id'])
+    assert r['content_summary'] == '2027 예산 지침 — 총액 3억 이내, 장비 2억.'
+    assert r['url'] == f'{WIKI}/pages/viewpage.action?pageId=123456' and r['title'] == '2027 예산 지침'
+    assert '장비 | 2억' in asked[0]
+    confluence.refresh_reference(ref['id'])  # 내용이 그대로면 다시 요약하지 않는다
+    assert len(asked) == 1
+    assert [x['id'] for x in store.list_references(query='3억 이내')] == [ref['id']]  # 요약으로도 검색
+    box = str(ui_box(r))
+    assert '2027 예산 지침 — 총액 3억' in box and '원문 보기' in box
+
+
+def ui_box(r):
+    from components import ui
+    return ui.confluence_box(r, {'type': 'r-conf', 'id': r['id']})
+
+
+def test_summarize_missing_for_refs_read_before(env, monkeypatch):
+    t = store.create_task('예산')
+    ref = store.add_reference(t['id'], 'link', url=f'{WIKI}/pages/1')
+    confluence.refresh_reference(ref['id'])  # LLM 없을 때 읽음 → 요약 없음
+    assert store.get_reference(ref['id'])['content_summary'] == ''
+    n_calls = len(env)
+    monkeypatch.setattr(llm, 'is_configured', lambda: True)
+    monkeypatch.setattr(llm, 'chat', lambda *a, **k: '요약됨')
+    assert confluence.summarize_missing() == 1
+    assert store.get_reference(ref['id'])['content_summary'] == '요약됨'
+    assert len(env) == n_calls  # 컨플루언스는 부르지 않음
+    assert confluence.summarize_missing() == 0

@@ -126,7 +126,7 @@ def _ref_dict(r: Reference) -> dict:
         'id': r.id, 'task_id': r.task_id, 'history_id': r.history_id, 'kind': r.kind, 'title': r.title, 'url': r.url or '',
         'file_name': r.file_name or '', 'file_path': r.file_path or '', 'note': r.note or '',
         'created_at': _dt(r.created_at), 'content': r.content or '', 'content_at': _dt(r.content_at),
-        'content_error': r.content_error or '',
+        'content_error': r.content_error or '', 'content_summary': r.content_summary or '',
     }
 
 
@@ -793,7 +793,8 @@ def list_references(task_id: int | None = None, query: str = '', kind: str = '')
             like = f'%{query.strip()}%'
             stmt = stmt.where(or_(Reference.title.like(like), Reference.note.like(like),
                                   Reference.url.like(like), Reference.file_name.like(like),
-                                  Reference.content.like(like), Task.title.like(like)))
+                                  Reference.content.like(like), Reference.content_summary.like(like),
+                                  Task.title.like(like)))
         rows = s.execute(stmt.order_by(Reference.created_at.desc(), Reference.id.desc()))
         return [{**_ref_dict(r), 'task_title': title or ''} for r, title in rows]
 

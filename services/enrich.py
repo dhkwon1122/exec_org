@@ -22,7 +22,8 @@ def enrich_entry(entry_id: int, token: str | None = None) -> None:
     task = store.get_task(entry['task_id']) if entry['task_id'] else None
     try:
         people = [f"{p['name']} {p['position']}".strip() for p in entry['people']]
-        extra, _ = confluence.text_for_ai(entry['content'])  # 원문에 컨플루언스 링크가 있으면 그 페이지도 함께
+        with confluence.background():  # 원문에 컨플루언스 링크가 있으면 그 페이지도 함께 (호출 한도 — 백그라운드 몫)
+            extra, _ = confluence.text_for_ai(entry['content'])
         result = llm.analyze_record(entry['content'] + extra, task['title'] if task else '', entry['entry_type'], people,
                                    reference_date=entry['occurred_at'][:10] or None)
     except Exception as e:  # noqa: BLE001 — 어떤 실패든 기록에 남기고 화면에서 재시도

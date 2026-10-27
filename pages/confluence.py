@@ -14,6 +14,7 @@ def layout(**_):
     return html.Div([
         ui.page_head('컨플루언스', '지켜보는 공간·페이지의 변경'),
         dcc.Store(id='cf-refresh', data=0),
+        dcc.Interval(id='cf-poll', interval=4000, disabled=True),  # 백그라운드 확인이 도는 동안 다시 그리기
         html.Div(id='cf-config', className='mb-2'),
         dbc.Row([
             dbc.Col(dbc.Card(dbc.CardBody([
@@ -110,8 +111,9 @@ def notify_sidebar(_, n):
 
 
 @callback(Output('cf-config', 'children'), Output('cf-watches', 'children'), Output('cf-updates', 'children'),
-          Output('cf-last', 'children'), Input('cf-refresh', 'data'), Input('cf-filter', 'value'))
-def render(_, flt):
+          Output('cf-last', 'children'), Output('cf-poll', 'disabled'),
+          Input('cf-refresh', 'data'), Input('cf-filter', 'value'), Input('cf-poll', 'n_intervals'))
+def render(_, flt, _poll):
     watches = cw.list_watches()
     wv = html.Div([_watch_row(w) for w in watches]) if watches else \
         html.Div('아직 지켜보는 곳이 없습니다. 공간 키나 페이지 주소를 넣으세요.', className='small text-muted')
@@ -123,7 +125,11 @@ def render(_, flt):
     last = (f"{every}분마다 자동 확인" if every and confluence.is_configured() else '자동 확인 꺼짐') + \
         (f" · 마지막 {lr['at']} 새 변경 {lr.get('new', 0)}건" if lr else '') + \
         (f" · 실패: {'; '.join(lr.get('errors', []))[:120]}" if lr and lr.get('errors') else '')
-    return _config_note(), wv, uv, last
+    running = cw.is_running()
+    if running:
+        last = [dbc.Spinner(size='sm', spinner_class_name='me-1'),
+                f"확인 중 — 호출 한도(분당 {confluence.rate_per_minute()}회)를 지키느라 몇 분 걸릴 수 있습니다. ", last]
+    return _config_note(), wv, uv, last, not running
 
 
 @callback(Output('cf-refresh', 'data', allow_duplicate=True), Output('cf-add-msg', 'children'),
@@ -137,11 +143,9 @@ def add(n, target, children, r):
         w = cw.add_watch(target or '', bool(children), auth.current_name())
     except (ValueError, confluence.ConfluenceError) as e:
         return no_update, str(e), True, 'warning', no_update
-    try:  # 바로 한 번 확인 (최근 며칠 변경)
-        k = cw.check_watch(w['id'])
-        msg = f"추가했습니다 — 최근 {cw.first_days()}일 변경 {k}건"
-    except confluence.ConfluenceError as e:
-        msg = f'추가했지만 확인은 실패: {e}'
+    started = cw.run_later(w['id'])  # 최근 며칠 변경을 백그라운드로 모은다 (호출 한도 때문에 화면이 기다리지 않게)
+    msg = (f"추가했습니다 — 최근 {cw.first_days()}일 변경을 모으는 중입니다." if started else
+           '추가했습니다 — 지금 도는 확인이 끝난 뒤 다음 확인 때 함께 모읍니다.')
     return (r or 0) + 1, msg, True, 'success', ''
 
 
@@ -156,8 +160,7 @@ def actions(_c, _d, _a, _s, _all, flt, r):
         return no_update, no_update
     msg = no_update
     if trig == 'cf-check':
-        res = cw.run_once()
-        msg = f"새 변경 {res.get('new', 0)}건" + (f" · 실패 {len(res['errors'])}곳" if res.get('errors') else '')
+        msg = '확인을 시작했습니다.' if cw.run_later() else '이미 확인하는 중입니다.'
     elif trig == 'cf-seen-all':
         ids = [u['id'] for u in cw.list_updates(unseen_only=True)] if flt == 'unseen' else None
         cw.mark_seen(ids)
