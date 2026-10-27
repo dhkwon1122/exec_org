@@ -15,6 +15,18 @@ def layout(**_):
         ui.page_head('컨플루언스', '지켜보는 공간·페이지의 변경'),
         dcc.Store(id='cf-refresh', data=0),
         dcc.Interval(id='cf-poll', interval=4000, disabled=True),  # 백그라운드 확인이 도는 동안 다시 그리기
+        dcc.Store(id='cf-rename-id'),
+        dbc.Modal([
+            dbc.ModalHeader(dbc.ModalTitle('탭에 보일 이름')),
+            dbc.ModalBody([
+                dbc.Input(id='cf-rename-text', maxLength=100),
+                html.Div(id='cf-rename-hint', className='small text-muted mt-1'),
+            ]),
+            dbc.ModalFooter([
+                dbc.Button('취소', id='cf-rename-cancel', color='secondary', outline=True),
+                dbc.Button('저장', id='cf-rename-save', color='primary'),
+            ]),
+        ], id='cf-rename-modal', is_open=False),
         html.Div(id='cf-config', className='mb-2'),
         dbc.Row([
             dbc.Col(dbc.Card(dbc.CardBody([
@@ -65,7 +77,9 @@ def _watch_row(w: dict):
         html.Div([
             dbc.Badge('공간' if w['kind'] == 'space' else '페이지', color='info' if w['kind'] == 'space' else 'primary',
                       className='me-1'),
-            html.Span(w['title'] or w['space_key'], className='fw-semibold'),
+            html.Span(w['name'], className='fw-semibold', title=w['title'] if w['alias'] else None),
+            dbc.Button(html.I(className='bi bi-pencil'), id={'type': 'cf-rename', 'id': w['id']}, color='link',
+                       size='sm', className='text-muted p-0 ms-1', title='탭에 보일 이름 바꾸기'),
             dbc.Badge(w['unseen'], color='danger', pill=True, className='ms-1') if w['unseen'] else None,
             html.Span(className='me-auto'),
             html.Span(dbc.Switch(id={'type': 'cf-active', 'id': w['id']}, value=w['active'], className='mb-0'),
@@ -73,7 +87,8 @@ def _watch_row(w: dict):
             dbc.Button(html.I(className='bi bi-trash'), id={'type': 'cf-del', 'id': w['id']}, color='link', size='sm',
                        className='text-muted p-0', title='지우기 (모은 업데이트도 함께)'),
         ], className='d-flex align-items-center'),
-        html.Div([w['space_key'] + (' · 하위 페이지 포함' if w['kind'] == 'page' and w['children'] else ''),
+        html.Div([(f"{w['title']} · " if w['alias'] and w['title'] else '') +
+                  w['space_key'] + (' · 하위 페이지 포함' if w['kind'] == 'page' and w['children'] else ''),
                   f" · 확인 {w['last_checked_at']}" if w['last_checked_at'] else ' · 아직 확인 전'],
                  className='small text-muted'),
         html.Div(w['last_error'], className='small text-danger') if w['last_error'] else None,
@@ -150,7 +165,7 @@ def _updates_view(ups: list[dict], watch_id: int | None, watches: list[dict]):
     for w in watches:
         mine = [g for g in groups if g[0]['watch_id'] == w['id']]
         if mine:
-            out.append(html.H6([w['title'] or w['space_key'],
+            out.append(html.H6([w['name'],
                                 html.Span(f' · 페이지 {len(mine)}개', className='small text-muted')],
                                className='mt-3 mb-1'))
             out.append(dbc.ListGroup([_group_item(g, False) for g in mine]))
@@ -167,7 +182,7 @@ def render(_, flt, _poll, tab):
         html.Div('아직 지켜보는 곳이 없습니다. 공간 키나 페이지 주소를 넣으세요.', className='small text-muted')
     total = sum(w['unseen'] for w in watches)
     tabs = [dbc.Tab(label=f'전체 ({total})' if total else '전체', tab_id='all')] + [
-        dbc.Tab(label=(w['title'] or w['space_key'])[:20] + (f" ({w['unseen']})" if w['unseen'] else ''),
+        dbc.Tab(label=w['name'][:20] + (f" ({w['unseen']})" if w['unseen'] else ''),
                 tab_id=f"w{w['id']}") for w in watches]
     watch_id = _tab_watch(tab)
     ups = cw.list_updates(watch_id=watch_id, unseen_only=flt == 'unseen')
@@ -263,3 +278,27 @@ def mail(n, flt, tab):
     except llm.LLMError:
         text = ''
     return outbox.draft_confluence(ups, text)
+
+
+@callback(Output('cf-rename-modal', 'is_open'), Output('cf-rename-id', 'data'), Output('cf-rename-text', 'value'),
+          Output('cf-rename-text', 'placeholder'), Output('cf-rename-hint', 'children'),
+          Output('cf-refresh', 'data', allow_duplicate=True),
+          Input({'type': 'cf-rename', 'id': ALL}, 'n_clicks'), Input('cf-rename-cancel', 'n_clicks'),
+          Input('cf-rename-save', 'n_clicks'), State('cf-rename-id', 'data'), State('cf-rename-text', 'value'),
+          State('cf-refresh', 'data'), prevent_initial_call=True)
+def rename(_open, _cancel, _save, wid, text, r):
+    """지켜보는 곳의 표시 이름 — 비우면 컨플루언스 이름으로."""
+    nu = no_update
+    trig = ctx.triggered_id
+    if trig is None or not ctx.triggered[0]['value']:
+        return (nu,) * 6
+    if isinstance(trig, dict):
+        w = next((x for x in cw.list_watches() if x['id'] == trig['id']), None)
+        if w is None:
+            return (nu,) * 6
+        return (True, w['id'], w['alias'], w['title'] or w['space_key'],
+                f"비워 두면 컨플루언스 이름 '{w['title'] or w['space_key']}'(으)로 보입니다.", nu)
+    if trig == 'cf-rename-save' and wid:
+        cw.set_alias(wid, text or '')
+        return False, None, nu, nu, nu, (r or 0) + 1
+    return False, None, nu, nu, nu, nu

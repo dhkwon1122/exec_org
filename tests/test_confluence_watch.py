@@ -185,3 +185,18 @@ def test_group_by_page_and_mark_seen_page(wiki):
     assert cw.mark_seen_page(w['id'], '100') == 3
     assert [u['page_id'] for u in cw.list_updates(unseen_only=True)] == ['101']
     assert cw.list_watches()[0]['unseen'] == 1
+
+
+def test_alias_names_tab_and_updates(wiki):
+    wiki.put('200', '2026년도 하반기 임원 평가 운영 지침 (최종)', 'HR', '2026-10-26T09:00:00', '이과장', '<p>안</p>')
+    w = cw.add_watch(f'{WIKI}/pages/viewpage.action?pageId=200')
+    cw.check_watch(w['id'])
+    assert cw.list_watches()[0]['name'] == '2026년도 하반기 임원 평가 운영 지침 (최종)'
+    cw.set_alias(w['id'], '  평가 지침 ')
+    x = cw.list_watches()[0]
+    assert (x['name'], x['alias'], x['title']) == ('평가 지침', '평가 지침', '2026년도 하반기 임원 평가 운영 지침 (최종)')
+    assert cw.list_updates()[0]['watch_title'] == '평가 지침'
+    cw.set_alias(w['id'], '')
+    assert cw.list_watches()[0]['name'].startswith('2026년도')
+    with pytest.raises(ValueError):
+        cw.set_alias(999, 'x')
