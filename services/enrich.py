@@ -7,7 +7,7 @@ ai_status=failed 와 오류 메시지가 남고 화면에서 "다시 생성"할 
 import os
 from concurrent.futures import ThreadPoolExecutor
 
-from services import llm, store
+from services import confluence, llm, store
 
 _executor = ThreadPoolExecutor(max_workers=int(os.environ.get('LLM_MAX_CONCURRENT', '2')),
                                thread_name_prefix='enrich')
@@ -22,7 +22,8 @@ def enrich_entry(entry_id: int, token: str | None = None) -> None:
     task = store.get_task(entry['task_id']) if entry['task_id'] else None
     try:
         people = [f"{p['name']} {p['position']}".strip() for p in entry['people']]
-        result = llm.analyze_record(entry['content'], task['title'] if task else '', entry['entry_type'], people,
+        extra, _ = confluence.text_for_ai(entry['content'])  # 원문에 컨플루언스 링크가 있으면 그 페이지도 함께
+        result = llm.analyze_record(entry['content'] + extra, task['title'] if task else '', entry['entry_type'], people,
                                    reference_date=entry['occurred_at'][:10] or None)
     except Exception as e:  # noqa: BLE001 — 어떤 실패든 기록에 남기고 화면에서 재시도
         store.set_history_ai(entry_id, 'failed', error=str(e)[:500], token=token)

@@ -130,8 +130,68 @@ class Reference(Base):
     file_path = Column(String(500), default='')  # UPLOAD_DIR 기준 저장 경로
     note = Column(Text, default='')
     created_at = Column(DateTime, default=_now)
+    # 컨플루언스 링크면 읽어 온 페이지 내용 (services/confluence.py) — content_at 이 비면 아직 안 읽음
+    content = Column(Text, default='')
+    content_at = Column(DateTime)
+    content_error = Column(String(500), default='')
 
     task = relationship('Task', back_populates='references')
+
+
+class ConfluencePage(Base):
+    """읽어 온 컨플루언스 페이지 (주소마다) — 같은 페이지를 거듭 부르지 않게 (services/confluence.py)."""
+    __tablename__ = 'confluence_pages'
+
+    id = Column(Integer, primary_key=True)
+    url = Column(String(1000), nullable=False, unique=True)
+    page_id = Column(String(30), default='', index=True)
+    title = Column(String(500), default='')
+    space = Column(String(100), default='')
+    version = Column(Integer, default=0)
+    text = Column(Text, default='')
+    error = Column(String(500), default='')
+    fetched_at = Column(DateTime)
+
+
+class ConfluenceWatch(Base):
+    """지켜보는 컨플루언스 공간·페이지 (services/confluence_watch.py). kind: space / page.
+    page 이고 children 이면 그 아래 페이지들까지."""
+    __tablename__ = 'confluence_watches'
+
+    id = Column(Integer, primary_key=True)
+    kind = Column(String(10), nullable=False)
+    space_key = Column(String(100), default='')
+    page_id = Column(String(30), default='')
+    children = Column(Boolean, default=True)
+    title = Column(String(500), default='')
+    url = Column(String(1000), default='')
+    active = Column(Boolean, default=True)
+    last_checked_at = Column(DateTime)
+    last_error = Column(String(500), default='')
+    created_by = Column(String(100), default='')
+    created_at = Column(DateTime, default=_now)
+
+
+class ConfluenceUpdate(Base):
+    """지켜보는 곳에서 바뀐 페이지 한 판(version) — 바뀐 줄(diff)과 AI 요약, 확인 여부."""
+    __tablename__ = 'confluence_updates'
+    __table_args__ = (UniqueConstraint('watch_id', 'page_id', 'version', name='uq_confluence_update'),)
+
+    id = Column(Integer, primary_key=True)
+    watch_id = Column(Integer, ForeignKey('confluence_watches.id', ondelete='CASCADE'), nullable=False, index=True)
+    page_id = Column(String(30), nullable=False, index=True)
+    title = Column(String(500), default='')
+    space = Column(String(100), default='')
+    version = Column(Integer, default=1)
+    modified_at = Column(String(30), default='')  # 컨플루언스가 준 시각 (ISO)
+    modified_by = Column(String(200), default='')
+    message = Column(String(500), default='')  # 수정 메모
+    text = Column(Text, default='')  # 이 판의 본문 (다음 판과 비교할 때)
+    diff = Column(Text, default='')
+    summary = Column(Text, default='')
+    summary_status = Column(String(10), default='')  # '' 아직 / done / failed / none(LLM 없음)
+    seen = Column(Boolean, default=False, index=True)
+    created_at = Column(DateTime, default=_now)
 
 
 class TaskLink(Base):

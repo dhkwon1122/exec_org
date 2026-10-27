@@ -22,7 +22,7 @@ import components.todo_ui  # noqa: F401  업무 체크/삭제 공용 콜백 등�
 from services import mailbox
 from components.history_actions import history_edit_modal, history_link_modal, todo_review_modal  # 이력 수정·삭제·AI 할 일 등록 공용 콜백
 from components.mail_ui import compose_modal  # 메일 보내기 창 (화면은 'mail-draft' 에 초안을 넣어 연다)
-from services import auth, doc_versions, doc_worker, store, users
+from services import auth, confluence_watch, doc_versions, doc_worker, store, users
 from services.db import DATA_DIR
 
 
@@ -260,6 +260,7 @@ _NAV = [  # (이름, 주소, 아이콘, 주소 맞춤)
     ('임원', '/people', 'bi-people', 'partial'),
     ('이력 검색', '/search', 'bi-search', 'exact'),
     ('참고자료', '/references', 'bi-folder2', 'exact'),
+    ('컨플루언스', '/confluence', 'bi-journal-text', 'exact'),
 ]
 
 
@@ -267,6 +268,13 @@ def _review_count() -> int:
     try:
         return mailbox.counts().get('review', 0)
     except Exception:  # noqa: BLE001  메뉴 숫자 때문에 화면이 안 뜨면 안 된다
+        return 0
+
+
+def _confluence_count() -> int:
+    try:
+        return confluence_watch.unseen_count()
+    except Exception:  # noqa: BLE001
         return 0
 
 
@@ -280,6 +288,10 @@ def _sidebar():
     for label, href, icon, active in _NAV:
         count = html.Span(review or '', id='nav-inbox-count', className='nav-count hot' if review else 'nav-count',
                           title='확인할 메일') if href == '/inbox' else None
+        if href == '/confluence':
+            n = _confluence_count()
+            count = html.Span(n or '', id='nav-conf-count', className='nav-count hot' if n else 'nav-count',
+                              title='안 본 컨플루언스 변경')
         links.append(dbc.NavLink([html.I(className=f'bi {icon}'), html.Span(label), count], href=href,
                                  active=active))
     return html.Aside([
@@ -304,6 +316,7 @@ def serve_layout():
         history_link_modal(),
         dcc.Store(id='mail-draft'),
         dcc.Store(id='mail-changed', data=0),  # 받은 메일을 처리하면 증가 → 사이드바 숫자를 다시 셈
+        dcc.Store(id='conf-changed', data=0),  # 컨플루언스 변경을 확인하면 증가 → 사이드바 숫자 (pages/confluence.py)
         dcc.Location(id='app-url'),
         dcc.Interval(id='app-tick', interval=60_000),
         compose_modal(),
@@ -325,10 +338,21 @@ def _refresh_inbox_count(*_):
     return (n or ''), 'nav-count hot' if n else 'nav-count'
 
 
+@app.callback(dash.Output('nav-conf-count', 'children'), dash.Output('nav-conf-count', 'className'),
+              dash.Input('app-url', 'pathname'), dash.Input('app-tick', 'n_intervals'),
+              dash.Input('conf-changed', 'data'))
+def _refresh_conf_count(*_):
+    """사이드바 '컨플루언스'의 안 본 변경 수."""
+    n = _confluence_count()
+    return (n or ''), 'nav-count hot' if n else 'nav-count'
+
+
 # POP3 받은 메일 주기 확인 (MAIL_POP3_* 설정 시, 여러 워커 중 하나만)
 mailbox.start_poller()
 # 사용자 입력이 한동안 없으면 요약하지 않은 첨부 문서를 백그라운드에서 요약 (DOC_SUMMARY_IDLE_MINUTES, 0 이면 끔)
 doc_worker.start()
+# 지켜보는 컨플루언스 공간·페이지의 변경 확인 (CONFLUENCE_WATCH_MINUTES, 0 이면 끔)
+confluence_watch.start()
 
 if __name__ == '__main__':
     app.run(debug=os.environ.get('DASH_DEBUG', '1') == '1', host='0.0.0.0', port=int(os.environ.get('PORT', 8050)))

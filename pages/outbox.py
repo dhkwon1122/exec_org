@@ -35,6 +35,8 @@ def _related_link(m: dict):
         return dcc.Link('받은 메일', href=f'/inbox?mail={rid}')
     if kind in ('schedule', 'absence'):
         return dcc.Link(rid.replace('~', ' ~ '), href=f"/calendar?tab={'director' if kind == 'schedule' else 'absence'}")
+    if kind == 'confluence':
+        return dcc.Link('컨플루언스 변경', href='/confluence')
     return None
 
 

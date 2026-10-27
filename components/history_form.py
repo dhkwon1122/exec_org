@@ -4,7 +4,7 @@ import base64
 import dash_bootstrap_components as dbc
 from dash import Input, Output, State, callback, dcc, html, no_update
 
-from services import db, enrich, llm, store
+from services import confluence, db, enrich, llm, store
 
 # 유형별 기록 양식 — 빈 칸에서 '양식' 버튼을 누르면 채워진다. 나중에 검색·회고할 때 필요한 것
 # (누가/무엇을/왜/다음에 할 일)이 빠지지 않게 하는 용도이고, 받아 적은 원문을 붙여넣을 때는 쓰지 않아도 된다.
@@ -135,6 +135,7 @@ def save_history(task_id: int | None, etype: str, content: str, when, use_ai: bo
         for name, data in files:
             store.add_reference(task_id, 'file', title=name, file_name=name, file_bytes=data, author=author,
                                 history_id=h['id'], session=s)
+    confluence.read_new_references_later()  # 붙인 링크 중 컨플루언스 페이지는 내용을 읽어 둔다
     if use_ai:
         enrich.submit(h['id'])
     return store.get_history(h['id'])

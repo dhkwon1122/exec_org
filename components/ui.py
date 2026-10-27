@@ -51,6 +51,30 @@ def ref_target(ref: dict):
     return None
 
 
+def confluence_box(ref: dict, button_id: dict | None = None):
+    """컨플루언스 링크 참고자료 — 읽어 온 페이지 내용(펼쳐 보기)과 '다시 읽기'. 컨플루언스 링크가 아니면 None."""
+    from services import confluence
+    if ref['kind'] != 'link' or not confluence.is_confluence_url(ref['url']):
+        return None
+    btn = dbc.Button([html.I(className='bi bi-arrow-repeat me-1'), '다시 읽기' if ref['content_at'] else '읽어 오기'],
+                     id=button_id, color='link', size='sm', className='p-0 ms-2') if button_id else None
+    if ref['content_error']:
+        body = html.Span(f"읽지 못함 — {ref['content_error']}", className='text-danger')
+    elif ref['content']:
+        body = html.Details([
+            html.Summary(f"컨플루언스 내용 ({len(ref['content']):,}자 · {ref['content_at']} 읽음)"),
+            html.Pre(ref['content'][:20000], className='small bg-body-tertiary p-2 rounded mb-0',
+                     style={'whiteSpace': 'pre-wrap', 'maxHeight': '40vh', 'overflowY': 'auto'}),
+        ], className='d-inline')
+    elif ref['content_at']:
+        body = html.Span(f"컨플루언스 페이지 — 본문이 비어 있음 ({ref['content_at']} 읽음)", className='text-muted')
+    else:
+        body = html.Span('컨플루언스 페이지 — 아직 읽지 않음' if confluence.is_configured() else
+                         '컨플루언스 페이지 (연결 설정 전 — .env 의 CONFLUENCE_*)', className='text-muted')
+    return html.Div([dbc.Badge('컨플루언스', color='info', className='me-1'), body,
+                     btn if confluence.is_configured() else None], className='small mt-1')
+
+
 AUTO_TYPES = ('상태변경', '연결', '자료', '할일')
 
 
