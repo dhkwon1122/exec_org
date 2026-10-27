@@ -122,8 +122,10 @@ def step(now: float | None = None) -> bool:
     minutes = idle_minutes_setting()
     if not minutes or idle_seconds(now) < minutes * 60 or now < _pause_until:
         return False
-    with confluence.background():
-        read_refs = confluence.read_new_references(limit=3) or confluence.summarize_missing(limit=3)
+    from services import confluence_watch
+    with confluence.background():  # 컨플루언스: 안 읽은 링크 → 실패한 링크·변경 재시도(간격을 늘려 가며) → 빠진 요약
+        read_refs = (confluence.read_new_references(limit=3) or confluence.retry_failed_references(limit=2)
+                     or confluence_watch.retry_failed_updates(limit=2) or confluence.summarize_missing(limit=3))
     if _fill_texts() or read_refs:  # 예전 첨부 글자 · 아직 안 읽은 컨플루언스 링크
         return True
     if not llm.is_configured():

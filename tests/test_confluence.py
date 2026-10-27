@@ -280,3 +280,42 @@ def test_summarize_missing_for_refs_read_before(env, monkeypatch):
     assert store.get_reference(ref['id'])['content_summary'] == '요약됨'
     assert len(env) == n_calls  # 컨플루언스는 부르지 않음
     assert confluence.summarize_missing() == 0
+
+
+def test_failed_reference_retried_with_backoff(env, monkeypatch):
+    from datetime import datetime, timedelta
+    from services.db import Reference
+    t = store.create_task('예산')
+    ref = store.add_reference(t['id'], 'link', url=f'{WIKI}/pages/403')
+    with pytest.raises(confluence.ConfluenceError):
+        confluence.refresh_reference(ref['id'])
+    r = store.get_reference(ref['id'])
+    assert r['content_tries'] == 1 and '403' in r['content_error']
+    assert confluence.retry_failed_references() == 0  # 30분이 안 지남
+
+    def age(minutes):
+        with db.SessionLocal() as s:
+            x = s.get(Reference, ref['id'])
+            x.content_at = datetime.now() - timedelta(minutes=minutes)
+            s.commit()
+    age(31)
+    assert confluence.retry_failed_references() == 1
+    assert store.get_reference(ref['id'])['content_tries'] == 2
+    age(31)
+    assert confluence.retry_failed_references() == 0  # 두 번째 실패 뒤엔 1시간
+    # 권한이 생겨 읽히면 실패 횟수가 지워진다
+    with db.SessionLocal() as s:
+        x = s.get(Reference, ref['id'])
+        x.url = f'{WIKI}/pages/77'
+        s.commit()
+    age(61)
+    assert confluence.retry_failed_references() == 1
+    r = store.get_reference(ref['id'])
+    assert r['content_tries'] == 0 and r['content_error'] == '' and r['content']
+    # 여섯 번 실패하면 자동 재시도는 멈춘다
+    with db.SessionLocal() as s:
+        x = s.get(Reference, ref['id'])
+        x.url, x.content_error, x.content_tries = f'{WIKI}/pages/403', 'x', confluence.RETRY_MAX
+        x.content_at = datetime.now() - timedelta(days=2)
+        s.commit()
+    assert confluence.retry_failed_references() == 0

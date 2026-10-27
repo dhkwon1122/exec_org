@@ -127,6 +127,7 @@ def _ref_dict(r: Reference) -> dict:
         'file_name': r.file_name or '', 'file_path': r.file_path or '', 'note': r.note or '',
         'created_at': _dt(r.created_at), 'content': r.content or '', 'content_at': _dt(r.content_at),
         'content_error': r.content_error or '', 'content_summary': r.content_summary or '',
+        'content_tries': r.content_tries or 0,
     }
 
 

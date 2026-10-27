@@ -61,7 +61,11 @@ def confluence_box(ref: dict, button_id: dict | None = None):
                      id=button_id, color='link', size='sm', className='p-0 ms-2') if button_id else None
     extra = None
     if ref['content_error']:
-        status = html.Span(f"읽지 못함 — {ref['content_error']}", className='text-danger')
+        tries = ref.get('content_tries') or 0
+        status = html.Span([f"읽지 못함 — {ref['content_error']}",
+                            html.Span(f" (쉬는 시간에 다시 시도 · {tries}/{confluence.RETRY_MAX})"
+                                      if tries < confluence.RETRY_MAX else ' (자동 재시도 멈춤 — 다시 읽기를 누르세요)',
+                                      className='text-muted')], className='text-danger')
     elif ref['content']:
         status = html.Span(f"{ref['content_at']} 읽음", className='text-muted')
         extra = html.Div([

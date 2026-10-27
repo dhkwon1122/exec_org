@@ -135,6 +135,7 @@ class Reference(Base):
     content_at = Column(DateTime)
     content_error = Column(String(500), default='')
     content_summary = Column(Text, default='')  # 페이지 AI 요약 (읽은 내용이 바뀌면 다시)
+    content_tries = Column(Integer, default=0)  # 읽기 연속 실패 횟수 — 쉬는 시간 재시도 간격 (confluence.retry_failed_references)
 
     task = relationship('Task', back_populates='references')
 
@@ -192,6 +193,8 @@ class ConfluenceUpdate(Base):
     diff = Column(Text, default='')
     summary = Column(Text, default='')
     summary_status = Column(String(10), default='')  # '' 아직 / done / failed / none(LLM 없음)
+    tries = Column(Integer, default=0)  # 본문 읽기·요약 재시도 횟수 (confluence_watch.retry_failed_updates)
+    retried_at = Column(DateTime)
     seen = Column(Boolean, default=False, index=True)
     created_at = Column(DateTime, default=_now)
 

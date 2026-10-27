@@ -455,6 +455,8 @@ def refresh_reference(ref_id: int) -> dict:
         # 한도에 걸린 것은 '아직 안 읽음'으로 둬서 백그라운드(read_new_references)가 이어 읽는다
         r.content_at = None if limited else datetime.now().replace(microsecond=0)
         r.content_error = error[:500]
+        if not limited:
+            r.content_tries = (r.content_tries or 0) + 1 if error else 0
         if p:
             changed = p['text'] != (r.content or '') or not r.content_summary
             r.content = p['text']
@@ -494,6 +496,40 @@ def read_new_references(limit: int = 10) -> int:
             except ConfluenceError:
                 pass  # 실패도 content_at·content_error 로 남아 화면에서 다시 읽을 수 있다
             n += 1
+    return n
+
+
+RETRY_MAX = 6  # 이만큼 연달아 실패하면 쉬는 시간 재시도를 멈춘다 ('다시 읽기'는 언제든)
+RETRY_BASE_MINUTES = 30  # 재시도 간격: 30분 → 1시간 → 2시간 … (실패할수록 두 배, 최대 하루)
+
+
+def retry_wait(tries: int) -> timedelta:
+    return timedelta(minutes=min(24 * 60, RETRY_BASE_MINUTES * 2 ** max(0, (tries or 1) - 1)))
+
+
+def retry_failed_references(limit: int = 2) -> int:
+    """읽지 못한 컨플루언스 참고자료를 간격을 늘려 가며 하나씩 다시 읽는다 — 시도한 수 (쉬는 시간에)."""
+    if not is_configured():
+        return 0
+    now = datetime.now()
+    with db.SessionLocal() as s:
+        rows = s.execute(select(Reference.id, Reference.url, Reference.content_at, Reference.content_tries)
+                         .where(Reference.kind == 'link', Reference.content_error != '',
+                                Reference.content_error.is_not(None), Reference.content_at.is_not(None))
+                         .order_by(Reference.content_at)).all()  # 오래 기다린 것부터
+    n = 0
+    for ref_id, url, at, tries in rows:
+        if n >= limit:
+            break
+        if not is_confluence_url(url) or (tries or 0) >= RETRY_MAX or now - at < retry_wait(tries):
+            continue
+        try:
+            refresh_reference(ref_id)
+        except RateLimited:
+            break
+        except ConfluenceError:
+            pass  # 실패 횟수가 늘어 다음 시도는 더 뒤에
+        n += 1
     return n
 
 
