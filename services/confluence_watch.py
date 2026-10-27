@@ -309,6 +309,26 @@ def mark_seen(ids: list[int] | None = None) -> int:
         return len(rows)
 
 
+def mark_seen_page(watch_id: int, page_id: str) -> int:
+    """한 워치에서 한 페이지의 안 본 변경(여러 판)을 모두 확인함으로."""
+    with db.SessionLocal() as s:
+        rows = list(s.scalars(select(ConfluenceUpdate).where(ConfluenceUpdate.watch_id == int(watch_id),
+                                                             ConfluenceUpdate.page_id == str(page_id),
+                                                             ConfluenceUpdate.seen.is_(False))))
+        for u in rows:
+            u.seen = True
+        s.commit()
+        return len(rows)
+
+
+def group_by_page(updates: list[dict]) -> list[list[dict]]:
+    """(워치, 페이지)마다 묶음 — 묶음 안은 최근 판 먼저, 묶음은 가장 최근 변경 순 (list_updates 순서를 그대로)."""
+    groups: dict[tuple, list[dict]] = {}
+    for u in updates:
+        groups.setdefault((u['watch_id'], u['page_id']), []).append(u)
+    return list(groups.values())
+
+
 DIGEST_SYSTEM = """너는 임원실 직원에게 컨플루언스 변경 소식을 정리해 주는 비서다. 여러 페이지의 변경 요약을 읽고
 꼭 알아야 할 것부터 짧은 브리핑으로 쓴다: 1) 주요 변경 3~5개(무엇이 어떻게 — 페이지 이름 포함) 2) 그 밖의 변경 한 줄.
 요약에 없는 내용은 지어내지 않는다. 일반 글(마크다운 목록 가능)로 쓴다."""

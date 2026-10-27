@@ -34,6 +34,8 @@ def layout(**_):
                 html.Div(id='cf-last', className='small text-muted mt-1'),
             ])), lg=4),
             dbc.Col([
+                dbc.Tabs(id='cf-tabs', active_tab='all', className='mb-2',
+                         children=[dbc.Tab(label='전체', tab_id='all')]),  # 지켜보는 곳마다 탭 (render 가 채움)
                 html.Div([
                     dbc.RadioItems(id='cf-filter', value='unseen', inline=True, className='small me-auto',
                                    options=[{'label': '안 본 것', 'value': 'unseen'}, {'label': '전체', 'value': 'all'}]),
@@ -78,7 +80,28 @@ def _watch_row(w: dict):
     ], className='py-2 border-bottom')
 
 
-def _update_item(u: dict):
+def _older_row(u: dict):
+    return html.Li([
+        dbc.Badge(f"{u['version']}판", color='light', text_color='dark', className='me-1 border'),
+        html.Span(f"{u['modified_by']} · {u['modified_at']}", className='text-muted me-1'),
+        html.Span(u['summary'] or (f"+{u['added']} −{u['removed']}줄" if u['diff'] else '')),
+    ], className='mb-1')
+
+
+def _group_item(group: list[dict], show_watch: bool):
+    """한 페이지의 변경 묶음 — 최근 판을 크게, 그 앞 변경은 접어서. '확인'은 이 페이지의 안 본 변경 전부."""
+    u, older = group[0], group[1:]
+    unseen = sum(1 for x in group if not x['seen'])
+    item = _update_item(u, show_watch, unseen, len(group))
+    if older:
+        item.children.append(html.Details([
+            html.Summary(f'이 페이지의 앞선 변경 {len(older)}건', className='small'),
+            html.Ul([_older_row(x) for x in older], className='list-unstyled small mt-1 mb-0 ps-2'),
+        ], className='mt-1'))
+    return item
+
+
+def _update_item(u: dict, show_watch: bool = True, unseen: int = 0, n: int = 1):
     new_page = u['version'] == 1
     stat = '새 페이지' if new_page else (f"+{u['added']} −{u['removed']}줄" if u['diff'] else '')
     return dbc.ListGroupItem([
@@ -87,12 +110,16 @@ def _update_item(u: dict):
                    className='fw-semibold me-2'),
             dbc.Badge('새 페이지' if new_page else f"{u['version']}판", color='success' if new_page else 'light',
                       text_color=None if new_page else 'dark', className='me-1 border'),
-            html.Span(stat if not new_page else '', className='small text-muted me-auto'),
-            dbc.Button('확인', id={'type': 'cf-seen', 'id': u['id']}, size='sm', color='secondary', outline=True,
-                       className='py-0') if not u['seen'] else html.Span('확인함', className='small text-muted'),
+            html.Span(stat if not new_page else '', className='small text-muted me-1'),
+            dbc.Badge(f'{n}번 수정', color='warning', text_color='dark', className='me-1') if n > 1 else None,
+            html.Span(className='me-auto'),
+            dbc.Button('확인' + (f' ({unseen})' if unseen > 1 else ''),
+                       id={'type': 'cf-seen', 'id': f"{u['watch_id']}:{u['page_id']}"}, size='sm',
+                       color='secondary', outline=True, className='py-0') if unseen else
+            html.Span('확인함', className='small text-muted'),
         ], className='d-flex align-items-center flex-wrap'),
         html.Div(f"{u['space']} · {u['modified_by']} · {u['modified_at']}" + (f" · 메모: {u['message']}" if u['message'] else '')
-                 + f" · {u['watch_title']}", className='small text-muted'),
+                 + (f" · {u['watch_title']}" if show_watch else ''), className='small text-muted'),
         html.Div(u['summary'], className='small mt-1' + (' text-danger' if u['summary_status'] == 'failed' else ''),
                  style={'whiteSpace': 'pre-wrap'}) if u['summary'] else
         html.Div('AI 요약 대기 중' if u['summary_status'] == '' else '', className='small text-muted mt-1'),
@@ -100,7 +127,7 @@ def _update_item(u: dict):
                       html.Pre(u['diff'], className='small bg-body-tertiary p-2 rounded mb-0',
                                style={'whiteSpace': 'pre-wrap', 'maxHeight': '40vh', 'overflowY': 'auto'})])
         if u['diff'] else None,
-    ], className='cf-seen' if u['seen'] else '', style={'opacity': .65} if u['seen'] else None)
+    ], className='cf-seen' if not unseen else '', style={'opacity': .65} if not unseen else None)
 
 
 @callback(Output('conf-changed', 'data', allow_duplicate=True), Input('cf-refresh', 'data'),
@@ -110,15 +137,41 @@ def notify_sidebar(_, n):
     return (n or 0) + 1
 
 
+def _tab_watch(tab) -> int | None:
+    return int(tab[1:]) if isinstance(tab, str) and tab[1:].isdigit() else None
+
+
+def _updates_view(ups: list[dict], watch_id: int | None, watches: list[dict]):
+    """페이지마다 묶어서 — '전체' 탭은 지켜보는 곳마다 제목을 달아 나눈다."""
+    groups = cw.group_by_page(ups)
+    if watch_id is not None:
+        return dbc.ListGroup([_group_item(g, False) for g in groups])
+    out = []
+    for w in watches:
+        mine = [g for g in groups if g[0]['watch_id'] == w['id']]
+        if mine:
+            out.append(html.H6([w['title'] or w['space_key'],
+                                html.Span(f' · 페이지 {len(mine)}개', className='small text-muted')],
+                               className='mt-3 mb-1'))
+            out.append(dbc.ListGroup([_group_item(g, False) for g in mine]))
+    return html.Div(out)
+
+
 @callback(Output('cf-config', 'children'), Output('cf-watches', 'children'), Output('cf-updates', 'children'),
-          Output('cf-last', 'children'), Output('cf-poll', 'disabled'),
-          Input('cf-refresh', 'data'), Input('cf-filter', 'value'), Input('cf-poll', 'n_intervals'))
-def render(_, flt, _poll):
+          Output('cf-last', 'children'), Output('cf-poll', 'disabled'), Output('cf-tabs', 'children'),
+          Input('cf-refresh', 'data'), Input('cf-filter', 'value'), Input('cf-poll', 'n_intervals'),
+          Input('cf-tabs', 'active_tab'))
+def render(_, flt, _poll, tab):
     watches = cw.list_watches()
     wv = html.Div([_watch_row(w) for w in watches]) if watches else \
         html.Div('아직 지켜보는 곳이 없습니다. 공간 키나 페이지 주소를 넣으세요.', className='small text-muted')
-    ups = cw.list_updates(unseen_only=flt == 'unseen')
-    uv = dbc.ListGroup([_update_item(u) for u in ups]) if ups else \
+    total = sum(w['unseen'] for w in watches)
+    tabs = [dbc.Tab(label=f'전체 ({total})' if total else '전체', tab_id='all')] + [
+        dbc.Tab(label=(w['title'] or w['space_key'])[:20] + (f" ({w['unseen']})" if w['unseen'] else ''),
+                tab_id=f"w{w['id']}") for w in watches]
+    watch_id = _tab_watch(tab)
+    ups = cw.list_updates(watch_id=watch_id, unseen_only=flt == 'unseen')
+    uv = _updates_view(ups, watch_id, watches) if ups else \
         dbc.Alert('안 본 변경이 없습니다.' if flt == 'unseen' else '모은 변경이 없습니다.', color='light', className='small')
     lr = cw.last_run()
     every = cw.interval_minutes()
@@ -129,7 +182,7 @@ def render(_, flt, _poll):
     if running:
         last = [dbc.Spinner(size='sm', spinner_class_name='me-1'),
                 f"확인 중 — 호출 한도(분당 {confluence.rate_per_minute()}회)를 지키느라 몇 분 걸릴 수 있습니다. ", last]
-    return _config_note(), wv, uv, last, not running
+    return _config_note(), wv, uv, last, not running, tabs
 
 
 @callback(Output('cf-refresh', 'data', allow_duplicate=True), Output('cf-add-msg', 'children'),
@@ -152,9 +205,9 @@ def add(n, target, children, r):
 @callback(Output('cf-refresh', 'data', allow_duplicate=True), Output('cf-check-msg', 'children'),
           Input('cf-check', 'n_clicks'), Input({'type': 'cf-del', 'id': ALL}, 'n_clicks'),
           Input({'type': 'cf-active', 'id': ALL}, 'value'), Input({'type': 'cf-seen', 'id': ALL}, 'n_clicks'),
-          Input('cf-seen-all', 'n_clicks'), State('cf-filter', 'value'), State('cf-refresh', 'data'),
-          prevent_initial_call=True)
-def actions(_c, _d, _a, _s, _all, flt, r):
+          Input('cf-seen-all', 'n_clicks'), State('cf-filter', 'value'), State('cf-tabs', 'active_tab'),
+          State('cf-refresh', 'data'), prevent_initial_call=True)
+def actions(_c, _d, _a, _s, _all, flt, tab, r):
     trig = ctx.triggered_id
     if trig is None or (isinstance(trig, dict) and trig['type'] != 'cf-active' and not ctx.triggered[0]['value']):
         return no_update, no_update
@@ -162,8 +215,7 @@ def actions(_c, _d, _a, _s, _all, flt, r):
     if trig == 'cf-check':
         msg = '확인을 시작했습니다.' if cw.run_later() else '이미 확인하는 중입니다.'
     elif trig == 'cf-seen-all':
-        ids = [u['id'] for u in cw.list_updates(unseen_only=True)] if flt == 'unseen' else None
-        cw.mark_seen(ids)
+        cw.mark_seen([u['id'] for u in cw.list_updates(watch_id=_tab_watch(tab), unseen_only=True, limit=10000)])
     elif trig['type'] == 'cf-del':
         cw.delete_watch(trig['id'])
     elif trig['type'] == 'cf-active':
@@ -171,21 +223,23 @@ def actions(_c, _d, _a, _s, _all, flt, r):
         if active is None or active == next((w['active'] for w in cw.list_watches() if w['id'] == trig['id']), None):
             return no_update, no_update  # 다시 그려질 때 같은 값
         cw.set_active(trig['id'], active)
-    else:
-        cw.mark_seen([trig['id']])
+    else:  # 'cf-seen' — 그 페이지의 안 본 변경 전부
+        watch_id, page_id = str(trig['id']).split(':', 1)
+        cw.mark_seen_page(int(watch_id), page_id)
     return (r or 0) + 1, msg
 
 
-def _shown(flt) -> list[dict]:
-    return cw.list_updates(unseen_only=flt == 'unseen', limit=50)
+def _shown(flt, tab) -> list[dict]:
+    """지금 탭·보기에 보이는 변경 (최대 50건) — 묶어 요약·메일 대상."""
+    return cw.list_updates(watch_id=_tab_watch(tab), unseen_only=flt == 'unseen', limit=50)
 
 
 @callback(Output('cf-digest-box', 'children'), Input('cf-digest', 'n_clicks'), State('cf-filter', 'value'),
-          prevent_initial_call=True)
-def make_digest(n, flt):
+          State('cf-tabs', 'active_tab'), prevent_initial_call=True)
+def make_digest(n, flt, tab):
     if not n:
         return no_update
-    ups = _shown(flt)
+    ups = _shown(flt, tab)
     try:
         text = cw.digest([u['id'] for u in ups])
     except (ValueError, llm.LLMError) as e:
@@ -196,12 +250,12 @@ def make_digest(n, flt):
 
 
 @callback(Output('mail-draft', 'data', allow_duplicate=True), Input('cf-mail', 'n_clicks'), State('cf-filter', 'value'),
-          State('cf-digest-box', 'children'), prevent_initial_call=True)
-def mail(n, flt, _box):
+          State('cf-tabs', 'active_tab'), prevent_initial_call=True)
+def mail(n, flt, tab):
     """보이는 변경(최대 50건)을 메일로 — AI 가 있으면 묶음 요약을 본문에."""
     if not n:
         return no_update
-    ups = _shown(flt)
+    ups = _shown(flt, tab)
     if not ups:
         return no_update
     try:
