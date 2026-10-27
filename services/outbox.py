@@ -209,6 +209,19 @@ def draft_schedule(date_from: str, date_to: str, owner: str = schedules.DEFAULT_
             'to': '', 'attachments': [], 'related_kind': 'schedule', 'related_id': f'{date_from}~{date_to}'}
 
 
+def draft_confluence(updates: list[dict], digest: str = '') -> dict:
+    """컨플루언스 변경 소식 — AI 브리핑(있으면)과 바뀐 페이지 표 (services/confluence_watch.py)."""
+    table = _table(['페이지', '공간', '판', '수정', '바뀐 점'], [
+        [u['title'], u['space'], f"{u['version']}판", f"{u['modified_by']} {u['modified_at']}",
+         u['summary'] or (f"+{u['added']} / -{u['removed']}줄" if u['diff'] else '새 페이지')] for u in updates])
+    links = '\n'.join(f"- {u['title']}: {u['link']}" for u in updates if u['link'])
+    day = date.today().strftime('%m/%d')
+    return {'subject': f'[컨플루언스 변경] {day} — {len(updates)}건',
+            'text': (digest.strip() + '\n\n' if digest else f'지켜보는 컨플루언스 페이지 {len(updates)}건이 바뀌었습니다.\n\n')
+                    + (('페이지 링크\n' + links) if links else ''),
+            'table_html': table, 'to': '', 'attachments': [], 'related_kind': 'confluence', 'related_id': ''}
+
+
 def draft_absence(date_from: str, date_to: str) -> dict:
     """임원 부재 현황 — 기간과 겹치는 부재를 표로."""
     rows = absences.list_range(date_from, date_to)
