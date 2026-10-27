@@ -169,3 +169,19 @@ def test_check_uses_few_calls_and_runs_in_background(wiki, monkeypatch):
     assert cw.run_once()['new'] == 2
     assert len(wiki.calls) == 1  # 앞 판은 모아 둔 것 — 검색 한 번이면 끝
     assert not cw.is_running() and cw.last_run()['new'] == 2
+
+
+def test_group_by_page_and_mark_seen_page(wiki):
+    wiki.put('100', '주간 보고', 'EXEC', '2026-10-25T09:00:00', '김팀장', '<p>안건 3개</p>')
+    wiki.put('101', '조직 개편', 'EXEC', '2026-10-25T10:00:00', '최부장', '<p>초안</p>')
+    w = cw.add_watch('EXEC')
+    cw.check_watch(w['id'])
+    wiki.put('100', '주간 보고', 'EXEC', '2026-10-26T09:00:00', '박대리', '<p>안건 4개</p>')
+    cw.check_watch(w['id'])
+    wiki.put('100', '주간 보고', 'EXEC', '2026-10-27T09:00:00', '박대리', '<p>안건 5개</p>')
+    cw.check_watch(w['id'])
+    groups = cw.group_by_page(cw.list_updates(watch_id=w['id']))
+    assert [(g[0]['title'], [u['version'] for u in g]) for g in groups] == [('주간 보고', [3, 2, 1]), ('조직 개편', [1])]
+    assert cw.mark_seen_page(w['id'], '100') == 3
+    assert [u['page_id'] for u in cw.list_updates(unseen_only=True)] == ['101']
+    assert cw.list_watches()[0]['unseen'] == 1
