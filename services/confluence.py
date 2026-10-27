@@ -79,6 +79,34 @@ def is_confluence_url(url: str) -> bool:
 _URL = re.compile(r'https?://[^\s<>"\'\])}]+')
 
 
+def browser_base() -> str:
+    """사용자가 브라우저로 여는 위키 주소 — REST 게이트웨이 주소(CONFLUENCE_URL)와 다를 수 있다."""
+    return (_env('BROWSER_BASE_URL') or _normalize_base_url(_env('URL'))).rstrip('/')
+
+
+def page_url(page_id: str) -> str:
+    """페이지를 브라우저로 여는 주소."""
+    base = browser_base()
+    return f'{base}/pages/viewpage.action?pageId={page_id}' if base and page_id else ''
+
+
+def _is_api_url(url: str) -> bool:
+    """REST 호출 주소인지 — /rest/api/ 이거나, 브라우저 주소와 다른 REST 게이트웨이 주소로 시작."""
+    u = (url or '').lower()
+    rest = _normalize_base_url(_env('URL')).lower()
+    return '/rest/api/' in u or bool(rest and rest != browser_base().lower() and u.startswith(rest))
+
+
+def display_url(url: str, page_id: str = '') -> str:
+    """화면·메일에 보여 줄 주소 — API 주소면 그 페이지를 브라우저로 여는 주소로. 컨플루언스가 아니면 그대로."""
+    if not url or not is_confluence_url(url) or not _is_api_url(url):
+        return url
+    if not page_id:
+        m = re.search(r'/rest/api/content/(\d+)', url)
+        page_id = m.group(1) if m else (page_ref(url)[1] if page_ref(url)[0] == 'id' else '')
+    return page_url(page_id) or url
+
+
 def find_urls(text: str) -> list[str]:
     """글 속 컨플루언스 주소 (순서대로, 중복 없이)."""
     out = []
@@ -107,7 +135,7 @@ def page_ref(url: str) -> tuple:
     url = (url or '').strip()
     if url.isdigit():
         return 'id', url
-    for pat in (r'/pages/(\d+)(?:/|$|\?|#)', r'[?&]pageId=(\d+)'):
+    for pat in (r'/pages/(\d+)(?:/|$|\?|#)', r'[?&]pageId=(\d+)', r'/rest/api/content/(\d+)'):
         m = re.search(pat, url)
         if m:
             return 'id', m.group(1)
@@ -388,8 +416,26 @@ def text_for_ai(text: str) -> tuple[str, list[str]]:
 
 # ── 참고자료 링크 ─────────────────────────────────────────────────────
 
+SUMMARY_SYSTEM = """너는 임원실 직원이 참고자료로 붙인 컨플루언스 페이지를 요약하는 비서다.
+무엇에 관한 문서인지와 핵심 내용(결론·결정·수치·일정·담당)을 한국어 3~5문장으로 쓴다. 문서에 없는 내용은 쓰지 않는다.
+요약 글만 출력한다."""
+
+
+def summarize_text(title: str, text: str) -> str:
+    """페이지 내용 → AI 요약 (LLM 이 없으면 '')."""
+    from services import llm
+    if not llm.is_configured() or not (text or '').strip():
+        return ''
+    body = text[:llm.MAX_INPUT_CHARS]
+    try:
+        return llm.chat(SUMMARY_SYSTEM, f"페이지 제목: {title}\n\n본문:\n<<<\n{body}\n>>>").strip()[:3000]
+    except llm.LLMError as e:
+        return f'요약 실패: {str(e)[:200]}'
+
+
 def refresh_reference(ref_id: int) -> dict:
-    """컨플루언스 링크 참고자료의 내용을 (다시) 읽어 붙인다. 제목이 주소 그대로면 페이지 제목으로."""
+    """컨플루언스 링크 참고자료의 내용을 (다시) 읽어 붙인다. 제목이 주소 그대로면 페이지 제목으로,
+    주소가 API 주소면 브라우저로 여는 주소로 바꾸고, 내용이 바뀌었거나 요약이 없으면 AI 요약을 붙인다."""
     with db.SessionLocal() as s:
         r = s.get(Reference, ref_id)
         if r is None or r.kind != 'link' or not is_confluence_url(r.url):
@@ -410,10 +456,20 @@ def refresh_reference(ref_id: int) -> dict:
         r.content_at = None if limited else datetime.now().replace(microsecond=0)
         r.content_error = error[:500]
         if p:
+            changed = p['text'] != (r.content or '') or not r.content_summary
             r.content = p['text']
             if p['title'] and (not r.title or r.title == r.url):
                 r.title = p['title'][:300]
+            r.url = display_url(r.url, p['page_id'])  # 사용자에게는 페이지 주소로
         s.commit()
+    if p and changed:  # AI 요약은 DB 를 잡지 않은 채로 (몇 초 걸린다)
+        summary = summarize_text(p['title'], p['text'])
+        if summary:
+            with db.SessionLocal() as s:
+                r = s.get(Reference, ref_id)
+                if r is not None:
+                    r.content_summary = summary
+                    s.commit()
     if error:
         raise (RateLimited if limited else ConfluenceError)(error)
     return p
@@ -439,6 +495,26 @@ def read_new_references(limit: int = 10) -> int:
                 pass  # 실패도 content_at·content_error 로 남아 화면에서 다시 읽을 수 있다
             n += 1
     return n
+
+
+def summarize_missing(limit: int = 3) -> int:
+    """읽어 둔 내용은 있는데 AI 요약이 없는 컨플루언스 참고자료(요약 기능 전에 읽은 것 등)를 요약 — 컨플루언스는 부르지 않는다."""
+    from services import llm
+    if not llm.is_configured():
+        return 0
+    with db.SessionLocal() as s:
+        rows = s.execute(select(Reference.id, Reference.title, Reference.content).where(
+            Reference.kind == 'link', Reference.content != '', Reference.content.is_not(None),
+            (Reference.content_summary == '') | Reference.content_summary.is_(None))
+            .order_by(Reference.id.desc()).limit(limit)).all()
+    for ref_id, title, text in rows:
+        summary = summarize_text(title, text) or '요약 없음'
+        with db.SessionLocal() as s:
+            r = s.get(Reference, ref_id)
+            if r is not None:
+                r.content_summary = summary
+                s.commit()
+    return len(rows)
 
 
 def _read_new_references_bg() -> int:

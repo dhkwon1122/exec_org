@@ -123,7 +123,7 @@ def step(now: float | None = None) -> bool:
     if not minutes or idle_seconds(now) < minutes * 60 or now < _pause_until:
         return False
     with confluence.background():
-        read_refs = confluence.read_new_references(limit=3)
+        read_refs = confluence.read_new_references(limit=3) or confluence.summarize_missing(limit=3)
     if _fill_texts() or read_refs:  # 예전 첨부 글자 · 아직 안 읽은 컨플루언스 링크
         return True
     if not llm.is_configured():

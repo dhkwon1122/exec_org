@@ -134,6 +134,7 @@ class Reference(Base):
     content = Column(Text, default='')
     content_at = Column(DateTime)
     content_error = Column(String(500), default='')
+    content_summary = Column(Text, default='')  # 페이지 AI 요약 (읽은 내용이 바뀌면 다시)
 
     task = relationship('Task', back_populates='references')
 

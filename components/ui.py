@@ -43,8 +43,9 @@ def ref_target(ref: dict):
         # 공유 폴더 경로는 웹 링크로 열리지 않으므로 복사해서 탐색기에 붙여넣게 한다
         return unc_path(ref['url'])
     if ref['kind'] == 'link':
-        return html.A(ref['url'], href=ref['url'], target='_blank', rel='noopener noreferrer',
-                      className='small text-break')
+        from services import confluence
+        url = confluence.display_url(ref['url'])  # 컨플루언스 API 주소는 브라우저로 여는 주소로
+        return html.A(url, href=url, target='_blank', rel='noopener noreferrer', className='small text-break')
     if ref['kind'] == 'file':
         return html.A([html.I(className='bi bi-download me-1'), ref['file_name']],
                       href=f"/files/{ref['id']}", className='small')
@@ -52,27 +53,36 @@ def ref_target(ref: dict):
 
 
 def confluence_box(ref: dict, button_id: dict | None = None):
-    """컨플루언스 링크 참고자료 — 읽어 온 페이지 내용(펼쳐 보기)과 '다시 읽기'. 컨플루언스 링크가 아니면 None."""
+    """컨플루언스 링크 참고자료 — AI 요약, 읽어 온 원문(펼쳐 보기)과 '다시 읽기'. 컨플루언스 링크가 아니면 None."""
     from services import confluence
     if ref['kind'] != 'link' or not confluence.is_confluence_url(ref['url']):
         return None
     btn = dbc.Button([html.I(className='bi bi-arrow-repeat me-1'), '다시 읽기' if ref['content_at'] else '읽어 오기'],
                      id=button_id, color='link', size='sm', className='p-0 ms-2') if button_id else None
+    extra = None
     if ref['content_error']:
-        body = html.Span(f"읽지 못함 — {ref['content_error']}", className='text-danger')
+        status = html.Span(f"읽지 못함 — {ref['content_error']}", className='text-danger')
     elif ref['content']:
-        body = html.Details([
-            html.Summary(f"컨플루언스 내용 ({len(ref['content']):,}자 · {ref['content_at']} 읽음)"),
-            html.Pre(ref['content'][:20000], className='small bg-body-tertiary p-2 rounded mb-0',
-                     style={'whiteSpace': 'pre-wrap', 'maxHeight': '40vh', 'overflowY': 'auto'}),
-        ], className='d-inline')
+        status = html.Span(f"{ref['content_at']} 읽음", className='text-muted')
+        extra = html.Div([
+            html.Div([html.I(className='bi bi-stars me-1 text-warning'), ref['content_summary']],
+                     className='mt-1', style={'whiteSpace': 'pre-wrap'}) if ref['content_summary'] else None,
+            html.Details([
+                html.Summary(f"원문 보기 ({len(ref['content']):,}자)"),
+                html.Pre(ref['content'][:20000], className='small bg-body-tertiary p-2 rounded mb-0',
+                         style={'whiteSpace': 'pre-wrap', 'maxHeight': '40vh', 'overflowY': 'auto'}),
+            ], className='mt-1'),
+        ])
     elif ref['content_at']:
-        body = html.Span(f"컨플루언스 페이지 — 본문이 비어 있음 ({ref['content_at']} 읽음)", className='text-muted')
+        status = html.Span(f"본문이 비어 있음 ({ref['content_at']} 읽음)", className='text-muted')
     else:
-        body = html.Span('컨플루언스 페이지 — 아직 읽지 않음' if confluence.is_configured() else
-                         '컨플루언스 페이지 (연결 설정 전 — .env 의 CONFLUENCE_*)', className='text-muted')
-    return html.Div([dbc.Badge('컨플루언스', color='info', className='me-1'), body,
-                     btn if confluence.is_configured() else None], className='small mt-1')
+        status = html.Span('아직 읽지 않음' if confluence.is_configured() else
+                           '연결 설정 전 — .env 의 CONFLUENCE_*', className='text-muted')
+    return html.Div([
+        html.Div([dbc.Badge('컨플루언스', color='info', className='me-1'), status,
+                  btn if confluence.is_configured() else None]),
+        extra,
+    ], className='small mt-1')
 
 
 AUTO_TYPES = ('상태변경', '연결', '자료', '할일')
@@ -95,8 +105,10 @@ def history_refs(refs: list[dict], terms: list[str] | None = None):
             label = [highlight(r['title'], terms), ' '] if r['title'] != r['url'] else []
             items.append(html.Div([icon, *label, unc_path(r['url'])]))
         elif r['kind'] == 'link':
-            items.append(html.Div([icon, html.A(highlight(r['title'], terms), href=r['url'], target='_blank',
-                                                rel='noopener noreferrer', title=r['url'], className='text-break')]))
+            from services import confluence
+            url = confluence.display_url(r['url'])  # 컨플루언스 API 주소는 페이지 주소로
+            items.append(html.Div([icon, html.A(highlight(r['title'], terms), href=url, target='_blank',
+                                                rel='noopener noreferrer', title=url, className='text-break')]))
         elif r['kind'] == 'file':
             items.append(html.Div([icon, html.A(highlight(r['file_name'] or r['title'], terms),
                                                 href=f"/files/{r['id']}")]))

@@ -52,8 +52,7 @@ def first_days() -> int:
 
 
 def page_link(page_id: str) -> str:
-    base = confluence._env('BROWSER_BASE_URL') or confluence._normalize_base_url(confluence._env('URL'))
-    return f"{base.rstrip('/')}/pages/viewpage.action?pageId={page_id}" if base and page_id else ''
+    return confluence.page_url(page_id)
 
 
 # ── 워치 ──────────────────────────────────────────────────────────────
