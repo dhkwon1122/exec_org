@@ -139,3 +139,92 @@ def test_mail_ai_reads_linked_page(env, monkeypatch, tmp_path):
     assert '장비 | 2억' in seen[0]
     m = mailbox.get_mail(mid)
     assert m['suggestion']['confluence'] == ["컨플루언스 '2027 예산 지침'"] and '장비' not in m['body']
+
+
+# ── 호출 한도 (분당 N회) ──────────────────────────────────────────────
+
+class Clock:
+    def __init__(self):
+        self.t = 1_000_000.0
+
+    def time(self):
+        return self.t
+
+    def sleep(self, s):
+        self.t += s
+
+
+@pytest.fixture
+def clock(monkeypatch):
+    c = Clock()
+    monkeypatch.setattr(confluence.time, 'time', c.time)
+    monkeypatch.setattr(confluence.time, 'sleep', c.sleep)
+    return c
+
+
+def test_interactive_calls_wait_briefly_then_rate_limited(env, clock, monkeypatch):
+    monkeypatch.setenv('CONFLUENCE_RATE_PER_MINUTE', '5')
+    for i in range(5):
+        confluence._get(f'content/{i}')
+    assert confluence.calls_last_minute() == 5
+    with pytest.raises(confluence.RateLimited, match='분당 5회'):
+        confluence._get('content/9')  # 자리가 나려면 60초 — 화면은 15초까지만 기다린다
+    assert len(env) == 5 and clock.t == 1_000_000.0
+    clock.t += 50  # 50초 뒤엔 10초만 기다리면 된다
+    confluence._get('content/9')
+    assert len(env) == 6 and 1_000_060 <= clock.t < 1_000_061
+
+
+def test_background_leaves_room_for_screen(env, clock, monkeypatch):
+    monkeypatch.setenv('CONFLUENCE_RATE_PER_MINUTE', '5')
+    monkeypatch.setenv('CONFLUENCE_RATE_RESERVE', '2')
+    with confluence.background():
+        for i in range(3):
+            confluence._get(f'content/{i}')
+        start = clock.t
+        confluence._get('content/3')  # 백그라운드 몫(3회)을 다 써서 1분 기다림
+        assert clock.t - start >= 59
+    clock.t = start + 1  # (같은 1분 안의) 화면 호출은 남겨 둔 몫으로 바로
+    confluence._get('content/4')
+    assert len(env) == 5
+
+
+def test_429_blocks_everyone_and_background_retries(env, clock, monkeypatch):
+    calls = []
+
+    class R429:
+        status_code, text, headers = 429, '', {'Retry-After': '30'}
+
+    real = confluence.requests.get
+
+    def flaky(url, params=None, **kw):
+        calls.append(url)
+        return R429() if len(calls) == 1 else real(url, params, **kw)
+
+    monkeypatch.setattr(confluence.requests, 'get', flaky)
+    with pytest.raises(confluence.RateLimited, match='429'):
+        confluence._get('content/1')  # 화면 호출은 다시 하지 않고 알림
+    with pytest.raises(confluence.RateLimited):
+        confluence._get('content/2')  # 30초 동안 모두 멈춤 (15초 넘게 기다려야 함)
+    calls.clear()
+    with confluence.background():
+        t0 = clock.t
+        assert confluence._get('content/3')['id'] == '3'  # 429 → 30초 기다렸다 다시
+        assert clock.t - t0 >= 30 and len(calls) == 2
+
+
+def test_rate_limited_reference_is_left_for_background(env, clock, monkeypatch):
+    monkeypatch.setenv('CONFLUENCE_RATE_PER_MINUTE', '1')
+    t = store.create_task('예산')
+    a = store.add_reference(t['id'], 'link', url=f'{WIKI}/pages/1')
+    b = store.add_reference(t['id'], 'link', url=f'{WIKI}/pages/2')
+    confluence.refresh_reference(a['id'])
+    with pytest.raises(confluence.RateLimited):
+        confluence.refresh_reference(b['id'])
+    r = store.get_reference(b['id'])
+    assert r['content_at'] == '' and '호출 한도' in r['content_error']  # 아직 안 읽음 → 백그라운드가 이어 읽음
+    assert confluence.read_new_references() == 0  # 화면 몫으로는 여전히 한도 — 다음 기회에
+    with confluence.background():
+        monkeypatch.setenv('CONFLUENCE_RATE_RESERVE', '0')
+        assert confluence.read_new_references() == 1
+    assert store.get_reference(b['id'])['content']

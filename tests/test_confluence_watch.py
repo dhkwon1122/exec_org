@@ -39,8 +39,11 @@ class FakeWiki:
             for pid, p in self.pages.items():
                 if (f'space = "{p["space"]}"' in cql) or (f'id = {pid}' in cql) or ('ancestor' in cql and pid.startswith('2')):
                     when, by, _ = p['versions'][-1]
-                    out.append({'id': pid, 'title': p['title'], 'space': {'key': p['space']},
-                                'version': {'number': len(p['versions']), 'when': when, 'by': {'displayName': by}}})
+                    r = {'id': pid, 'title': p['title'], 'space': {'key': p['space']},
+                         'version': {'number': len(p['versions']), 'when': when, 'by': {'displayName': by}}}
+                    if 'body.storage' in params.get('expand', ''):
+                        r['body'] = {'storage': {'value': p['versions'][-1][2]}}
+                    out.append(r)
             return FakeResp(200, {'results': sorted(out, key=lambda r: r['version']['when'], reverse=True)})
         pid = path.split('/')[1]
         p = self.pages.get(pid)
@@ -149,3 +152,20 @@ def test_digest_and_mail_draft(wiki):
     assert d['related_kind'] == 'confluence'
     with pytest.raises(ValueError):
         cw.digest([])
+
+
+def test_check_uses_few_calls_and_runs_in_background(wiki, monkeypatch):
+    """호출 한도(분당 15회) — 검색 한 번에 본문까지, 앞 판은 모아 둔 게 없을 때만 따로."""
+    for pid in ('100', '101', '102'):
+        wiki.put(pid, f'페이지 {pid}', 'EXEC', '2026-10-26T09:00:00', '김팀장', f'<p>{pid} 첫 판</p>')
+    w = cw.add_watch('EXEC')
+    wiki.calls.clear()
+    assert cw.run_once(w['id'])['new'] == 3
+    assert [u for u, _ in wiki.calls if '/content/' in u and 'search' not in u] == []  # 본문은 검색 결과로
+    assert len(wiki.calls) == 1
+    for pid in ('100', '101'):
+        wiki.put(pid, f'페이지 {pid}', 'EXEC', '2026-10-27T09:00:00', '박대리', f'<p>{pid} 둘째 판</p>')
+    wiki.calls.clear()
+    assert cw.run_once()['new'] == 2
+    assert len(wiki.calls) == 1  # 앞 판은 모아 둔 것 — 검색 한 번이면 끝
+    assert not cw.is_running() and cw.last_run()['new'] == 2

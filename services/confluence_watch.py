@@ -5,7 +5,12 @@ CQL 로 최근 수정된 페이지를 찾음(content/search) → 페이지 판(v
 (?status=historical&version=N-1)을 비교한 바뀐 줄 → AI 가 '무엇이 바뀌었나' 요약(LLM 없으면 바뀐 줄 수만).
 안 본 업데이트 수는 사이드바 '컨플루언스' 옆에, 여러 건은 AI 로 묶어 요약하거나 메일로 보낸다.
 연결 설정은 services/confluence.py 와 같다.
+
+호출 한도(분당 15회)를 아끼려고: 검색 한 번에 본문까지 받고(expand=body.storage), 앞 판은 모아 둔 판이 없을 때만
+따로 부른다. 확인은 늘 백그라운드(confluence.background())로 돌려 자리가 날 때까지 기다리고, 화면의 '추가'·'지금 확인'은
+확인을 시작만 시키고 진행 상태(last_run()['running'])를 보여 준다.
 """
+from concurrent.futures import ThreadPoolExecutor
 import difflib
 import fcntl
 import json
@@ -203,7 +208,7 @@ def check_watch(watch_id: int) -> int:
             return 0
         try:
             results = confluence._get('content/search', {'cql': _cql(w, _days_since(w)), 'limit': MAX_PAGES_PER_CHECK,
-                                                         'expand': 'version,space'}).get('results') or []
+                                                         'expand': 'version,space,body.storage'}).get('results') or []
         except ConfluenceError as e:
             w.last_error, w.last_checked_at = str(e)[:500], datetime.now().replace(microsecond=0)
             s.commit()
@@ -223,7 +228,8 @@ def check_watch(watch_id: int) -> int:
                                  message=str(v.get('message') or '')[:500])
             prev_text = None
             try:
-                u.text = _body(pid)[:confluence.MAX_TEXT_CHARS]
+                storage = ((r.get('body') or {}).get('storage') or {}).get('value')  # 검색 결과에 실려 옴
+                u.text = (confluence.storage_to_text(storage) if storage is not None else _body(pid))[:confluence.MAX_TEXT_CHARS]
                 if ver > 1:
                     before = s.scalar(select(ConfluenceUpdate.text).where(ConfluenceUpdate.page_id == pid,
                                                                           ConfluenceUpdate.version == ver - 1))
@@ -235,13 +241,14 @@ def check_watch(watch_id: int) -> int:
                 _summarize(u, prev_text)
                 ai_left -= 1
             s.add(u)
-            s.flush()
+            s.commit()  # 페이지마다 저장 — 다음 페이지를 읽으며 호출 한도를 기다리는 동안 DB 를 잠그지 않게
             new += 1
         for u in s.scalars(select(ConfluenceUpdate).where(ConfluenceUpdate.watch_id == w.id,
                                                           ConfluenceUpdate.summary_status == '')
                            .order_by(ConfluenceUpdate.id).limit(max(0, ai_left))):  # 지난번에 못 한 요약
-            before = s.scalar(select(ConfluenceUpdate.text).where(ConfluenceUpdate.page_id == u.page_id,
-                                                                  ConfluenceUpdate.version == u.version - 1))
+            with s.no_autoflush:  # AI 를 기다리는 동안 쓰기 잠금을 쥐지 않게 — 마지막에 한 번 저장
+                before = s.scalar(select(ConfluenceUpdate.text).where(ConfluenceUpdate.page_id == u.page_id,
+                                                                      ConfluenceUpdate.version == u.version - 1))
             _summarize(u, None if u.version == 1 else before if before is not None else ('' if u.diff else None))
         w.last_error, w.last_checked_at = '', datetime.now().replace(microsecond=0)
         s.commit()
@@ -339,21 +346,57 @@ def last_run() -> dict:
         return {}
 
 
-def run_once() -> dict:
-    at = datetime.now().strftime('%Y-%m-%d %H:%M')
-    try:
-        r = check_all()
-        st = {'at': at, 'ok': not r['errors'], 'new': r['new'], 'errors': [f'{a}: {b}' for a, b in r['errors']][:5]}
-    except Exception as e:  # noqa: BLE001 — 주기 실행이 죽지 않게
-        log.exception('컨플루언스 워치 확인 실패')
-        st = {'at': at, 'ok': False, 'new': 0, 'errors': [f'{type(e).__name__}: {str(e)[:200]}']}
+_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix='confluence-watch')
+
+
+def _save_status(st: dict) -> None:
     try:
         os.makedirs(db.DATA_DIR, exist_ok=True)
         with open(_status_path(), 'w', encoding='utf-8') as f:
             json.dump(st, f, ensure_ascii=False)
     except OSError:
         pass
+
+
+def is_running() -> bool:
+    st = last_run()
+    if not st.get('running'):
+        return False
+    try:  # 프로세스가 죽어 'running' 이 남은 경우 — 한 시간 넘으면 끝난 것으로
+        return (datetime.now() - datetime.strptime(st.get('started', ''), '%Y-%m-%d %H:%M:%S')).total_seconds() < 3600
+    except ValueError:
+        return False
+
+
+def run_once(watch_id: int | None = None) -> dict:
+    """확인 한 번 (watch_id 를 주면 그 워치만) — 백그라운드 몫으로 호출 한도를 지키며. 상태 파일에 진행·결과를 남긴다."""
+    prev = last_run()
+    _save_status({**prev, 'running': True, 'started': datetime.now().strftime('%Y-%m-%d %H:%M:%S')})
+    at = datetime.now().strftime('%Y-%m-%d %H:%M')
+    try:
+        with confluence.background():
+            if watch_id is None:
+                r = check_all()
+            else:
+                try:
+                    r = {'new': check_watch(watch_id), 'errors': []}
+                except ConfluenceError as e:
+                    r = {'new': 0, 'errors': [(str(watch_id), str(e))]}
+        st = {'at': at, 'ok': not r['errors'], 'new': r['new'], 'errors': [f'{a}: {b}' for a, b in r['errors']][:5]}
+    except Exception as e:  # noqa: BLE001 — 주기 실행이 죽지 않게
+        log.exception('컨플루언스 워치 확인 실패')
+        st = {'at': at, 'ok': False, 'new': 0, 'errors': [f'{type(e).__name__}: {str(e)[:200]}']}
+    _save_status({**st, 'running': False})
     return st
+
+
+def run_later(watch_id: int | None = None) -> bool:
+    """화면에서 — 확인을 백그라운드로 시작한다(이미 도는 중이면 False). 호출 한도 때문에 몇 분 걸릴 수 있다."""
+    if is_running():
+        return False
+    _save_status({**last_run(), 'running': True, 'started': datetime.now().strftime('%Y-%m-%d %H:%M:%S')})
+    _executor.submit(run_once, watch_id)
+    return True
 
 
 def start() -> bool:
@@ -372,7 +415,7 @@ def start() -> bool:
     def loop():
         time.sleep(60)
         while True:
-            if list_watches():
+            if list_watches() and not is_running():  # 화면에서 시작한 확인이 도는 중이면 이번엔 건너뜀
                 run_once()
             time.sleep(interval_minutes() * 60)
 
