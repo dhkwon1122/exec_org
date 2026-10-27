@@ -314,7 +314,7 @@ def digest(update_ids: list[int]) -> str:
         rows = list(s.scalars(select(ConfluenceUpdate).where(ConfluenceUpdate.id.in_([int(i) for i in update_ids]))
                               .order_by(ConfluenceUpdate.modified_at)))
     lines = [f"- {u.title} ({u.space}, {u.version}판, {u.modified_by}, {(u.modified_at or '')[:10]}): "
-             f"{u.summary or (f'바뀐 줄 {len((u.diff or '').splitlines())}줄' if u.diff else '새 페이지')}" for u in rows]
+             f"{u.summary or (f'바뀐 줄 {len(u.diff.splitlines())}줄' if u.diff else '새 페이지')}" for u in rows]
     if not lines:
         raise ValueError('요약할 업데이트가 없습니다.')
     if not llm.is_configured():
