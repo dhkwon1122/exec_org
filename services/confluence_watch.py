@@ -83,7 +83,8 @@ def _watch_dict(w: ConfluenceWatch, unseen: int = 0) -> dict:
     return {'id': w.id, 'kind': w.kind, 'space_key': w.space_key or '', 'page_id': w.page_id or '',
             'children': bool(w.children), 'title': w.title or '', 'url': w.url or '', 'active': bool(w.active),
             'last_checked_at': w.last_checked_at.strftime('%Y-%m-%d %H:%M') if w.last_checked_at else '',
-            'last_error': w.last_error or '', 'unseen': unseen,
+            'last_error': w.last_error or '', 'unseen': unseen, 'alias': w.alias or '',
+            'name': w.alias or w.title or w.space_key or '',  # 탭·목록에 보일 이름
             'label': (f"공간 {w.space_key}" if w.kind == 'space' else
                       f"페이지{' + 하위' if w.children else ''}") + (f" · {w.title}" if w.title else '')}
 
@@ -130,6 +131,16 @@ def delete_watch(watch_id: int) -> None:
         if w:
             s.delete(w)
             s.commit()
+
+
+def set_alias(watch_id: int, alias: str) -> None:
+    """탭·목록에 보일 이름 — 비우면 컨플루언스의 공간·페이지 이름으로 돌아간다."""
+    with db.SessionLocal() as s:
+        w = s.get(ConfluenceWatch, watch_id)
+        if w is None:
+            raise ValueError('지켜보는 곳을 찾을 수 없습니다.')
+        w.alias = (alias or '').strip()[:100]
+        s.commit()
 
 
 def set_active(watch_id: int, active: bool) -> None:
@@ -263,7 +274,7 @@ def check_all() -> dict:
         try:
             new += check_watch(w['id'])
         except ConfluenceError as e:
-            errors.append((w['title'] or w['space_key'], str(e)))
+            errors.append((w['name'], str(e)))
     return {'new': new, 'errors': errors}
 
 
@@ -281,14 +292,14 @@ def _update_dict(u: ConfluenceUpdate, watch_title: str = '') -> dict:
 
 def list_updates(watch_id: int | None = None, unseen_only: bool = False, limit: int = 200) -> list[dict]:
     with db.SessionLocal() as s:
-        stmt = select(ConfluenceUpdate, ConfluenceWatch.title).join(ConfluenceWatch,
-                                                                     ConfluenceWatch.id == ConfluenceUpdate.watch_id)
+        stmt = select(ConfluenceUpdate, ConfluenceWatch).join(ConfluenceWatch,
+                                                               ConfluenceWatch.id == ConfluenceUpdate.watch_id)
         if watch_id:
             stmt = stmt.where(ConfluenceUpdate.watch_id == watch_id)
         if unseen_only:
             stmt = stmt.where(ConfluenceUpdate.seen.is_(False))
         rows = s.execute(stmt.order_by(ConfluenceUpdate.modified_at.desc(), ConfluenceUpdate.id.desc()).limit(limit))
-        return [_update_dict(u, t or '') for u, t in rows]
+        return [_update_dict(u, w.alias or w.title or w.space_key or '') for u, w in rows]
 
 
 def unseen_count() -> int:

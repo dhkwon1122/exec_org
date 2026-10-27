@@ -164,7 +164,8 @@ class ConfluenceWatch(Base):
     space_key = Column(String(100), default='')
     page_id = Column(String(30), default='')
     children = Column(Boolean, default=True)
-    title = Column(String(500), default='')
+    title = Column(String(500), default='')  # 컨플루언스의 공간·페이지 이름
+    alias = Column(String(100), default='')  # 탭·목록에 보일 이름 (비면 title)
     url = Column(String(1000), default='')
     active = Column(Boolean, default=True)
     last_checked_at = Column(DateTime)
