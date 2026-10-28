@@ -111,6 +111,22 @@ python app.py                # http://localhost:8050
   계정 → 비밀번호 → 역할 → 세션 키를 단계별로 확인하고, `docker compose logs app | grep login` 으로 실패 사유를 본다.
 - 단독 실행/개발: `DATABASE_URL`·`USER_DATABASE_URL`을 비우면 로컬 `app_users`를 쓴다 → `python scripts/create_user.py <아이디> <이름>`
 
+### AD SSO (ADFS)
+
+`SSO_HOST`·`SSO_CLIENT_ID`를 설정하면 로그인 화면이 'AD 계정으로 로그인' 버튼으로 바뀐다 (`services/sso.py`, 설정은 `.env.example`).
+
+1. `/auth/sso` → `https://{SSO_HOST}/adfs/oauth2/authorize/` 로 302 (`client_id`, `redirect_uri`, `response_mode=form_post`,
+   `response_type=code id_token`, `scope=openid profile`, `nonce`=랜덤 UUID). nonce 는 서명한 전용 쿠키(`exec_org_session_sso`, 10분)에 둔다.
+2. ADFS 가 `/auth/sso/callback` 으로 `id_token` 을 POST 폼으로 보낸다.
+3. RS256 서명(`SSO_CERT_FILE` 인증서, 없으면 JWKS 엔드포인트), `exp`, `aud`(=client_id), `iss`(`SSO_ISSUER` 설정 시), `nonce` 를 확인한다.
+4. 클레임 `loginid`·`username`·`deptname` 을 꺼낸다 (이름은 `SSO_CLAIM_*` 로 변경).
+5. 로그인 ID 로 사용자 DB 에서 계정을 찾고(대소문자 무시) 역할을 확인한 뒤 비밀번호 로그인과 같은 세션을 만든다.
+   공유 사용자 DB 에는 쓰지 않으므로 계정이 없으면 막힌다. 단독 실행 모드에서만 계정을 만든다(역할 `SSO_NEW_USER_ROLE`).
+
+- 콜백은 ADFS(다른 사이트)에서 오는 POST 라 **https 로 운영**해야 nonce 쿠키(SameSite=None; Secure)가 따라온다.
+  http 에서는 ADFS 와 이 서버가 같은 사이트(같은 상위 도메인)일 때만 된다. 실패 사유는 `docker compose logs app | grep sso`.
+- SSO 를 켜면 비밀번호 로그인은 꺼진다 — 비상용으로 같이 쓰려면 `SSO_PASSWORD_LOGIN=1`.
+
 ## 구조
 
 ```
@@ -122,6 +138,7 @@ services/llm.py         OpenAI 호환 LLM 호출, 원문 → 제목·요약·키
 services/enrich.py      AI 정리 백그라운드 처리 (스레드풀)
 services/users.py       사용자 DB(app_users) 조회·비밀번호 확인 — 공유 DB 는 읽기 전용
 services/auth.py        역할 기반 접속 제한, 로그인 세션, 로그인 시도 제한
+services/sso.py         AD SSO(ADFS) — 로그인 주소 만들기, id_token 서명·만료·nonce 검증, 클레임 추출
 components/ui.py        배지·아이콘·이력 카드·검색어 강조 등 공용 표시 조각
 components/history_form.py  이력 입력 폼 (업무 상세·빠른 기록 공용)
 components/todo_ui.py   업무 체크 목록·빠른 추가 폼, 체크/삭제 공용 콜백

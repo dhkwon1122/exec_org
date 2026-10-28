@@ -11,6 +11,7 @@ def fresh_db(tmp_path, monkeypatch):
     monkeypatch.delenv('USER_DATABASE_URL', raising=False)
     monkeypatch.delenv('DATABASE_URL', raising=False)
     monkeypatch.delenv('EXEC_ORG_ROLES', raising=False)
+    monkeypatch.delenv('SSO_HOST', raising=False)  # SSO 를 켜면 비밀번호 로그인이 꺼진다 (test_sso.py)
     db.configure('sqlite:///' + str(tmp_path / 'test.db'))
     users.reset()
     auth._failures.clear()
