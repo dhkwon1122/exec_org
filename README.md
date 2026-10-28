@@ -75,7 +75,7 @@ docker compose up -d --build          # http://<서버>:8502
 - 사내 CA 가 필요하면 빌드 전에 `certs/`에 넣는다 (`certs/README.md`). People in SAIT 의 `certs/` 파일을 그대로 써도 된다.
 - 사외에서 빌드할 때는 `docker-compose.yml`의 build args(사내 pip/프록시)를 빈 값으로 바꾼다.
 - (선택) HTTPS 가 가능해지면: `scripts/gen_self_signed_cert.sh <IP>` 로 인증서를 만들고 `.env`에
-  `TRUSTED_PROXY_COUNT=1` 을 넣은 뒤 `docker compose --profile proxy up -d` → `https://<서버>:8443`
+  `TRUSTED_PROXY_COUNT=1` 을 넣은 뒤 `docker compose --profile proxy up -d` → `https://<서버>:9443` (포트는 `.env` 의 `PROXY_HTTPS_PORT`)
 - People in SAIT 가 같은 서버에서 postgres 컨테이너(bundled-db)를 쓰면 그 네트워크에 붙인다:
   `docker compose -f docker-compose.yml -f docker-compose.people-net.yml up -d --build`
   (이때 `DATABASE_URL`의 호스트는 `db`)
