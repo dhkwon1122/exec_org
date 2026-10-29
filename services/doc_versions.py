@@ -11,7 +11,7 @@ import re
 from sqlalchemy import select
 
 from services import db
-from services.db import InboundMail, MailAttachment
+from services.db import DocKeyAlias, InboundMail, MailAttachment
 
 _VERSION = re.compile(r'(?i)(?:^|(?<=[\s_\-.(\[]))(?:rev|ver|v|r)\.?\s?(\d+(?:\.\d+)?)(?=$|[\s_\-.)\]])')
 _COPY = re.compile(r'\s*\(\d{1,2}\)\s*$')  # 윈도우가 붙이는 '(1)'
@@ -55,6 +55,22 @@ def parse_name(filename: str) -> dict:
     norm = _SEPS.sub('', work).lower() or _SEPS.sub('', stem).lower() or name.lower()
     return {'key': f'{norm}.{ext}' if ext else norm, 'base': base or stem, 'ext': ext, 'date': found,
             'version': version}
+
+
+def resolve(s, key: str) -> str:
+    """사용자가 합친 문서면 합친 쪽 열쇠로 (DocKeyAlias, 몇 단계든)."""
+    seen = {key}
+    while True:
+        target = s.scalar(select(DocKeyAlias.target).where(DocKeyAlias.key == key))
+        if not target or target in seen:
+            return key
+        seen.add(target)
+        key = target
+
+
+def key_for(s, filename: str) -> str:
+    """파일 이름 → 문서 열쇠 (이름 규칙 + 사용자가 합친 것)."""
+    return resolve(s, parse_name(filename)['key'][:300])[:300]
 
 
 def _order(item: dict) -> tuple:
@@ -113,7 +129,7 @@ def save(mail_id: int, files: list[tuple[str, bytes]]) -> int:
             with open(os.path.join(db.UPLOAD_DIR, rel), 'wb') as f:
                 f.write(data)
             s.add(MailAttachment(mail_id=mail_id, filename=name[:300], file_path=rel, size=len(data),
-                                 sha256=hashlib.sha256(data).hexdigest(), doc_key=parse_name(name)['key'][:300]))
+                                 sha256=hashlib.sha256(data).hexdigest(), doc_key=key_for(s, name)))
             n += 1
         s.commit()
     return n

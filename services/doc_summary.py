@@ -136,7 +136,7 @@ def ensure_reference_keys() -> int:
         rows = list(s.scalars(select(Reference).where(Reference.kind == 'file',
                                                       or_(Reference.doc_key == '', Reference.doc_key.is_(None)))))
         for r in rows:
-            r.doc_key = doc_versions.parse_name(r.file_name or r.title or '')['key'][:300]
+            r.doc_key = doc_versions.key_for(s, r.file_name or r.title or '')
             try:
                 with open(os.path.join(db.UPLOAD_DIR, r.file_path or ''), 'rb') as f:
                     r.sha256 = hashlib.sha256(f.read()).hexdigest()

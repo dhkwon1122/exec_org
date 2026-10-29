@@ -25,8 +25,8 @@ def layout(**_):
     ])
 
 
-@callback(Output('ref-results', 'children'), Input('rq', 'value'), Input('rkind', 'value'))
-def search(q, kind):
+@callback(Output('ref-results', 'children'), Input('rq', 'value'), Input('rkind', 'value'), Input('doc-changed', 'data'))
+def search(q, kind, _changed=None):
     """문서(메일 첨부·올린 파일을 같은 문서끼리 판으로)와 링크·메모."""
     docs = documents.search(q or '') if kind in ('', 'file', 'mail', None) else []
     if kind == 'mail':  # 메일로 받은 판이 있는 문서만

@@ -799,7 +799,7 @@ def add_reference(task_id: int | None, kind: str, title: str = '', url: str = ''
                 raise ValueError('첨부 파일을 저장하지 못했습니다. 저장을 취소했으니 다시 시도하세요.') from e
             r.file_name, r.file_path = file_name, rel
             from services import doc_versions  # 같은 문서끼리 판으로 묶을 열쇠 (메일 첨부와 같은 규칙)
-            r.doc_key = doc_versions.parse_name(file_name)['key'][:300]
+            r.doc_key = doc_versions.key_for(s, file_name)
             r.sha256 = hashlib.sha256(file_bytes).hexdigest()
         s.add(r)
         if history_id is None:

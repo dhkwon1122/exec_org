@@ -487,6 +487,17 @@ class MailRule(Base):
     created_at = Column(DateTime, default=_now)
 
 
+class DocKeyAlias(Base):
+    """사용자가 합친 문서 — 파일 이름에서 나온 열쇠(key)를 다른 문서의 열쇠(target)로 본다 (services/documents.py
+    merge/split). 앞으로 같은 이름 규칙의 파일이 와도 합친 문서로 들어간다."""
+    __tablename__ = 'doc_key_aliases'
+
+    id = Column(Integer, primary_key=True)
+    key = Column(String(300), nullable=False, unique=True)
+    target = Column(String(300), nullable=False)
+    created_at = Column(DateTime, default=_now)
+
+
 class Todo(Base):
     """예전 '할 일' — 지금은 업무(하위 업무)로 합쳐졌다. 예전 DB 에 남은 행은 시작할 때 업무로 옮기고 지운다
     (_merge_todos_into_tasks). 새로 쓰지 않는다."""
