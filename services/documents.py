@@ -11,17 +11,31 @@ import os
 from services import db, doc_versions, store
 
 
-def _ref_version(r: dict, hist_titles: dict) -> dict:
+def _ref_version(r: dict, hist_titles: dict, extra: dict) -> dict:
+    """extra: 올린 파일 id → {'sha256', 'insight'} (DB 칸 — store 의 자료 사전에는 없는 것)."""
     name = r['file_name'] or r['title']
     p = doc_versions.parse_name(name)
     path = os.path.join(db.UPLOAD_DIR, r['file_path']) if r.get('file_path') else ''
+    more = extra.get(r['id'], {})
     return {'kind': 'ref', 'id': f"r{r['id']}", 'ref_id': r['id'], 'filename': name, 'href': f"/files/{r['id']}",
-            'size': os.path.getsize(path) if path and os.path.isfile(path) else 0, 'sha256': '',
+            'size': os.path.getsize(path) if path and os.path.isfile(path) else 0, 'sha256': more.get('sha256', ''),
             'key': p['key'], 'base': p['base'], 'name_date': p['date'], 'name_version': p['version'],
             'date': (r.get('created_at') or '')[:10], 'received': r.get('created_at') or '',
             'source': '기록 첨부' if r.get('history_id') else '직접 등록',
             'history_title': hist_titles.get(r.get('history_id'), ''), 'via_task': r.get('via_task'),
-            'insight': None}
+            'insight': more.get('insight')}
+
+
+def _ref_extra(ref_ids) -> dict:
+    from sqlalchemy import select
+    from services import doc_summary
+    from services.db import Reference
+    ids = list(ref_ids)
+    if not ids:
+        return {}
+    with db.SessionLocal() as s:
+        return {r.id: {'sha256': r.sha256 or '', 'insight': doc_summary.insight(r)}
+                for r in s.scalars(select(Reference).where(Reference.id.in_(ids)))}
 
 
 def _mail_version(v: dict) -> dict:
@@ -61,11 +75,26 @@ def _merge(mail_groups: list[dict], ref_files: list[dict]) -> list[dict]:
     for g in mail_groups:
         by_key.setdefault(g['doc_key'], []).extend(_mail_version(v) for v in g['versions'])
     hist_titles = store.history_titles(r['history_id'] for r in ref_files)
+    extra = _ref_extra(r['id'] for r in ref_files)
     for r in ref_files:
-        v = _ref_version(r, hist_titles)
+        v = _ref_version(r, hist_titles, extra)
         by_key.setdefault(v['key'], []).append(v)
     docs = [_document(k, vs) for k, vs in by_key.items()]
     return sorted(docs, key=lambda d: (d['updated'], d['latest']['received']), reverse=True)
+
+
+def timeline(key: str) -> list[dict]:
+    """한 문서의 모든 판 (메일 첨부·올린 파일, 업무와 상관없이) — 오래된 판부터. 앞 판 찾기·비교에 쓴다."""
+    from sqlalchemy import select
+    from services.db import Reference
+    if not key:
+        return []
+    with db.SessionLocal() as s:
+        mail = doc_versions._rows(s, {key}).get(key, [])
+        ref_ids = list(s.scalars(select(Reference.id).where(Reference.kind == 'file', Reference.doc_key == key)))
+    refs = [store.get_reference(i) for i in ref_ids]
+    docs = _merge([{'doc_key': key, 'versions': mail}] if mail else [], [r for r in refs if r])
+    return docs[0]['versions'] if docs else []
 
 
 def for_task(task_id: int, include_children: bool = True) -> list[dict]:

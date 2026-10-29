@@ -5,6 +5,7 @@
 자동으로 남겨, 업무의 흐름을 이력 타임라인 하나로 따라갈 수 있게 한다.
 """
 import calendar
+import hashlib
 import json
 import math
 import os
@@ -797,6 +798,9 @@ def add_reference(task_id: int | None, kind: str, title: str = '', url: str = ''
             except OSError as e:
                 raise ValueError('첨부 파일을 저장하지 못했습니다. 저장을 취소했으니 다시 시도하세요.') from e
             r.file_name, r.file_path = file_name, rel
+            from services import doc_versions  # 같은 문서끼리 판으로 묶을 열쇠 (메일 첨부와 같은 규칙)
+            r.doc_key = doc_versions.parse_name(file_name)['key'][:300]
+            r.sha256 = hashlib.sha256(file_bytes).hexdigest()
         s.add(r)
         if history_id is None:
             label = {'link': '링크', 'file': '파일', 'note': '메모'}[kind]
