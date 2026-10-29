@@ -131,12 +131,17 @@ def step(now: float | None = None) -> bool:
     if not llm.is_configured():
         return False
     ids = pending(limit=1)
-    if not ids:
-        return False
+    analyze_one = doc_summary.analyze
+    if not ids:  # 메일 첨부가 끝나면 올린 파일
+        ids, analyze_one = doc_summary.pending_refs(limit=5), doc_summary.analyze_ref
+        ids = [i for i in ids if _fails.get(-i, 0) < MAX_FAILS]  # 실패 기록은 음수 id 로 (메일 첨부 id 와 겹치지 않게)
+        if not ids:
+            return False
+        ids = [-ids[0]]
     att_id = ids[0]
     at = datetime.now().strftime('%Y-%m-%d %H:%M')
     try:
-        r = doc_summary.analyze(att_id)
+        r = analyze_one(abs(att_id))
     except llm.LLMError as e:
         _fails[att_id] = _fails.get(att_id, 0) + 1
         _pause_until = now + PAUSE_ON_ERROR

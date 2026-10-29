@@ -136,6 +136,18 @@ class Reference(Base):
     content_error = Column(String(500), default='')
     content_summary = Column(Text, default='')  # 페이지 AI 요약 (읽은 내용이 바뀌면 다시)
     content_tries = Column(Integer, default=0)  # 읽기 연속 실패 횟수 — 쉬는 시간 재시도 간격 (confluence.retry_failed_references)
+    # 올린 파일의 문서 판·AI 요약 — 메일 첨부(MailAttachment)와 같은 칸 이름 (services/doc_summary.py 가 둘을 같이 다룸)
+    doc_key = Column(String(300), default='', index=True)  # 같은 문서 열쇠 (doc_versions.parse_name)
+    sha256 = Column(String(64), default='')
+    text = Column(Text, default='')
+    text_note = Column(String(300), default='')
+    text_at = Column(DateTime)
+    doc_type = Column(String(50), default='')
+    summary = Column(Text, default='')
+    tags = Column(String(500), default='')
+    key_dates = Column(Text, default='')
+    changes = Column(Text, default='')  # 같은 문서의 바로 앞 판(메일 첨부든 올린 파일이든)과 달라진 점
+    analyzed_at = Column(DateTime)
 
     task = relationship('Task', back_populates='references')
 
