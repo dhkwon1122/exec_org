@@ -229,8 +229,8 @@ def layout(task_id=None, src=None, **_):
           Output('td-pending', 'data'), Output('td-poll', 'disabled'),
           Output('td-todos', 'children'), Output('td-todo-tab', 'label'), Output('tt-assignee', 'options'),
           Input('td-refresh', 'data'), Input('todo-changed', 'data'), Input('history-changed', 'data'),
-          State('td-id', 'data'))
-def render(_, _t, _h, tid):
+          Input('doc-changed', 'data'), State('td-id', 'data'))
+def render(_, _t, _h, _d, tid):
     t = store.get_task(tid)
     if t is None:
         return dbc.Alert('삭제된 업무입니다.', color='warning'), None, None, None, None, [], [], True, None, '하위 업무', []

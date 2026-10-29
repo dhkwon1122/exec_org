@@ -1,7 +1,7 @@
 """메일 첨부 문서의 판(버전) 보기 — 받은 메일 상세와 업무 상세가 같이 쓴다 (services/doc_versions.py).
 파일마다 AI 요약·태그(services/doc_summary.py)를 보여 주고, 'AI 요약' 버튼으로 그 자리에서 요약한다."""
 import dash_bootstrap_components as dbc
-from dash import MATCH, Input, Output, State, callback, dcc, html, no_update
+from dash import ALL, MATCH, Input, Output, State, callback, ctx, dcc, html, no_update
 
 from services import doc_summary, llm
 
@@ -132,7 +132,7 @@ def analyze_doc(n, ident):
 SHOW_VERSIONS = 4  # 최근 판 몇 개를 펼쳐 보이고 나머지는 접을지
 
 
-def _version_line(v: dict, delete: bool):
+def _version_line(v: dict, delete: bool, key: str = '', splittable: bool = False):
     """판 하나 — 판 번호·날짜·파일·출처, 그 판에서 달라진 점(없으면 요약 한 줄)."""
     from components.ui import task_link
     ins = v['insight'] if v['insight'] and v['insight']['analyzed'] else None
@@ -155,6 +155,9 @@ def _version_line(v: dict, delete: bool):
             html.Span('(앞 판과 같은 파일)', className='text-muted me-2') if v['dup'] else None,
             html.Span(source, className='text-muted me-auto'),
             _version_ai_button(v),
+            dbc.Button(html.I(className='bi bi-scissors'), id={'type': 'doc-split', 'key': _kid(key), 'id': v['id']},
+                       color='link', size='sm', className='text-muted p-0 ms-2',
+                       title='이 판을 다른 문서로 떼어 내기 (잘못 묶였을 때)') if splittable else None,
             dbc.Button(html.I(className='bi bi-x'), id={'type': 'r-del', 'id': v['ref_id']}, color='link', size='sm',
                        className='text-muted p-0 ms-2', title='이 파일 지우기') if delete and v['kind'] == 'ref' else None,
         ], className='d-flex align-items-center flex-wrap'),
@@ -211,7 +214,7 @@ def document_cards(docs: list[dict], delete: bool = False, empty: str = ''):
     cards = []
     for d in docs:
         ins = d['insight']
-        rows = [_version_line(v, delete) for v in reversed(d['versions'])]
+        rows = [_version_line(v, delete, d['key'], len(d['versions']) > 1) for v in reversed(d['versions'])]
         cards.append(dbc.Card(dbc.CardBody([
             html.Div([
                 html.I(className=f"bi {_icon(d['latest']['filename'])} me-2"),
@@ -219,6 +222,10 @@ def document_cards(docs: list[dict], delete: bool = False, empty: str = ''):
                 html.Span(f".{d['ext']}", className='text-muted me-2') if d['ext'] else None,
                 dbc.Badge(f"판 {d['n_versions']}개", color='info', className='me-2') if d['n_versions'] > 1 else None,
                 html.Span(f"최근 {d['updated']}", className='small text-muted ms-auto'),
+                dbc.Button([html.I(className='bi bi-intersect me-1'), '합치기'],
+                           id={'type': 'doc-merge', 'key': _kid(d['key'])}, color='link', size='sm',
+                           className='text-muted p-0 ms-2 text-decoration-none',
+                           title='이름이 조금 달라 따로 묶인 같은 문서와 합치기'),
             ], className='d-flex align-items-center flex-wrap'),
             html.Div([
                 dbc.Badge(ins['doc_type'], color='light', text_color='dark', className='me-1 border') if ins['doc_type'] else None,
@@ -232,3 +239,88 @@ def document_cards(docs: list[dict], delete: bool = False, empty: str = ''):
             if len(rows) > SHOW_VERSIONS else None,
         ]), className='mb-2'))
     return html.Div(cards)
+
+
+# ── 문서 합치기·나누기 (services/documents.py merge/split) — 대화 상자는 앱 레이아웃에 하나 ──────
+
+def _kid(key: str) -> str:
+    """단추 id 에 넣을 문서 열쇠 — 열쇠의 '.'(확장자)이 Dash 의 '아이디.속성' 구분과 섞이지 않게 16진수로."""
+    return key.encode('utf-8').hex()
+
+
+def doc_tools_modal():
+    return html.Div([
+        dcc.Store(id='doc-tool'),
+        dcc.Store(id='doc-changed', data=0),  # 합치거나 나누면 증가 → 문서 목록을 다시 그림
+        dbc.Modal([
+            dbc.ModalHeader(dbc.ModalTitle(id='doc-tool-title')),
+            dbc.ModalBody([
+                html.Div(id='doc-tool-desc', className='small mb-2'),
+                html.Div(dcc.Dropdown(id='doc-tool-target', placeholder='합칠 문서 (이름으로 찾기)', optionHeight=50),
+                         id='doc-tool-target-box'),
+                html.Div([dbc.Label('새 문서 이름', className='small mb-1'),
+                          dbc.Input(id='doc-tool-name', placeholder='예: 2027 장비 예산안')], id='doc-tool-name-box'),
+                html.Div(id='doc-tool-msg', className='small text-danger mt-2'),
+            ]),
+            dbc.ModalFooter([
+                dbc.Button('취소', id='doc-tool-cancel', color='secondary', outline=True),
+                dbc.Button('확인', id='doc-tool-ok', color='primary'),
+            ]),
+        ], id='doc-tool-modal', is_open=False),
+    ])
+
+
+def _version_name(vid: str) -> str:
+    from services import doc_versions, store
+    if vid.startswith('m'):
+        return (doc_versions.get(int(vid[1:])) or {}).get('filename', '')
+    r = store.get_reference(int(vid[1:]))
+    return (r['file_name'] or r['title']) if r else ''
+
+
+@callback(Output('doc-tool-modal', 'is_open', allow_duplicate=True), Output('doc-tool', 'data'),
+          Output('doc-tool-title', 'children'), Output('doc-tool-desc', 'children'),
+          Output('doc-tool-target', 'options'), Output('doc-tool-target', 'value'),
+          Output('doc-tool-name', 'value'), Output('doc-tool-target-box', 'style'),
+          Output('doc-tool-name-box', 'style'), Output('doc-tool-msg', 'children', allow_duplicate=True),
+          Input({'type': 'doc-merge', 'key': ALL}, 'n_clicks'),
+          Input({'type': 'doc-split', 'key': ALL, 'id': ALL}, 'n_clicks'), prevent_initial_call=True)
+def open_doc_tool(_m, _s):
+    from services import documents
+    trig = ctx.triggered_id
+    if not trig or not (ctx.triggered and ctx.triggered[0]['value']):
+        return (no_update,) * 10
+    hide, show = {'display': 'none'}, {}
+    key = bytes.fromhex(trig['key']).decode('utf-8')
+    if trig['type'] == 'doc-merge':
+        opts = [{'label': d['label'], 'value': d['key']} for d in documents.catalog(exclude=key)]
+        desc = ['이 문서의 모든 판을 고른 문서로 옮겨 한 문서로 봅니다. 판 번호는 이름 속 날짜·판 표시와 받은·올린 '
+                '날짜로 다시 매겨집니다. ',
+                html.B('앞으로 이 이름으로 오는 파일도 고른 문서로 들어갑니다.'),
+                ' 잘못 합쳤으면 판 옆 가위 단추로 다시 떼어 낼 수 있습니다.']
+        return True, {'mode': 'merge', 'key': key}, '다른 문서와 합치기', desc, opts, None, '', show, hide, ''
+    vid = trig['id']
+    filename = _version_name(vid)
+    desc = [html.Span(filename, className='fw-semibold'), ' 판을 이 문서에서 떼어 새 문서로 둡니다. 같은 이름의 문서가 '
+            '이미 있으면 그 문서로 들어갑니다. 떼어 낸 이름이 다른 문서로 합쳐져 있었다면 합친 것도 풀립니다.']
+    name = documents.split_suggestion(key, {'filename': filename})
+    return True, {'mode': 'split', 'key': key, 'id': vid}, '판 떼어 내기', desc, [], None, name, hide, show, ''
+
+
+@callback(Output('doc-tool-modal', 'is_open', allow_duplicate=True), Output('doc-changed', 'data'),
+          Output('doc-tool-msg', 'children', allow_duplicate=True),
+          Input('doc-tool-ok', 'n_clicks'), Input('doc-tool-cancel', 'n_clicks'),
+          State('doc-tool', 'data'), State('doc-tool-target', 'value'), State('doc-tool-name', 'value'),
+          State('doc-changed', 'data'), prevent_initial_call=True)
+def run_doc_tool(_ok, _cancel, tool, target, name, changed):
+    from services import documents
+    if ctx.triggered_id == 'doc-tool-cancel' or not tool:
+        return False, no_update, ''
+    try:
+        if tool['mode'] == 'merge':
+            documents.merge(tool['key'], target or '')
+        else:
+            documents.split(tool['key'], [tool['id']], name or '')
+    except ValueError as e:
+        return no_update, no_update, str(e)
+    return False, (changed or 0) + 1, ''

@@ -22,6 +22,7 @@ import components.todo_ui  # noqa: F401  업무 체크/삭제 공용 콜백 등�
 from services import mailbox
 from components.history_actions import history_edit_modal, history_link_modal, todo_review_modal  # 이력 수정·삭제·AI 할 일 등록 공용 콜백
 from components.mail_ui import compose_modal  # 메일 보내기 창 (화면은 'mail-draft' 에 초안을 넣어 연다)
+from components import doc_ui  # 문서 합치기·나누기 창 (문서 카드의 단추가 연다)
 from services import auth, confluence_watch, doc_versions, doc_worker, store, users
 from services.db import DATA_DIR
 
@@ -320,6 +321,7 @@ def serve_layout():
         dcc.Location(id='app-url'),
         dcc.Interval(id='app-tick', interval=60_000),
         compose_modal(),
+        doc_ui.doc_tools_modal(),
         html.Div([
             _sidebar(),
             html.Main(dbc.Container(dash.page_container, fluid=True), className='app-main'),
