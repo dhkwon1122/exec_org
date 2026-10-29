@@ -22,7 +22,7 @@ import components.todo_ui  # noqa: F401  업무 체크/삭제 공용 콜백 등�
 from services import mailbox
 from components.history_actions import history_edit_modal, history_link_modal, todo_review_modal  # 이력 수정·삭제·AI 할 일 등록 공용 콜백
 from components.mail_ui import compose_modal  # 메일 보내기 창 (화면은 'mail-draft' 에 초안을 넣어 연다)
-from services import auth, confluence_watch, doc_versions, doc_worker, store, users
+from services import auth, confluence_watch, doc_versions, doc_worker, sso, store, users
 from services.db import DATA_DIR
 
 
@@ -99,7 +99,7 @@ app.index_string = app.index_string.replace('</head>', '''<script>
 if(r.status===401){window.location.href='/login';}return r;});};})();
 </script></head>''')
 
-_PUBLIC_PREFIXES = ('/login', '/healthz', '/_dash-component-suites/', '/_favicon.ico', '/assets/')
+_PUBLIC_PREFIXES = ('/login', '/auth/sso', '/healthz', '/_dash-component-suites/', '/_favicon.ico', '/assets/')
 
 
 @server.route('/healthz')
@@ -155,13 +155,16 @@ _LOGIN_HTML = '''<!doctype html><html lang="ko"><head><meta charset="utf-8">
 <div class="d-flex align-items-center gap-2 mb-1"><span class="app-brand-mark">&#10003;</span>
 <h4 class="mb-0">업무 기록</h4></div><p class="text-muted small mb-4">{hint}</p>
 {error}
-<form method="post" action="/login" autocomplete="on">
+{body}
+</div></div></body></html>'''
+_SSO_BUTTON = '<a class="btn btn-primary w-100" href="/auth/sso">AD 계정으로 로그인 (SSO)</a>'
+_PASSWORD_FORM = '''<form method="post" action="/login" autocomplete="on">
 <div class="mb-3"><label class="form-label">아이디</label>
 <input class="form-control" name="user_id" value="{user_id}" autofocus required></div>
 <div class="mb-3"><label class="form-label">비밀번호</label>
 <input class="form-control" type="password" name="password" required></div>
-<button class="btn btn-primary w-100" type="submit">로그인</button>
-</form></div></div></body></html>'''
+<button class="btn {btn} w-100" type="submit">로그인</button>
+</form>'''
 
 # 로그인 실패 사유 코드 → 화면 문구. POST 결과를 /login?error=코드 로 리다이렉트해서 보여준다
 # (tea-meeting-agenda 와 같은 방식 — 새로고침해도 폼이 다시 전송되지 않는다).
@@ -174,15 +177,33 @@ _LOGIN_ERRORS = {
     'origin': '다른 사이트에서 보낸 로그인 요청이라 거부했습니다. 주소창에 이 시스템 주소를 직접 입력해 접속하세요.',
     'cookie': ('로그인은 성공했지만 브라우저가 로그인 쿠키를 저장하지 않았습니다. '
                '브라우저의 쿠키 차단 설정이나 사내 프록시 설정을 확인하세요.'),
+    # AD SSO (services/sso.py)
+    'sso_failed': 'SSO 로그인을 확인하지 못했습니다. 다시 시도하고, 계속되면 관리자에게 문의하세요.',
+    'sso_expired': 'SSO 로그인 정보가 만료되었습니다. 다시 로그인하세요.',
+    'sso_nonce': 'SSO 로그인 요청이 만료되었거나 이 브라우저에서 시작한 요청이 아닙니다. 다시 로그인하세요.',
+    'sso_keys': 'SSO 서명 인증서를 확인할 수 없습니다. 관리자에게 문의하세요 (SSO_CERT_FILE / SSO_JWKS_URL).',
+    'sso_claims': 'SSO 로그인 정보에 로그인 ID 가 없습니다. 관리자에게 문의하세요 (SSO_CLAIM_LOGIN_ID).',
+    'sso_unknown': '사용자 DB 에 계정이 없습니다. People in SAIT 에 계정이 있어야 합니다.',
+    'sso_only': 'AD 계정(SSO)으로만 로그인할 수 있습니다.',
 }
 
 
 def _login_page(error_code: str = '', user_id: str = ''):
-    hint = ('People in SAIT 계정으로 로그인하세요 (임원조직 담당자 전용).' if users.is_shared()
-            else '계정으로 로그인하세요 (임원조직 담당자 전용).')
+    if sso.enabled():
+        hint = 'AD 계정으로 로그인하세요 (임원조직 담당자 전용).'
+    elif users.is_shared():
+        hint = 'People in SAIT 계정으로 로그인하세요 (임원조직 담당자 전용).'
+    else:
+        hint = '계정으로 로그인하세요 (임원조직 담당자 전용).'
+    parts = [_SSO_BUTTON] if sso.enabled() else []
+    if sso.password_login_allowed():
+        if parts:
+            parts.append('<div class="text-center text-muted small my-3">또는</div>')
+        parts.append(_PASSWORD_FORM.format(user_id=escape(user_id),
+                                           btn='btn-outline-secondary' if sso.enabled() else 'btn-primary'))
     error = _LOGIN_ERRORS.get(error_code, '')
     body = _LOGIN_HTML.format(
-        css=dbc.themes.BOOTSTRAP, hint=hint, user_id=escape(user_id),
+        css=dbc.themes.BOOTSTRAP, hint=hint, body='\n'.join(parts),
         error=f'<div class="alert alert-danger py-2 small">{escape(error)}</div>' if error else '')
     return flask.Response(body, mimetype='text/html')
 
@@ -204,6 +225,8 @@ def login():
         if auth.current_user():
             return flask.redirect('/')
         return _login_page(flask.request.args.get('error', ''), flask.request.args.get('user_id', ''))
+    if not sso.password_login_allowed():
+        return flask.redirect('/login?' + urlencode({'error': 'sso_only'}))
     form = flask.request.form
     user_id = form.get('user_id', '').strip()
     if _cross_site_post():
@@ -225,6 +248,34 @@ def login_check():
         return flask.redirect('/')
     print('[login] 로그인 직후인데 세션 쿠키가 돌아오지 않음 — 브라우저/프록시가 쿠키를 버림', flush=True)
     return flask.redirect('/login?' + urlencode({'error': 'cookie'}))
+
+
+@server.route('/auth/sso')
+def sso_start():
+    """AD SSO 1단계 — ADFS 로그인 화면으로 보낸다 (services/sso.py)."""
+    if not sso.enabled():
+        return flask.redirect('/login')
+    return sso.authorize_response()
+
+
+@server.route(sso.CALLBACK_PATH, methods=['POST'])
+def sso_callback():
+    """AD SSO 2~5단계 — ADFS 가 POST 로 보낸 id_token 을 검증하고 로그인 세션을 만든다.
+    ADFS(다른 사이트)가 보내는 POST 이므로 _cross_site_post 출처 확인 대신 nonce 로 이 브라우저에서
+    시작한 로그인인지 확인한다."""
+    if not sso.enabled():
+        return flask.redirect('/login')
+    try:
+        identity = sso.handle_callback()
+    except sso.SSOError as e:
+        print(f'[sso] 실패 사유={e.code} {e} client={flask.request.remote_addr}', flush=True)
+        return sso.clear_nonce(flask.redirect('/login?' + urlencode({'error': e.code})))
+    user, code = auth.sso_login(identity)
+    if user is None:
+        print(f"[sso] 실패 login_id={identity['login_id']!r} 사유={code}", flush=True)
+        return sso.clear_nonce(flask.redirect('/login?' + urlencode({'error': code})))
+    print(f"[sso] 성공 user_id={user['user_id']!r} dept={identity.get('dept', '')!r}", flush=True)
+    return sso.clear_nonce(flask.redirect('/login/check'))
 
 
 @server.route('/logout')
