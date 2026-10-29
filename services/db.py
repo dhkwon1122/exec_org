@@ -29,8 +29,8 @@ from datetime import datetime
 
 from dotenv import load_dotenv
 from sqlalchemy import (
-    Boolean, Column, DateTime, ForeignKey, Integer, String, Text, UniqueConstraint, create_engine, event, inspect,
-    text,
+    Boolean, Column, DateTime, ForeignKey, Integer, LargeBinary, String, Text, UniqueConstraint, create_engine, event,
+    inspect, text,
 )
 from sqlalchemy import MetaData
 from sqlalchemy.orm import declarative_base, relationship, sessionmaker
@@ -496,6 +496,21 @@ class DocKeyAlias(Base):
     key = Column(String(300), nullable=False, unique=True)
     target = Column(String(300), nullable=False)
     created_at = Column(DateTime, default=_now)
+
+
+class Embedding(Base):
+    """의미 검색용 벡터 (services/embed.py) — 이력·메일 첨부·참고자료마다 하나. 만든 글의 sha256 으로 바뀐 것을 안다."""
+    __tablename__ = 'embeddings'
+    __table_args__ = (UniqueConstraint('kind', 'item_id', name='uq_embedding_item'),)
+
+    id = Column(Integer, primary_key=True)
+    kind = Column(String(10), nullable=False)  # history / mail / ref
+    item_id = Column(Integer, nullable=False)
+    model = Column(String(100), default='')
+    text_hash = Column(String(64), default='')
+    dim = Column(Integer, nullable=True)
+    vector = Column(LargeBinary, nullable=False)  # float32 단위 벡터
+    updated_at = Column(DateTime, default=_now)
 
 
 class Todo(Base):

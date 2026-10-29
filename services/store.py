@@ -127,7 +127,7 @@ def _ref_dict(r: Reference) -> dict:
         'id': r.id, 'task_id': r.task_id, 'history_id': r.history_id, 'kind': r.kind, 'title': r.title, 'url': r.url or '',
         'file_name': r.file_name or '', 'file_path': r.file_path or '', 'note': r.note or '',
         'created_at': _dt(r.created_at), 'content': r.content or '', 'content_at': _dt(r.content_at),
-        'content_error': r.content_error or '', 'content_summary': r.content_summary or '',
+        'content_error': r.content_error or '', 'content_summary': r.content_summary or '', 'summary': r.summary or '',
         'content_tries': r.content_tries or 0,
     }
 
@@ -647,10 +647,10 @@ def delete_history(entry_id: int) -> None:
 def search_history(query: str = '', entry_types: list[str] | None = None, author: str = '',
                    date_from: str = '', date_to: str = '', task_id: int | None = None,
                    person_id: int | None = None,
-                   include_auto: bool = False, limit: int = 200) -> list[dict]:
+                   include_auto: bool = False, limit: int = 200, ids: list[int] | None = None) -> list[dict]:
     """이력 검색. 검색어가 여러 개면 모두 포함(AND)해야 하며, 각 검색어는
     원문·AI 제목·요약·키워드·작성자·업무명 중 어디에든 있으면 된다.
-    include_auto=False 면 상태변경/연결/자료 같은 자동 이력은 뺀다."""
+    include_auto=False 면 상태변경/연결/자료 같은 자동 이력은 뺀다. ids 를 주면 그 이력 중에서만 (의미 검색 결과 거르기)."""
     with db.SessionLocal() as s:
         stmt = select(HistoryEntry, Task.title).outerjoin(Task, Task.id == HistoryEntry.task_id)
         other_task = aliased(Task)  # 함께 걸친 업무의 제목 (바깥 Task 와 섞이지 않게 별칭)
@@ -669,6 +669,8 @@ def search_history(query: str = '', entry_types: list[str] | None = None, author
                                                       .join(other_task, other_task.id == HistoryTask.task_id)
                                                       .where(other_task.title.like(like))),
                                   HistoryEntry.id.in_(ref_hist), HistoryEntry.id.in_(person_hist)))
+        if ids is not None:
+            stmt = stmt.where(HistoryEntry.id.in_(ids or [0]))
         if entry_types:
             stmt = stmt.where(HistoryEntry.entry_type.in_(entry_types))
         elif not include_auto:
