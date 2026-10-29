@@ -326,3 +326,8 @@ body {
   border-radius: 6px;
   padding: 4px 8px;
 }
+
+/* 문서별 판 이력 (components/doc_ui.document_cards) — 왼쪽 세로선을 따라 판이 쌓인다 */
+.doc-timeline { border-left: 2px solid var(--app-border); padding-left: 10px; }
+.doc-version { padding: 4px 0; }
+.doc-version + .doc-version { border-top: 1px dashed var(--app-border); }

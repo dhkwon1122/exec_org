@@ -8,7 +8,7 @@ from dash import ALL, Input, Output, State, callback, ctx, dcc, html, no_update
 from components import doc_ui, todo_ui, ui
 from components.history_form import (decode_text_upload, history_form, register_form_callbacks, save_history,
                                      task_options)
-from services import auth, confluence, doc_versions, llm, mailbox, outbox, store
+from services import auth, confluence, documents, llm, mailbox, outbox, store
 
 dash.register_page(__name__, path_template='/task/<task_id>', name='업무 상세', title='업무 기록 · 상세')
 
@@ -280,7 +280,7 @@ def render(_, _t, _h, tid):
     pending = sorted(h['id'] for h in hist if h['ai_status'] == 'pending')
 
     # 참고자료 — 이 업무·하위 업무에 등록한 자료, 그 업무들의 기록에 붙은 자료, 함께 걸친 기록의 자료
-    refs = store.references_for_task(tid)
+    refs = [r for r in store.references_for_task(tid) if r['kind'] != 'file']  # 파일은 아래 '문서'에 판으로
     ref_counts = store.reference_history_counts(tid, [r['id'] for r in refs])
     hist_titles = store.history_titles(r['history_id'] for r in refs)
     ref_view = dbc.ListGroup([
@@ -311,15 +311,15 @@ def render(_, _t, _h, tid):
             html.Div([html.I(className='bi bi-clock-history me-1'), f"이 자료에 대한 기록 {ref_counts[r['id']]}건"],
                      className='small text-muted mt-1') if ref_counts.get(r['id']) else None,
         ]) for r in refs
-    ]) if refs else html.Div('참고자료가 없습니다.', className='text-muted small')
-    docs = doc_versions.for_task(tid)  # 이 업무·하위 업무에 연결된 메일과 업무를 만든 메일의 첨부
-    if docs:  # 같은 문서는 판(버전)으로 묶어서
-        ref_view = html.Div([
-            html.H6([html.I(className='bi bi-paperclip me-1'), '메일 첨부 문서'], className='mb-2'),
-            doc_ui.doc_groups(docs),
-            html.H6([html.I(className='bi bi-folder2 me-1'), '참고자료'], className='mt-3 mb-2'),
-            ref_view,
-        ])
+    ]) if refs else html.Div('링크·메모가 없습니다.', className='text-muted small')
+    # 문서 — 메일 첨부와 올린 파일을 같은 문서끼리 묶어 판이 바뀌어 온 순서대로 (하위 업무·함께 걸친 기록 포함)
+    docs = documents.for_task(tid)
+    ref_view = html.Div([
+        html.H6([html.I(className='bi bi-files me-1'), f'문서 {len(docs)}' if docs else '문서'], className='mb-2'),
+        doc_ui.document_cards(docs, delete=True, empty='아직 문서가 없습니다. 메일 첨부나 올린 파일이 문서별로 모입니다.'),
+        html.H6([html.I(className='bi bi-link-45deg me-1'), '링크·메모'], className='mt-3 mb-2'),
+        ref_view,
+    ])
 
     links = store.linked_tasks(tid)
     link_view = dbc.ListGroup([
