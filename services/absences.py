@@ -258,6 +258,29 @@ def rule_extract(text: str, mail_date: str, subject: str = '') -> list[dict]:
     return out
 
 
+def from_schedule_events(events: list[dict], subject: str = '') -> list[dict]:
+    """원장님·피플팀장 일정으로 정리된 표(schedules 의 일정 줄) → 임원 부재 후보. 일정 제목·참석자·세부에서
+    등록된 임원 이름을 찾아 사람마다 한 줄 (못 찾으면 임원 칸을 비워 둔다 — 화면에서 고른다)."""
+    people = _people()
+    subj_kind = next((k for k, pat in _KIND_WORDS if re.search(pat, subject or '')), '')
+    out = []
+    for e in events or []:
+        start = str(e.get('date') or '').strip()[:10]
+        if not start:
+            continue
+        end = str(e.get('end_date') or '').strip()[:10] or start
+        text = ' '.join(str(e.get(k) or '') for k in ('title', 'attendees', 'details', 'location'))
+        kind = next((k for k, pat in _KIND_WORDS if re.search(pat, text)), subj_kind) or '기타'
+        st, et = str(e.get('start_time') or '').strip(), str(e.get('end_time') or '').strip()
+        row = {'kind': kind, 'start_date': start, 'end_date': end if end >= start else start,
+               'time_range': f'{st}~{et}' if st and et else (f'{st}~' if st else ''),
+               'place': str(e.get('location') or '').strip()[:300], 'content': str(e.get('title') or '').strip()[:500],
+               'note': str(e.get('details') or '').strip()[:500]}
+        who = [p.name for p in people if any(n in text for n in _names(p))]
+        out += [{'person': n, **row} for n in dict.fromkeys(who)] or [{'person': '', **row}]
+    return out
+
+
 def extract(text: str, mail_date: str, subject: str = '') -> tuple[list[dict], str]:
     """메일 → (부재 후보, 어떻게 읽었나). AI 가 있으면 AI, 없거나 실패하면 규칙."""
     if llm.is_configured():

@@ -648,3 +648,53 @@ def test_rerun_schedule_skips_table_rules_and_uses_ai(monkeypatch):
     imp = schedules.get_import(mailbox.get_mail(mid)['schedule_import_id'])
     assert imp['id'] != first['id'] and imp['events'][0]['start_time'] == '09:30'
     assert '임원회의는 9시 30분' in seen[0] and 'AI센터 보고' in seen[0]  # 이전 결과도 보여 줌
+
+
+ABSENCE_TABLE_HTML = """<p>임원 부재 현황 공유드립니다.</p><table><tr><th>일자</th><th>시간</th><th>일정</th><th>장소</th></tr>
+<tr><td>10/27(화)</td><td></td><td>김영수 부사장 휴가</td><td></td></tr>
+<tr><td>10/28(수)</td><td>14:00~18:00</td><td>이영희 상무 출장</td><td>수원</td></tr></table>"""
+
+
+def test_schedule_extracted_mail_can_go_to_absences_instead(monkeypatch):
+    """원장님 일정으로 정리됐어도 '임원 부재'를 고르면 그 표가 임원 부재 후보가 되고, 되돌릴 수도 있다."""
+    store.create_person('김영수', position='부사장')
+    store.create_person('이영희', position='상무')
+    monkeypatch.setattr(mailbox, 'match_rule', lambda *a: {'id': None, 'name': '원장 일정', 'action': 'schedule',
+                                                           'auto': False, 'parent_task_id': None})
+    mailbox.fetch_new(connect=lambda cfg: FakePOP([_mail('주간 일정', 'b@x', ABSENCE_TABLE_HTML, mid='<ab1@x>')]))
+    m = mailbox.list_mails()[0]
+    assert m['schedule_import_id'] and schedules.get_import(m['schedule_import_id'])['owner'] == 'director'
+
+    assert mailbox.set_schedule_owner(m['id'], 'absence') is True
+    m = mailbox.get_mail(m['id'])
+    rows = m['suggestion']['absences']
+    assert m['kind'] == 'absence' and m['suggestion']['schedule_as_absence']
+    assert [(r['person'], r['kind'], r['start_date'], r['time_range'], r['place']) for r in rows] == [
+        ('김영수', '휴가', '2026-10-27', '', ''), ('이영희', '출장', '2026-10-28', '14:00~18:00', '수원')]
+    assert mailbox.set_schedule_owner(m['id'], 'absence') is False
+
+    assert mailbox.set_schedule_owner(m['id'], 'director') is True  # 다시 원장님 일정으로
+    m = mailbox.get_mail(m['id'])
+    assert m['kind'] == 'schedule' and 'absences' not in m['suggestion']
+
+    mailbox.set_schedule_owner(m['id'], 'absence')
+    r = mailbox.apply_absences(m['id'], mailbox.get_mail(m['id'])['suggestion']['absences'], '나')
+    assert r['added'] == 2 and schedules.list_range('2026-10-27', '2026-10-28') == []
+
+
+def test_schedule_without_owner_hint_but_executive_absence_is_absence(monkeypatch):
+    """AI 가 일정(원장님)이라 해도 제목·보낸 사람에 원장님·피플팀장 단서가 없고 임원 부재가 보이면 임원 부재로."""
+    store.create_person('김영수', position='부사장')
+    store.create_person('이영희', position='상무')
+    monkeypatch.setattr(llm, 'is_configured', lambda: True)
+    monkeypatch.setattr(llm, 'chat', lambda system, user, temperature=0.2: json.dumps(
+        {'absences': [{'person': '김영수', 'kind': '휴가', 'start_date': '2026-10-27'}]}) if 'absences' in system else
+        json.dumps({'kind': 'schedule', 'owner': 'director', 'reason': '일정표', 'tasks': []}))
+    mailbox.fetch_new(connect=lambda cfg: FakePOP([
+        _mail('이번 주 일정', 'b@x', ABSENCE_TABLE_HTML, mid='<ab2@x>'),
+        _mail('원장님 주간 일정', 'b@x', ABSENCE_TABLE_HTML, mid='<ab3@x>')]))
+    by = {m['subject']: m for m in mailbox.list_mails()}
+    m = by['이번 주 일정']
+    assert m['kind'] == 'absence' and not m['schedule_import_id'] and '임원 부재로' in m['reason']
+    assert m['suggestion']['absences'][0]['person'] == '김영수'
+    assert by['원장님 주간 일정']['kind'] == 'schedule'  # 제목에 원장님 — 원장님 일정 그대로

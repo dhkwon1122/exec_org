@@ -136,8 +136,10 @@ def layout(mail=None, **_):
                                  html.Span(id='ib-sched-done', className='ms-2')], className='mb-0 me-3'),
                         dbc.RadioItems(id='ib-sched-owner', inline=True, className='small', value=None,
                                        options=[{'label': f'{v} 일정', 'value': k}
-                                                for k, v in schedules.OWNERS.items()]),
+                                                for k, v in schedules.OWNERS.items()]
+                                       + [{'label': '임원 부재', 'value': 'absence'}]),
                     ], className='d-flex align-items-center flex-wrap mt-3 mb-1'),
+                    html.Div(id='ib-sched-body', children=[
                     html.Div(id='ib-sched-note', className='small text-muted mb-1'),
                     dash_table.DataTable(id='ib-sched', editable=True, row_deletable=True, data=[],
                                          columns=[{'name': '상태', 'id': 'state_label', 'editable': False},
@@ -151,6 +153,10 @@ def layout(mail=None, **_):
                                          style_table={'overflowX': 'auto'}, style_cell={**cell, 'fontSize': '0.8rem'}),
                     dbc.Button([html.I(className='bi bi-check2 me-1'), '일정에 반영'], id='ib-sched-apply',
                                color='primary', size='sm', className='mt-1'),
+                    ]),
+                    html.Div('임원 부재로 옮겼습니다 — 아래 임원 부재 표에서 확인하고 반영하세요. 원장님·피플팀장 일정을 '
+                             '고르면 일정 표로 돌아갑니다.', id='ib-sched-moved', className='small text-muted',
+                             style={'display': 'none'}),
                 ]),
                 html.Div(id='ib-abs-box', style={'display': 'none'}, children=[
                     html.H6([html.I(className='bi bi-person-dash me-1'), '임원 부재',
@@ -294,14 +300,14 @@ def pick(_):
           Output('ib-sched', 'data'), Output('ib-sched-note', 'children'), Output('ib-actions', 'style'),
           Output('ib-complete', 'style'), Output('ib-ignore', 'style'), Output('ib-reopen', 'style'),
           Output('ib-body', 'children'), Output('ib-body-box', 'style'), Output('ib-parent-hint', 'children'),
-          Output('ib-sched-owner', 'value'),
+          Output('ib-sched-owner', 'value'), Output('ib-sched-body', 'style'), Output('ib-sched-moved', 'style'),
           Input('ib-sel', 'data'), Input('ib-refresh', 'data'))
 def render_detail(sel, _):
     hide, show = {'display': 'none'}, {}
     m = mailbox.get_mail(sel) if sel else None
     if m is None:
         return (html.Div('왼쪽에서 메일을 고르세요.', className='text-muted small'), hide, [], [], None, hide, [], '',
-                hide, hide, hide, hide, '', hide, None, None)
+                hide, hide, hide, hide, '', hide, None, None, show, hide)
     open_ = m['status'] in ('review', 'failed')
     kind = KIND.get(m['kind'])
     links = [dcc.Link(f'#{tid}', href=f'/task/{tid}', className='me-2') for tid in m['task_ids']]
@@ -336,11 +342,14 @@ def render_detail(sel, _):
             note = f"일정 정리 실패: {imp['error']}"
     show_sched = bool(m['schedule_import_id']) and (open_ or bool(sched_rows))
     sug = m['suggestion']
+    moved = bool(sug.get('schedule_as_absence'))  # 일정 표를 임원 부재로 옮겼음
+    if moved:
+        owner = 'absence'
     parent = sug.get('parent_task_id')
     return (head, show if wants_task and (open_ or tasks) else hide, tasks, _task_options(), parent,
             show if show_sched else hide, sched_rows, note, show,
             show if open_ else hide, show if open_ else hide, hide if open_ else show,
-            m['body'], show, _parent_hint(sug), owner)
+            m['body'], show, _parent_hint(sug), owner, hide if moved else show, show if moved else hide)
 
 
 def _parent_hint(sug: dict):
@@ -605,6 +614,8 @@ def change_owner(owner, sel, n):
         return (n or 0) + 1, str(e), True, 'warning'
     if not changed:
         return no_update, no_update, no_update, no_update
+    if owner == 'absence':
+        return (n or 0) + 1, '일정 표를 임원 부재 후보로 옮겼습니다 — 임원 부재 표에서 확인하고 반영하세요.', True, 'info'
     return ((n or 0) + 1, f'{schedules.OWNERS[owner]} 일정으로 바꿨습니다 — 그 일정과 다시 대조했습니다.', True, 'info')
 
 
