@@ -98,6 +98,11 @@ def doc_groups(groups: list[dict], current_mail: int | None = None, empty: str =
         if n > 1 and not any(f['latest'] for f in g['files']):
             head.append(html.Div(['최신 판: ', _file_link(latest),
                                   html.Span(f" ({latest['mail_date']} 메일)", className='text-muted')]))
+        via = g.get('via_tasks') or []
+        if via:  # 하위 업무에 연결된 메일에서 온 문서
+            from components.ui import task_link
+            head.append(html.Div([dbc.Badge('하위 업무', color='info', className='me-1'),
+                                  *[html.Span([task_link(t), ' ']) for t in via]], className='mt-1'))
         items.append(dbc.ListGroupItem([
             *head,
             html.Details([
