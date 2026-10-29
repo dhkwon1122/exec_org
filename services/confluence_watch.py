@@ -265,6 +265,49 @@ def check_watch(watch_id: int) -> int:
         return new
 
 
+def retry_failed_updates(limit: int = 2) -> int:
+    """본문을 못 읽었거나 AI 요약이 실패한 변경을 간격을 늘려 가며 다시 — 시도한 수 (쉬는 시간에).
+    본문이 없으면 이 판·앞 판을 다시 읽어 바뀐 줄을 만들고, 본문이 있으면 요약만 다시 한다(컨플루언스는 안 부름)."""
+    now = datetime.now()
+    with db.SessionLocal() as s:
+        cands = [(u.id, u.tries or 0, u.retried_at or u.created_at) for u in s.scalars(
+            select(ConfluenceUpdate).where(ConfluenceUpdate.summary_status == 'failed')
+            .order_by(ConfluenceUpdate.retried_at.is_not(None), ConfluenceUpdate.retried_at, ConfluenceUpdate.id))]
+    n = 0
+    for uid, tries, last in cands:
+        if n >= limit:
+            break
+        if tries >= confluence.RETRY_MAX or (last and now - last < confluence.retry_wait(max(1, tries))):
+            continue
+        with db.SessionLocal() as s:
+            u = s.get(ConfluenceUpdate, uid)
+            prev_text = None
+            try:
+                if not u.text:  # 본문을 못 읽었던 것 — 컨플루언스 호출 (한도 안에서)
+                    u.text = _body(u.page_id, u.version)[:confluence.MAX_TEXT_CHARS]
+                if u.version > 1 and u.diff:
+                    prev_text = ''  # 바뀐 줄은 이미 있다 — 요약만 다시
+                elif u.version > 1:
+                    before = s.scalar(select(ConfluenceUpdate.text).where(ConfluenceUpdate.page_id == u.page_id,
+                                                                          ConfluenceUpdate.version == u.version - 1))
+                    prev_text = before if before else _body(u.page_id, u.version - 1)
+                    u.diff = _diff(prev_text, u.text)
+                u.summary, u.summary_status = '', ''
+                _summarize(u, prev_text)
+                if u.summary_status != 'failed':
+                    u.tries = 0
+                else:
+                    u.tries = tries + 1
+            except confluence.RateLimited:
+                break
+            except ConfluenceError as e:
+                u.summary, u.summary_status, u.tries = f'본문을 읽지 못함: {e}', 'failed', tries + 1
+            u.retried_at = datetime.now().replace(microsecond=0)
+            s.commit()
+        n += 1
+    return n
+
+
 def check_all() -> dict:
     """켜 둔 워치를 모두 확인 — {'new': 새 업데이트 수, 'errors': [(워치 이름, 이유)]}."""
     new, errors = 0, []

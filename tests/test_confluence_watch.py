@@ -200,3 +200,42 @@ def test_alias_names_tab_and_updates(wiki):
     assert cw.list_watches()[0]['name'].startswith('2026년도')
     with pytest.raises(ValueError):
         cw.set_alias(999, 'x')
+
+
+def test_failed_updates_retried(wiki, monkeypatch):
+    from datetime import datetime, timedelta
+    from services.db import ConfluenceUpdate
+    wiki.put('100', '주간 보고', 'EXEC', '2026-10-25T09:00:00', '김팀장', '<p>안건 3개</p>')
+    wiki.put('100', '주간 보고', 'EXEC', '2026-10-26T09:00:00', '박대리', '<p>안건 4개</p>')
+    w = cw.add_watch('EXEC')
+    real = wiki.get
+
+    def no_history(url, params=None, **kw):  # 앞 판 읽기만 실패
+        if params and params.get('status') == 'historical':
+            return FakeResp(500, {})
+        return real(url, params, **kw)
+    confluence.requests.get = no_history
+    cw.check_watch(w['id'])
+    u = cw.list_updates()[0]
+    assert u['summary_status'] == 'failed' and '본문을 읽지 못함' in u['summary']
+    confluence.requests.get = real
+    with db.SessionLocal() as s:  # 30분 지난 것처럼
+        x = s.get(ConfluenceUpdate, u['id'])
+        x.created_at = datetime.now() - timedelta(minutes=31)
+        s.commit()
+    assert cw.retry_failed_updates() == 1
+    u = cw.list_updates()[0]
+    assert u['diff'] == '- 안건 3개\n+ 안건 4개' and u['summary_status'] == 'none'
+    assert cw.retry_failed_updates() == 0
+
+    # AI 요약만 실패한 것은 컨플루언스를 부르지 않고 요약만 다시
+    monkeypatch.setattr(llm, 'is_configured', lambda: True)
+    with db.SessionLocal() as s:
+        x = s.get(ConfluenceUpdate, u['id'])
+        x.summary, x.summary_status, x.retried_at = '요약 실패: 연결', 'failed', datetime.now() - timedelta(hours=1)
+        s.commit()
+    monkeypatch.setattr(llm, 'chat', lambda *a, **k: '{"summary": "안건이 늘었다.", "important": false}')
+    wiki.calls.clear()
+    assert cw.retry_failed_updates() == 1
+    assert cw.list_updates()[0]['summary'] == '안건이 늘었다.'
+    assert [c for c in wiki.calls if 'historical' in str(c)] == []

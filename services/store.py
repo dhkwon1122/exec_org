@@ -12,7 +12,7 @@ import re
 import uuid
 from datetime import date, datetime, timedelta
 
-from sqlalchemy import func, or_, select, update
+from sqlalchemy import false, func, or_, select, update
 from sqlalchemy.orm import aliased
 
 from services import db
@@ -127,6 +127,7 @@ def _ref_dict(r: Reference) -> dict:
         'file_name': r.file_name or '', 'file_path': r.file_path or '', 'note': r.note or '',
         'created_at': _dt(r.created_at), 'content': r.content or '', 'content_at': _dt(r.content_at),
         'content_error': r.content_error or '', 'content_summary': r.content_summary or '',
+        'content_tries': r.content_tries or 0,
     }
 
 
@@ -316,6 +317,19 @@ def all_owners() -> list[str]:
         return sorted({o for (o,) in s.execute(select(TaskAssignee.name).distinct()) if o})
 
 
+def task_scope(task_id: int, include_children: bool = True) -> list[int]:
+    """업무와 (선택) 그 아래 모든 하위 업무의 id — 업무 자신이 먼저."""
+    out, todo = [task_id], [task_id]
+    if not include_children:
+        return out
+    with db.SessionLocal() as s:
+        while todo:
+            kids = list(s.scalars(select(Task.id).where(Task.parent_id.in_(todo))))
+            todo = [k for k in kids if k not in out]  # 부모 고리가 꼬여 있어도 멈춘다
+            out += todo
+    return out
+
+
 def child_tasks(task_id: int) -> list[dict]:
     with db.SessionLocal() as s:
         return [_task_dict(t) for t in s.scalars(select(Task).where(Task.parent_id == task_id).order_by(Task.id))]
@@ -393,10 +407,11 @@ def link_history_task(entry_id: int, task_id: int) -> bool:
         return True
 
 
-def reference_history_counts(task_id: int) -> dict[int, int]:
-    """업무의 참고자료별 기록 수 — 자료가 붙은 이력 + 그 자료를 다룬 기록."""
+def reference_history_counts(task_id: int, ref_ids: list[int] | None = None) -> dict[int, int]:
+    """참고자료별 기록 수 — 자료가 붙은 이력 + 그 자료를 다룬 기록. ref_ids 를 주면 그 자료들(하위 업무 것 포함)."""
     with db.SessionLocal() as s:
-        refs = list(s.scalars(select(Reference).where(Reference.task_id == task_id)))
+        cond = Reference.id.in_(ref_ids or [0]) if ref_ids is not None else Reference.task_id == task_id
+        refs = list(s.scalars(select(Reference).where(cond)))
         ids = [r.id for r in refs]
         out = {r.id: 1 if r.history_id else 0 for r in refs}
         if ids:
@@ -405,6 +420,16 @@ def reference_history_counts(task_id: int) -> dict[int, int]:
                                     .group_by(HistoryReference.reference_id)):
                 out[rid] += n
         return out
+
+
+def history_titles(ids) -> dict[int, str]:
+    """이력 id → '날짜 제목' (참고자료가 어느 기록에 붙었는지 보여 줄 때)."""
+    ids = [i for i in set(ids) if i]
+    if not ids:
+        return {}
+    with db.SessionLocal() as s:
+        return {h.id: f"{_dt(h.occurred_at)[:10]} {h.title or (h.content or '')[:30]}"
+                for h in s.scalars(select(HistoryEntry).where(HistoryEntry.id.in_(ids)))}
 
 
 def shared_history_count(a: int, b: int) -> int:
@@ -797,6 +822,30 @@ def list_references(task_id: int | None = None, query: str = '', kind: str = '')
                                   Task.title.like(like)))
         rows = s.execute(stmt.order_by(Reference.created_at.desc(), Reference.id.desc()))
         return [{**_ref_dict(r), 'task_title': title or ''} for r, title in rows]
+
+
+def references_for_task(task_id: int, include_children: bool = True) -> list[dict]:
+    """업무 참고자료 탭에 모을 자료 — 이 업무(와 하위 업무)에 직접 등록한 자료, 그 업무들의 기록에 붙은 자료,
+    여러 업무에 걸친 기록(history_tasks)에 붙은 자료. 'source': 직접 등록 / 기록 첨부,
+    'via_task': 다른 업무(하위 업무·기록의 주 업무)에서 온 자료면 {id, title}, 'via': self / child / shared."""
+    scope = task_scope(task_id, include_children)
+    with db.SessionLocal() as s:
+        shared = set(s.scalars(select(HistoryTask.history_id).where(HistoryTask.task_id.in_(scope))))
+        stmt = select(Reference, Task.title).outerjoin(Task, Task.id == Reference.task_id).where(
+            or_(Reference.task_id.in_(scope), Reference.history_id.in_(shared) if shared else false()))
+        rows = s.execute(stmt.order_by(Reference.created_at.desc(), Reference.id.desc())).all()
+        out = []
+        for r, title in rows:
+            d = {**_ref_dict(r), 'task_title': title or '', 'source': '기록 첨부' if r.history_id else '직접 등록'}
+            if r.task_id == task_id:
+                d['via'], d['via_task'] = 'self', None
+            elif r.task_id in scope:
+                d['via'], d['via_task'] = 'child', {'id': r.task_id, 'title': title or ''}
+            else:  # 다른 업무가 주 업무인, 이 업무에도 걸친 기록의 자료
+                d['via'] = 'shared'
+                d['via_task'] = {'id': r.task_id, 'title': title or ''} if r.task_id else None
+            out.append(d)
+        return out
 
 
 def get_reference(ref_id: int) -> dict | None:

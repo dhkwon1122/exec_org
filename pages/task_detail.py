@@ -279,14 +279,19 @@ def render(_, _t, _h, tid):
         html.Div('이력이 없습니다.', className='text-muted small')
     pending = sorted(h['id'] for h in hist if h['ai_status'] == 'pending')
 
-    refs = store.list_references(task_id=tid)
-    ref_counts = store.reference_history_counts(tid)
-    hist_titles = {h['id']: f"{h['occurred_at'][:10]} {h['title'] or h['content'][:30]}" for h in hist}
+    # 참고자료 — 이 업무·하위 업무에 등록한 자료, 그 업무들의 기록에 붙은 자료, 함께 걸친 기록의 자료
+    refs = store.references_for_task(tid)
+    ref_counts = store.reference_history_counts(tid, [r['id'] for r in refs])
+    hist_titles = store.history_titles(r['history_id'] for r in refs)
     ref_view = dbc.ListGroup([
         dbc.ListGroupItem([
             html.Div([
                 html.I(className=f"bi {ui.REF_ICON[r['kind']]} me-2"),
-                html.Span(r['title'], className='fw-semibold me-auto'),
+                html.Span(r['title'], className='fw-semibold me-2'),
+                dbc.Badge(r['source'], color='light', text_color='dark', className='border me-1'),
+                dbc.Badge('하위 업무' if r['via'] == 'child' else '함께 걸친 기록', color='info', className='me-1')
+                if r['via'] != 'self' else None,
+                html.Span(className='me-auto'),
                 html.Span(r['created_at'], className='small text-muted me-2'),
                 dbc.Button([html.I(className='bi bi-journal-plus me-1'), '이력'], id={'type': 'r-hist', 'id': r['id']},
                            color='link', size='sm', className='p-0 me-2', title='이 자료에 대한 기록 남기기'),
@@ -294,6 +299,8 @@ def render(_, _t, _h, tid):
                            size='sm', className='text-muted p-0', title='삭제'),
             ], className='d-flex align-items-center'),
             ui.ref_target(r),
+            html.Div(['출처 업무: ', ui.task_link(r['via_task'])], className='small text-muted')
+            if r['via'] != 'self' and r['via_task'] else None,
             ui.confluence_box(r, {'type': 'r-conf', 'id': r['id']}),
             html.Div(r['note'], className='small mt-1', style={'whiteSpace': 'pre-wrap'}) if r['note'] else None,
             html.Div([html.I(className='bi bi-clock-history me-1'), '이력에 첨부: ',
@@ -305,8 +312,8 @@ def render(_, _t, _h, tid):
                      className='small text-muted mt-1') if ref_counts.get(r['id']) else None,
         ]) for r in refs
     ]) if refs else html.Div('참고자료가 없습니다.', className='text-muted small')
-    docs = doc_versions.for_task(tid)
-    if docs:  # 연결된 메일의 첨부 문서 — 같은 문서는 판(버전)으로 묶어서
+    docs = doc_versions.for_task(tid)  # 이 업무·하위 업무에 연결된 메일과 업무를 만든 메일의 첨부
+    if docs:  # 같은 문서는 판(버전)으로 묶어서
         ref_view = html.Div([
             html.H6([html.I(className='bi bi-paperclip me-1'), '메일 첨부 문서'], className='mb-2'),
             doc_ui.doc_groups(docs),
