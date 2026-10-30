@@ -179,7 +179,7 @@ def _tags(raw) -> list[str]:
         if t and t.lower() not in seen:
             seen.add(t.lower())
             out.append(t)
-    return out[:8]
+    return llm._canonical(out)[:8]
 
 
 def _dates(raw) -> list[dict]:
@@ -318,8 +318,10 @@ def search(query: str, limit: int = 30) -> list[dict]:
     terms = [a or b for a, b in re.findall(r'"([^"]+)"|(\S+)', query or '') if (a or b).strip()]
     if not terms:
         return []
-    cond = [or_(*(col.ilike(f'%{t}%') for col in (MailAttachment.filename, MailAttachment.summary,
-                                                  MailAttachment.tags, MailAttachment.text))) for t in terms]
+    from services import glossary  # 같은 말로도 찾는다
+    cond = [or_(*(col.ilike(f'%{w}%') for w in glossary.expand(t)
+                  for col in (MailAttachment.filename, MailAttachment.summary, MailAttachment.tags, MailAttachment.text)))
+            for t in terms]
     with db.SessionLocal() as s:
         rows = s.execute(select(MailAttachment, InboundMail.subject, InboundMail.mail_date)
                          .join(InboundMail, InboundMail.id == MailAttachment.mail_id)
