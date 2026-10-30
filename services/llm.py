@@ -79,6 +79,8 @@ def _with_retry(user: str, temperature: float) -> tuple[str, float]:
 
 
 def chat(system: str, user: str, temperature: float = 0.2) -> str:
+    from services import glossary  # 원문에 나온 사내 용어의 같은 말·뜻 (용어집이 비었으면 그대로)
+    system = system + glossary.prompt_note(user)
     user, temperature = _with_retry(user, temperature)
     url = _env('API_URL')
     if not url:
@@ -112,6 +114,14 @@ def chat(system: str, user: str, temperature: float = 0.2) -> str:
     if not content:
         raise LLMError('LLM 응답이 비어 있습니다 (LLM_MAX_TOKENS 를 늘려 보세요).')
     return content
+
+
+def _canonical(words: list[str]) -> list[str]:
+    from services import glossary
+    try:
+        return glossary.canonical_tags(words)  # 용어집의 같은 말은 대표 용어로
+    except Exception:  # noqa: BLE001
+        return words
 
 
 def _extract_json(text: str) -> dict:
@@ -174,7 +184,7 @@ def analyze_record(text: str, task_title: str = '', entry_type: str = '', people
     return {
         'title': str(data.get('title') or '').strip()[:200],
         'summary': str(data.get('summary') or '').strip(),
-        'keywords': keywords[:12],
+        'keywords': _canonical(keywords)[:12],
         'todos': _clean_todos(data.get('todos')),
     }
 

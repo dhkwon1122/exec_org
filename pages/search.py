@@ -9,7 +9,7 @@ from dash import Input, Output, callback, dcc, html
 
 from components import doc_ui, ui
 from components.history_form import people_options
-from services import doc_summary, store
+from services import doc_summary, glossary, store
 
 dash.register_page(__name__, path='/search', name='이력 검색', title='업무 기록 · 이력 검색')
 
@@ -63,6 +63,8 @@ def layout(q: str = '', person: str = '', **_):
           Input('s-from', 'value'), Input('s-to', 'value'), Input('s-auto', 'value'))
 def search(q, types, person_id, author, date_from, date_to, include_auto):
     terms = store.search_terms(q or '')
+    groups = [glossary.expand(t) for t in terms]  # 용어집의 같은 말
+    extra = [w for g in groups for w in g[1:]]
     rows = store.search_history(q or '', entry_types=types or None, author=author or '', person_id=person_id,
                                 date_from=date_from or '', date_to=date_to or '', include_auto=bool(include_auto))
     docs = doc_summary.search(q or '', limit=20) if terms else []
@@ -71,6 +73,9 @@ def search(q, types, person_id, author, date_from, date_to, include_auto):
     label = f'{len(rows)}건' + (' (최대 200건까지 표시)' if len(rows) >= 200 else '')
     if docs:
         label += f' · 첨부 문서 {len(docs)}건'
+    if extra:
+        label += f" · 용어집의 같은 말로도 찾음: {', '.join(extra)}"
+    terms = terms + extra  # 같은 말도 강조
     return [_docs_card(docs) if docs else None,
             dbc.ListGroup([ui.history_card(h, terms=terms, show_task=True, actions=False) for h in rows])], label
 

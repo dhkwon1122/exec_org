@@ -498,6 +498,21 @@ class DocKeyAlias(Base):
     created_at = Column(DateTime, default=_now)
 
 
+class GlossaryTerm(Base):
+    """사내 용어집 (services/glossary.py) — 사람이 아닌 것(조직·과제·회의·약어 등)의 대표 용어와 같은 말.
+    검색할 때 같은 말로도 찾고, AI 에게 원문에 나온 용어의 뜻을 알려 주고, AI 태그를 대표 용어로 맞춘다.
+    사람은 임원 별칭(people.aliases)이 맡는다."""
+    __tablename__ = 'glossary_terms'
+
+    id = Column(Integer, primary_key=True)
+    term = Column(String(100), nullable=False, unique=True)
+    synonyms = Column(String(1000), default='')  # 쉼표 구분
+    category = Column(String(20), default='')
+    description = Column(Text, default='')
+    created_at = Column(DateTime, default=_now)
+    updated_at = Column(DateTime, default=_now, onupdate=_now)
+
+
 class Todo(Base):
     """예전 '할 일' — 지금은 업무(하위 업무)로 합쳐졌다. 예전 DB 에 남은 행은 시작할 때 업무로 옮기고 지운다
     (_merge_todos_into_tasks). 새로 쓰지 않는다."""
