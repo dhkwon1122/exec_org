@@ -99,6 +99,11 @@ def _number(items: list[dict]) -> list[dict]:
     return items
 
 
+def latest_version(versions: list[dict]) -> dict:
+    """판 번호를 매긴 목록의 최신 판. 구판 재전송은 제외하고, 최신 판의 재전송은 사용할 수 있다."""
+    return next(v for v in reversed(versions) if v['latest'])
+
+
 def _rows(s, keys: set[str]) -> dict[str, list[dict]]:
     from services.doc_summary import insight  # doc_summary 가 이 모듈을 쓰므로 여기서
     rows = s.execute(select(MailAttachment, InboundMail.subject, InboundMail.mail_date, InboundMail.received_at)
@@ -154,8 +159,9 @@ def for_mails(mail_ids: list[int]) -> list[dict]:
     out = []
     for key, versions in groups.items():
         files = [v for v in versions if v['id'] in ids]
-        out.append({'doc_key': key, 'base': versions[-1]['base'], 'files': files, 'versions': versions,
-                    'latest': versions[-1]})
+        latest = latest_version(versions)
+        out.append({'doc_key': key, 'base': latest['base'], 'files': files, 'versions': versions,
+                    'latest': latest})
     return sorted(out, key=lambda g: max(f['id'] for f in g['files']), reverse=True)
 
 
@@ -210,7 +216,7 @@ def latest_documents(query: str = '', limit: int = 100) -> list[dict]:
         versions = groups.get(key) or []
         if not versions:
             continue
-        latest = versions[-1]
+        latest = latest_version(versions)
         m = mails.get(latest['mail_id'])
         task_ids = sorted({int(t) for v in versions for t in ((mails.get(v['mail_id']).task_ids or '')
                                                               if mails.get(v['mail_id']) else '').split(',') if t.isdigit()})
@@ -218,3 +224,4 @@ def latest_documents(query: str = '', limit: int = 100) -> list[dict]:
                     'mail_subject': latest['mail_subject'], 'mail_date': latest['mail_date'],
                     'tasks': [{'id': t, 'title': titles.get(t, '')} for t in task_ids if t in titles]})
     return out
+

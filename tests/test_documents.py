@@ -122,3 +122,39 @@ def test_merge_and_split_guard_rails():
     store.add_reference(t['id'], 'file', file_name='보고서_v2.docx', file_bytes=b'd')
     docs = documents.for_task(t['id'])
     assert len(docs) == 1 and docs[0]['key'] == c and docs[0]['n_versions'] == 4
+
+
+@pytest.mark.parametrize('resent', [b'old', b'new'])
+def test_resending_an_uploaded_version_keeps_the_latest_content_and_insight(resent):
+    from datetime import datetime
+    from services.db import Reference
+    t = store.create_task('보고서 검토')
+    refs = [store.add_reference(t['id'], 'file', file_name='보고서.docx', file_bytes=content)
+            for content in (b'old', b'new', resent)]
+    with db.SessionLocal() as s:
+        for i, ref in enumerate(refs):
+            r = s.get(Reference, ref['id'])
+            r.created_at = r.analyzed_at = datetime(2026, 10, 19 + i, 9)
+            r.summary = '최신 내용' if i == 1 or (i == 2 and resent == b'new') else '이전 내용'
+        s.commit()
+    doc = documents.for_task(t['id'])[0]
+    assert doc['n_versions'] == 2 and doc['latest']['latest'] and doc['latest']['version'] == 2
+    assert doc['latest']['ref_id'] == refs[2 if resent == b'new' else 1]['id']
+    assert doc['insight']['summary'] == '최신 내용'
+    assert doc['updated'] == '2026-10-21'  # 재전송 수신일은 문서 활동 이력에 남는다
+    assert documents.search()[0]['latest']['id'] == doc['latest']['id']
+
+
+def test_old_mail_resend_does_not_replace_a_newer_uploaded_version():
+    mailbox.fetch_new(connect=lambda cfg: FakePOP([
+        _mail('원본', 'Mon, 19 Oct 2026 09:00:00 +0900', [('보고서.docx', b'old')], '<old@x>'),
+        _mail('원본 재전송', 'Wed, 21 Oct 2026 09:00:00 +0900', [('보고서.docx', b'old')], '<resend@x>')]),
+        process_now=False)
+    t = store.create_task('검토')
+    for m in mailbox.list_mails():
+        mailbox.link_task(m['id'], t['id'], '나')
+    ref = store.add_reference(t['id'], 'file', file_name='보고서_1020.docx', file_bytes=b'new')
+    doc = documents.for_task(t['id'])[0]
+    assert doc['latest']['kind'] == 'ref' and doc['latest']['ref_id'] == ref['id']
+    assert doc['latest']['version'] == 2 and doc['n_versions'] == 2
+
