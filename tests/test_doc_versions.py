@@ -79,3 +79,25 @@ def test_versions_follow_mail_dates_and_ignore_resends():
     # 내려받기용 경로
     att = doc_versions.get(f['id'])
     assert store.upload_abspath(att['file_path']) and open(store.upload_abspath(att['file_path']), 'rb').read() == b'two'
+
+
+@pytest.mark.parametrize('resent', [b'one', b'two'])
+def test_latest_document_uses_version_number_when_an_attachment_is_resent(resent):
+    mails = [_mail('자료', when, [('보고서.docx', body)], f'<latest-{i}@x>')
+             for i, (when, body) in enumerate(zip([
+                 'Mon, 19 Oct 2026 09:00:00 +0900', 'Tue, 20 Oct 2026 09:00:00 +0900',
+                 'Wed, 21 Oct 2026 09:00:00 +0900'], [b'one', b'two', resent]))]
+    mailbox.fetch_new(connect=lambda cfg: FakePOP(mails), process_now=False)
+    last_mail = max(m['id'] for m in mailbox.list_mails())
+    g = doc_versions.for_mails([last_mail])[0]
+    assert [(v['version'], v['dup']) for v in g['versions']] == [
+        (1, False), (2, False), (1 if resent == b'one' else 2, True)]
+    latest = g['latest']
+    assert latest['latest'] and latest['version'] == 2 and latest['n_versions'] == 2
+    assert latest['mail_id'] == (last_mail if resent == b'two' else last_mail - 1)
+    att = doc_versions.get(latest['id'])
+    with open(store.upload_abspath(att['file_path']), 'rb') as f:
+        assert f.read() == b'two'
+    listed = doc_versions.latest_documents()[0]
+    assert listed['file']['id'] == latest['id'] and listed['mail_id'] == latest['mail_id']
+

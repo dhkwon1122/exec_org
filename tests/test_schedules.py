@@ -372,6 +372,51 @@ def test_numbered_titles_stay_separate():
     assert rows[0]['state'] == 'new'
 
 
+@pytest.mark.parametrize('use_preview', [False, True])
+def test_same_title_at_different_times_stays_separate_and_can_be_reapplied(use_preview):
+    events = [{'date': '2026-10-21', 'start_time': t, 'title': '면담'} for t in ('09:00', '14:00')]
+    rows = schedules.preview(events) if use_preview else events
+    assert schedules.apply_events(rows) == {'added': 2, 'updated': 0, 'same': 0, 'skipped': 0}
+    original = schedules.list_range('2026-10-21', '2026-10-21')
+    assert [e['start_time'] for e in original] == ['09:00', '14:00']
+    reversed_events = list(reversed(events))
+    rows = schedules.preview(reversed_events) if use_preview else reversed_events
+    assert schedules.apply_events(rows) == {'added': 0, 'updated': 0, 'same': 2, 'skipped': 0}
+    assert [e['id'] for e in schedules.list_range('2026-10-21', '2026-10-21')] == [e['id'] for e in original]
+
+
+@pytest.mark.parametrize('use_preview', [False, True])
+def test_new_same_title_row_does_not_take_later_rows_existing_slot(use_preview):
+    original = schedules.save({'date': '2026-10-21', 'start_time': '09:00', 'title': '면담'})
+    events = [{'date': '2026-10-21', 'start_time': t, 'title': '면담'} for t in ('14:00', '09:00')]
+    rows = schedules.preview(events) if use_preview else events
+    assert schedules.apply_events(rows) == {'added': 1, 'updated': 0, 'same': 1, 'skipped': 0}
+    assert schedules.get(original['id'])['start_time'] == '09:00'
+    assert len(schedules.list_range('2026-10-21', '2026-10-21')) == 2
+
+
+def test_same_title_time_change_uses_the_unclaimed_slot():
+    events = [{'date': '2026-10-21', 'start_time': t, 'title': '면담'} for t in ('09:00', '14:00')]
+    for ev in events:
+        schedules.save(ev)
+    original = schedules.list_range('2026-10-21', '2026-10-21')
+    changed = [{**events[0], 'start_time': '10:00'}, events[1]]
+    rows = schedules.preview(changed)
+    assert [r['match_id'] for r in rows] == [r['id'] for r in original]
+    assert schedules.apply_events(rows)['updated'] == 1
+    assert [e['start_time'] for e in schedules.list_range('2026-10-21', '2026-10-21')] == ['10:00', '14:00']
+    # 어느 면담의 시간 변경인지 모르면 기존 둘을 지키고 새 일정으로 남긴다.
+    ambiguous = [{'date': '2026-10-21', 'start_time': '16:00', 'title': '면담'}]
+    assert schedules.preview(ambiguous)[0]['state'] == 'new'
+    assert schedules.apply_events(ambiguous)['added'] == 1
+    assert len(schedules.list_range('2026-10-21', '2026-10-21')) == 3
+
+
+def test_repeated_identical_schedule_row_does_not_create_a_duplicate():
+    ev = {'date': '2026-10-21', 'start_time': '09:00', 'title': '면담'}
+    assert schedules.apply_events([ev, ev]) == {'added': 1, 'updated': 0, 'same': 1, 'skipped': 0}
+
+
 def test_ai_gets_existing_schedules_as_reference(monkeypatch):
     _existing()
     seen = []
@@ -506,3 +551,4 @@ def test_calendar_weeks_start_on_sunday():
     weeks = schedules.month_weeks(2026, 10)
     assert weeks[0][0] == _date(2026, 9, 27) and weeks[0][0].weekday() == 6 and weeks[-1][-1].weekday() == 5
     assert schedules.WEEK_HEAD[0] == '일' and schedules.WEEK_HEAD[-1] == '토'
+
