@@ -262,6 +262,7 @@ _NAV = [  # (이름, 주소, 아이콘, 주소 맞춤)
     ('이력 검색', '/search', 'bi-search', 'exact'),
     ('참고자료', '/references', 'bi-folder2', 'exact'),
     ('컨플루언스', '/confluence', 'bi-journal-text', 'exact'),
+    ('용어집', '/glossary', 'bi-book', 'exact'),
 ]
 
 

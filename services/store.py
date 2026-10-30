@@ -644,6 +644,23 @@ def delete_history(entry_id: int) -> None:
             s.commit()
 
 
+def _history_match(like: str, other_task):
+    """이력이 like 를 원문·AI 정리·작성자·업무명(걸친 업무 포함)·붙은 자료·연결된 임원 중 어디에든 가졌는지."""
+    ref_hist = select(Reference.history_id).where(Reference.history_id.is_not(None), or_(
+        Reference.title.like(like), Reference.url.like(like), Reference.file_name.like(like),
+        Reference.note.like(like)))
+    person_hist = select(HistoryPerson.history_id).join(Person, Person.id == HistoryPerson.person_id).where(
+        or_(Person.name.like(like), Person.aliases.like(like), Person.position.like(like),
+            Person.org.like(like)))
+    return or_(HistoryEntry.content.like(like), HistoryEntry.title.like(like),
+               HistoryEntry.summary.like(like), HistoryEntry.keywords.like(like),
+               HistoryEntry.author.like(like), Task.title.like(like),
+               HistoryEntry.id.in_(select(HistoryTask.history_id)
+                                   .join(other_task, other_task.id == HistoryTask.task_id)
+                                   .where(other_task.title.like(like))),
+               HistoryEntry.id.in_(ref_hist), HistoryEntry.id.in_(person_hist))
+
+
 def search_history(query: str = '', entry_types: list[str] | None = None, author: str = '',
                    date_from: str = '', date_to: str = '', task_id: int | None = None,
                    person_id: int | None = None,
@@ -654,21 +671,9 @@ def search_history(query: str = '', entry_types: list[str] | None = None, author
     with db.SessionLocal() as s:
         stmt = select(HistoryEntry, Task.title).outerjoin(Task, Task.id == HistoryEntry.task_id)
         other_task = aliased(Task)  # 함께 걸친 업무의 제목 (바깥 Task 와 섞이지 않게 별칭)
-        for term in search_terms(query):
-            like = f'%{term}%'
-            ref_hist = select(Reference.history_id).where(Reference.history_id.is_not(None), or_(
-                Reference.title.like(like), Reference.url.like(like), Reference.file_name.like(like),
-                Reference.note.like(like)))
-            person_hist = select(HistoryPerson.history_id).join(Person, Person.id == HistoryPerson.person_id).where(
-                or_(Person.name.like(like), Person.aliases.like(like), Person.position.like(like),
-                    Person.org.like(like)))
-            stmt = stmt.where(or_(HistoryEntry.content.like(like), HistoryEntry.title.like(like),
-                                  HistoryEntry.summary.like(like), HistoryEntry.keywords.like(like),
-                                  HistoryEntry.author.like(like), Task.title.like(like),
-                                  HistoryEntry.id.in_(select(HistoryTask.history_id)
-                                                      .join(other_task, other_task.id == HistoryTask.task_id)
-                                                      .where(other_task.title.like(like))),
-                                  HistoryEntry.id.in_(ref_hist), HistoryEntry.id.in_(person_hist)))
+        from services import glossary
+        for term in search_terms(query):  # 검색어마다 — 용어집의 같은 말 중 하나라도 있으면
+            stmt = stmt.where(or_(*(_history_match(f'%{w}%', other_task) for w in glossary.expand(term))))
         if ids is not None:
             stmt = stmt.where(HistoryEntry.id.in_(ids or [0]))
         if entry_types:
@@ -821,11 +826,10 @@ def list_references(task_id: int | None = None, query: str = '', kind: str = '')
         if kind:
             stmt = stmt.where(Reference.kind == kind)
         if query:
-            like = f'%{query.strip()}%'
-            stmt = stmt.where(or_(Reference.title.like(like), Reference.note.like(like),
-                                  Reference.url.like(like), Reference.file_name.like(like),
-                                  Reference.content.like(like), Reference.content_summary.like(like),
-                                  Task.title.like(like)))
+            from services import glossary  # 같은 말로도 찾는다
+            stmt = stmt.where(or_(*(c.like(f'%{w}%') for w in glossary.expand(query.strip())
+                                    for c in (Reference.title, Reference.note, Reference.url, Reference.file_name,
+                                              Reference.content, Reference.content_summary, Task.title))))
         rows = s.execute(stmt.order_by(Reference.created_at.desc(), Reference.id.desc()))
         return [{**_ref_dict(r), 'task_title': title or ''} for r, title in rows]
 

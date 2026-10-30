@@ -194,10 +194,11 @@ def latest_documents(query: str = '', limit: int = 100) -> list[dict]:
     terms = [a or b for a, b in _re.findall(r'"([^"]+)"|(\S+)', query or '') if (a or b).strip()]
     with db.SessionLocal() as s:
         stmt = select(MailAttachment.doc_key)
+        from services import glossary  # 같은 말로도 찾는다
         for t in terms:
-            like = f'%{t}%'
-            stmt = stmt.where(or_(MailAttachment.filename.ilike(like), MailAttachment.summary.ilike(like),
-                                  MailAttachment.tags.ilike(like), MailAttachment.text.ilike(like)))
+            stmt = stmt.where(or_(*(c.ilike(f'%{w}%') for w in glossary.expand(t)
+                                    for c in (MailAttachment.filename, MailAttachment.summary, MailAttachment.tags,
+                                              MailAttachment.text))))
         keys = list(dict.fromkeys(s.scalars(stmt.order_by(MailAttachment.id.desc()).limit(limit * 10))))[:limit]
         groups = _rows(s, set(keys))
         mails = {m.id: m for m in s.scalars(select(InboundMail).where(

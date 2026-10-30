@@ -10,7 +10,7 @@ from dash import Input, Output, callback, dcc, html
 
 from components import doc_ui, ui
 from components.history_form import people_options
-from services import doc_summary, embed, store
+from services import doc_summary, embed, glossary, store
 
 dash.register_page(__name__, path='/search', name='이력 검색', title='업무 기록 · 이력 검색')
 
@@ -67,6 +67,8 @@ def layout(q: str = '', person: str = '', **_):
           Input('s-from', 'value'), Input('s-to', 'value'), Input('s-auto', 'value'), Input('s-sem', 'value'))
 def search(q, types, person_id, author, date_from, date_to, include_auto, semantic=True):
     terms = store.search_terms(q or '')
+    groups = [glossary.expand(t) for t in terms]  # 용어집의 같은 말
+    extra = [w for g in groups for w in g[1:]]
     filters = dict(entry_types=types or None, author=author or '', person_id=person_id,
                    date_from=date_from or '', date_to=date_to or '', include_auto=bool(include_auto))
     rows = store.search_history(q or '', **filters)
@@ -74,7 +76,8 @@ def search(q, types, person_id, author, date_from, date_to, include_auto, semant
     similar, sim_docs, sim_refs, sem_note = [], [], [], None
     if terms and semantic and embed.is_configured():
         try:
-            similar, sim_docs, sim_refs = _semantic(q, filters, {h['id'] for h in rows}, docs)
+            sem_q = f"{q} ({', '.join(extra)})" if extra else q  # 같은 말도 함께 넣어 뜻을 찾는다
+            similar, sim_docs, sim_refs = _semantic(sem_q, filters, {h['id'] for h in rows}, docs)
         except embed.EmbedError as e:
             sem_note = dbc.Alert(f'의미 검색을 하지 못했습니다 — {e}', color='warning', className='small py-1 px-2')
     if not rows and not docs and not similar and not sim_docs and not sim_refs:
@@ -82,6 +85,9 @@ def search(q, types, person_id, author, date_from, date_to, include_auto, semant
     label = f'{len(rows)}건' + (' (최대 200건까지 표시)' if len(rows) >= 200 else '')
     if docs:
         label += f' · 첨부 문서 {len(docs)}건'
+    if extra:
+        label += f" · 용어집의 같은 말로도 찾음: {', '.join(extra)}"
+    terms = terms + extra  # 같은 말도 강조
     if similar or sim_docs or sim_refs:
         label += f' · 뜻이 비슷한 이력 {len(similar)}건' + (f', 문서·자료 {len(sim_docs) + len(sim_refs)}건'
                                                        if sim_docs or sim_refs else '')
