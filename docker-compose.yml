@@ -85,9 +85,14 @@ services:
       LLM_MAX_TOKENS: ${LLM_MAX_TOKENS:-4000}
       LLM_MAX_CONCURRENT: ${LLM_MAX_CONCURRENT:-2}
 
+      # ── 의미 검색 임베딩 서버 — People in SAIT 의 bge-embed (docker-compose.people-net.yml 로 같은 네트워크에) ──
+      EMBED_BASE_URL: ${EMBED_BASE_URL:-}
+      EMBED_MODEL: ${EMBED_MODEL:-bge-m3}
+      EMBED_API_KEY: ${EMBED_API_KEY:-}
+
       # 사내 LLM·DB 는 프록시를 거치지 않게
-      NO_PROXY: "localhost,127.0.0.1,::1,host.docker.internal,db,exec-db,75.12.15.121,samsungds.net,*.samsungds.net,*.samsung.net,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16"
-      no_proxy: "localhost,127.0.0.1,::1,host.docker.internal,db,exec-db,75.12.15.121,samsungds.net,*.samsungds.net,*.samsung.net,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16"
+      NO_PROXY: "localhost,127.0.0.1,::1,host.docker.internal,db,exec-db,bge-embed,75.12.15.121,samsungds.net,*.samsungds.net,*.samsung.net,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16"
+      no_proxy: "localhost,127.0.0.1,::1,host.docker.internal,db,exec-db,bge-embed,75.12.15.121,samsungds.net,*.samsungds.net,*.samsung.net,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16"
     depends_on:
       exec-db:
         condition: service_healthy

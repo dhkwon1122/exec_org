@@ -332,10 +332,28 @@ def search(query: str, limit: int = 30) -> list[dict]:
             if a.doc_key in seen:
                 continue
             seen.add(a.doc_key)
-            out.append({**insight(a), 'mail_id': a.mail_id, 'mail_subject': subject or '(제목 없음)',
+            out.append({**insight(a), 'doc_key': a.doc_key, 'mail_id': a.mail_id, 'mail_subject': subject or '(제목 없음)',
                         'mail_date': mail_date or '', 'snippet': _snippet(a.text or '', terms)})
             if len(out) >= limit:
                 break
+    return out
+
+
+def attachments(att_ids: list[int]) -> list[dict]:
+    """첨부 id 순서대로 search() 와 같은 모양 (의미 검색 결과 보여 주기) — 같은 문서는 처음 것 하나만."""
+    with db.SessionLocal() as s:
+        rows = {a.id: (a, subject, mail_date) for a, subject, mail_date in s.execute(
+            select(MailAttachment, InboundMail.subject, InboundMail.mail_date)
+            .join(InboundMail, InboundMail.id == MailAttachment.mail_id).where(MailAttachment.id.in_(att_ids or [0])))}
+        out, seen = [], set()
+        for i in att_ids:
+            if i not in rows or rows[i][0].doc_key in seen:
+                continue
+            a, subject, mail_date = rows[i]
+            seen.add(a.doc_key)
+            out.append({**insight(a), 'doc_key': a.doc_key, 'mail_id': a.mail_id,
+                        'mail_subject': subject or '(제목 없음)', 'mail_date': mail_date or '',
+                        'snippet': (a.text or '')[:120]})
     return out
 
 
