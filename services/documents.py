@@ -33,9 +33,12 @@ def _ref_extra(ref_ids) -> dict:
     ids = list(ref_ids)
     if not ids:
         return {}
+    from sqlalchemy import func
+    from sqlalchemy.orm import defer
     with db.SessionLocal() as s:
-        return {r.id: {'sha256': r.sha256 or '', 'doc_key': r.doc_key or '', 'insight': doc_summary.insight(r)}
-                for r in s.scalars(select(Reference).where(Reference.id.in_(ids)))}
+        return {r.id: {'sha256': r.sha256 or '', 'doc_key': r.doc_key or '', 'insight': doc_summary.insight(r, n or 0)}
+                for r, n in s.execute(select(Reference, func.length(Reference.text)).options(defer(Reference.text))
+                                      .where(Reference.id.in_(ids)))}
 
 
 def _mail_version(v: dict) -> dict:
@@ -93,8 +96,8 @@ def timeline(key: str) -> list[dict]:
     with db.SessionLocal() as s:
         mail = doc_versions._rows(s, {key}).get(key, [])
         ref_ids = list(s.scalars(select(Reference.id).where(Reference.kind == 'file', Reference.doc_key == key)))
-    refs = [store.get_reference(i) for i in ref_ids]
-    docs = _merge([{'doc_key': key, 'versions': mail}] if mail else [], [r for r in refs if r])
+    refs = store.get_references(ref_ids)
+    docs = _merge([{'doc_key': key, 'versions': mail}] if mail else [], refs)
     return docs[0]['versions'] if docs else []
 
 
@@ -120,7 +123,7 @@ def search(query: str = '', limit: int = 100) -> list[dict]:
         groups = doc_versions._rows(s, set(keys)) if keys else {}
         ref_ids = list(s.scalars(select(Reference.id).where(Reference.kind == 'file',
                                                             Reference.doc_key.in_(keys or ['']))))
-    refs = [r for r in (store.get_reference(i) for i in ref_ids) if r]
+    refs = store.get_references(ref_ids)
     mail_groups = [{'doc_key': k, 'versions': groups[k]} for k in keys if k in groups]
     return _merge(mail_groups, refs)[:limit]
 
@@ -166,6 +169,7 @@ def merge(src: str, dst: str) -> int:
         s.execute(update(DocKeyAlias).where(DocKeyAlias.target == src).values(target=dst))
         s.add(DocKeyAlias(key=src, target=dst))
         s.commit()
+    invalidate()
     return n
 
 
@@ -190,6 +194,7 @@ def split(key: str, version_ids: list[str], name: str) -> str:
         if not _set_key(s, key, new, version_ids):
             raise ValueError('옮길 판을 찾지 못했습니다.')
         s.commit()
+    invalidate()
     return new
 
 
@@ -229,3 +234,148 @@ def catalog(exclude: str = '', limit: int = 500) -> list[dict]:
     out.sort(key=lambda d: (d['when'] is not None, d['when'] or 0), reverse=True)
     return [{'key': d['key'], 'label': d['label']} for d in out[:limit]]
 
+
+# ── 미리 만들어 두기 (참고자료 화면) ──────────────────────────────────
+# 전체 문서 목록은 모든 메일 첨부·올린 파일을 판으로 묶어야 해서 느리다. 쉬는 시간(doc_worker)에 문서마다 판 이력을
+# document_cache 에 JSON 으로 만들어 두고, 화면은 그것을 읽는다. 화면을 열 때는 그 뒤로 새로 온·새로 요약한 파일의
+# 문서만 다시 만든다(빠름). 지우기·합치기처럼 몇 문서가 바뀌었는지 모르는 변화는 invalidate() → 다음에 전부 다시.
+
+FULL_EVERY = 30 * 60  # 쉬는 시간에 이 간격(초)마다 전부 다시 (업무 이름이 바뀐 것 등까지)
+SEARCH_TEXT_PER_VERSION = 3000  # 판마다 본문 앞부분을 검색용으로
+
+
+def _stamp(s) -> dict:
+    from sqlalchemy import func, select
+    from services.db import DocKeyAlias, MailAttachment, Reference
+
+    def agg(model, *cond):
+        n, mx, an = s.execute(select(func.count(), func.max(model.id), func.max(model.analyzed_at)).where(*cond)).one()
+        return [n or 0, mx or 0, an.isoformat() if an else '']
+    return {'mail': agg(MailAttachment), 'ref': agg(Reference, Reference.kind == 'file'),
+            'alias': list(s.execute(select(func.count(), func.max(DocKeyAlias.id))).one())}
+
+
+def _texts(s, keys: set[str]) -> dict[str, list[str]]:
+    """문서별 검색할 글 — 판마다 본문 앞부분, 올린 파일의 제목·메모·본문."""
+    from sqlalchemy import func, select
+    from services.db import MailAttachment, Reference
+    out: dict[str, list[str]] = {}
+    n = SEARCH_TEXT_PER_VERSION
+    for k, t in s.execute(select(MailAttachment.doc_key, func.substr(MailAttachment.text, 1, n))
+                          .where(MailAttachment.doc_key.in_(keys))):
+        out.setdefault(k, []).append(t or '')
+    for k, title, note, t in s.execute(select(Reference.doc_key, Reference.title, Reference.note,
+                                              func.substr(Reference.text, 1, n))
+                                       .where(Reference.kind == 'file', Reference.doc_key.in_(keys))):
+        out.setdefault(k, []).extend([title or '', note or '', t or ''])
+    return out
+
+
+def _search_text(d: dict, texts: list[str]) -> str:
+    parts = [d['base'], d['key']]
+    for v in d['versions']:
+        ins = v.get('insight') or {}
+        parts += [v['filename'], v.get('mail_subject', ''), v.get('history_title', ''),
+                  (v.get('via_task') or {}).get('title', ''), ins.get('doc_type', ''), ins.get('summary', ''),
+                  ' '.join(ins.get('tags', []))]
+    return '\n'.join(p for p in parts + texts if p).lower()
+
+
+def _build(keys: set[str]) -> list[dict]:
+    """문서 열쇠들의 문서 (모든 판) — search() 와 같은 모양."""
+    from sqlalchemy import select
+    from services.db import Reference
+    if not keys:
+        return []
+    with db.SessionLocal() as s:
+        groups = doc_versions._rows(s, keys)
+        ref_ids = list(s.scalars(select(Reference.id).where(Reference.kind == 'file', Reference.doc_key.in_(keys))))
+    refs = store.get_references(ref_ids)
+    return _merge([{'doc_key': k, 'versions': v} for k, v in groups.items()], refs)
+
+
+def _all_keys(s) -> set[str]:
+    from sqlalchemy import select
+    from services.db import MailAttachment, Reference
+    return {k for k in s.scalars(select(MailAttachment.doc_key).distinct()) if k} | \
+        {k for k in s.scalars(select(Reference.doc_key).where(Reference.kind == 'file').distinct()) if k}
+
+
+def _write(s, docs: list[dict], keys: set[str]) -> None:
+    import json
+    from datetime import datetime
+    from sqlalchemy import delete
+    from services.db import DocumentCache
+    texts = _texts(s, {d['key'] for d in docs})
+    now = datetime.now().replace(microsecond=0)
+    s.execute(delete(DocumentCache).where(DocumentCache.key.in_(keys)))
+    for d in docs:
+        s.add(DocumentCache(key=d['key'], data=json.dumps(d, ensure_ascii=False, default=str),
+                            search_text=_search_text(d, texts.get(d['key'], [])), updated=d['updated'],
+                            latest_at=d['latest'].get('received', ''),
+                            has_mail=any(v['kind'] == 'mail' for v in d['versions']), refreshed_at=now))
+
+
+def invalidate() -> None:
+    """다음 refresh_cache 때 전부 다시 만들게 한다 (지우기·합치기 등 어느 문서가 바뀌었는지 모를 때)."""
+    from sqlalchemy import delete
+    from services.db import DocumentCache
+    with db.SessionLocal() as s:
+        s.execute(delete(DocumentCache).where(DocumentCache.key == ''))
+        s.commit()
+
+
+def refresh_cache(full: bool = False, idle: bool = False) -> int:
+    """미리 만든 문서 목록을 지금 상태로 — 다시 만든 문서 수. idle 이면 FULL_EVERY 가 지났을 때 전부 다시."""
+    import json
+    from datetime import datetime
+    from sqlalchemy import delete, or_, select
+    from services import doc_summary
+    from services.db import DocumentCache, MailAttachment, Reference
+    if doc_summary.ensure_reference_keys():  # 열쇠를 새로 채운 예전 파일 — 어느 문서인지 바뀐다
+        invalidate()
+    with db.SessionLocal() as s:
+        meta = s.get(DocumentCache, '')
+        old = json.loads(meta.data) if meta and meta.data else None
+        new = _stamp(s)
+        if old == new and not full and not (idle and meta and
+                                            (datetime.now() - meta.refreshed_at).total_seconds() > FULL_EVERY):
+            return 0
+        shrank = old is not None and (new['mail'][0] < old['mail'][0] or new['ref'][0] < old['ref'][0])
+        if full or old is None or shrank or old['alias'] != new['alias'] or idle:
+            keys = _all_keys(s)
+            s.execute(delete(DocumentCache))
+        else:  # 그 뒤로 새로 온·새로 요약한 파일의 문서만
+            m, r = old['mail'], old['ref']
+            keys = set(s.scalars(select(MailAttachment.doc_key).where(or_(
+                MailAttachment.id > m[1], MailAttachment.analyzed_at >= datetime.fromisoformat(m[2])
+                if m[2] else MailAttachment.analyzed_at.is_not(None)))))
+            keys |= set(s.scalars(select(Reference.doc_key).where(Reference.kind == 'file', or_(
+                Reference.id > r[1], Reference.analyzed_at >= datetime.fromisoformat(r[2])
+                if r[2] else Reference.analyzed_at.is_not(None)))))
+            keys.discard('')
+        docs = _build(keys)
+        _write(s, docs, keys)
+        s.merge(DocumentCache(key='', data=json.dumps(new), refreshed_at=datetime.now().replace(microsecond=0)))
+        s.commit()
+    return len(docs) or (1 if keys else 0)
+
+
+def cached(query: str = '', mail_only: bool = False, limit: int = 30) -> tuple[list[dict], int]:
+    """참고자료 화면의 문서 — 미리 만든 목록에서 (최근 바뀐 문서부터). (문서들, 걸린 문서 수).
+    검색어는 낱말마다(용어집의 같은 말 포함) 파일 이름·요약·태그·메일 제목·본문 앞부분 중 어디에든 있어야 한다."""
+    import json
+    from sqlalchemy import func, or_, select
+    from services import glossary
+    from services.db import DocumentCache
+    refresh_cache()
+    cond = [DocumentCache.key != '']
+    if mail_only:
+        cond.append(DocumentCache.has_mail.is_(True))
+    for t in store.search_terms(query or ''):
+        cond.append(or_(*(DocumentCache.search_text.like(f'%{w.lower()}%') for w in glossary.expand(t))))
+    with db.SessionLocal() as s:
+        total = s.scalar(select(func.count()).select_from(DocumentCache).where(*cond)) or 0
+        rows = s.scalars(select(DocumentCache.data).where(*cond)
+                         .order_by(DocumentCache.updated.desc(), DocumentCache.latest_at.desc()).limit(limit)).all()
+    return [json.loads(r) for r in rows], total

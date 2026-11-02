@@ -124,6 +124,44 @@ def test_merge_and_split_guard_rails():
     assert len(docs) == 1 and docs[0]['key'] == c and docs[0]['n_versions'] == 4
 
 
+def test_cached_document_list_stays_fresh():
+    """참고자료 화면 목록은 미리 만든 것을 읽되, 새로 올린 파일·지우기·합치기가 바로 반영된다."""
+    from services import glossary
+    mailbox.fetch_new(connect=lambda cfg: FakePOP([
+        _mail('예산', 'Mon, 19 Oct 2026 09:00:00 +0900', [('2027예산안_1019.docx', b'v1')], '<a@x>')]))
+    t = store.create_task('예산 편성')
+    store.add_reference(t['id'], 'file', file_name='참석자명단.xlsx', file_bytes=b'x')
+    docs, total = documents.cached()
+    assert total == 2 and {d['base'] for d in docs} == {'2027예산안', '참석자명단'}
+    assert documents.refresh_cache() == 0  # 바뀐 것 없음
+
+    r = store.add_reference(t['id'], 'file', file_name='2027예산안_1020_v2.docx', file_bytes=b'v2')
+    docs, _ = documents.cached('예산안')
+    assert [d['n_versions'] for d in docs] == [2]  # 새로 올린 판이 바로 보인다
+    assert documents.cached(mail_only=True)[1] == 1 and documents.cached(limit=1)[0].__len__() == 1
+
+    glossary.save_all([{'term': '명단', 'synonyms': '리스트'}])
+    assert [d['base'] for d in documents.cached('리스트')[0]] == ['참석자명단']  # 용어집의 같은 말
+
+    store.delete_reference(r['id'])
+    assert [d['n_versions'] for d in documents.cached('예산안')[0]] == [1]
+    a, b = documents.cached()[0]
+    documents.merge(b['key'], a['key'])
+    docs, total = documents.cached()
+    assert total == 1 and docs[0]['n_versions'] == 2
+
+
+def test_idle_worker_builds_document_list(monkeypatch):
+    from services import doc_worker
+    from services.db import DocumentCache
+    monkeypatch.setenv('DOC_SUMMARY_IDLE_MINUTES', '10')
+    monkeypatch.setattr(doc_worker, '_pause_until', 0.0)
+    store.add_reference(store.create_task('x')['id'], 'file', file_name='보고서.docx', file_bytes=b'a')
+    assert doc_worker.step(10 ** 10) is False  # LLM 이 없으면 할 일이 없어 목록만 만들고 쉰다
+    with db.SessionLocal() as s:
+        assert s.query(DocumentCache).filter(DocumentCache.key != '').count() == 1
+
+
 @pytest.mark.parametrize('resent', [b'old', b'new'])
 def test_resending_an_uploaded_version_keeps_the_latest_content_and_insight(resent):
     from datetime import datetime
@@ -157,4 +195,3 @@ def test_old_mail_resend_does_not_replace_a_newer_uploaded_version():
     doc = documents.for_task(t['id'])[0]
     assert doc['latest']['kind'] == 'ref' and doc['latest']['ref_id'] == ref['id']
     assert doc['latest']['version'] == 2 and doc['n_versions'] == 2
-

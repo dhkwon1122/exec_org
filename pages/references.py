@@ -2,7 +2,7 @@
 파일은 메일 첨부와 올린 파일을 같은 문서끼리 묶어 판이 바뀌어 온 순서대로(services/documents.py), 그 밖에 링크·메모."""
 import dash
 import dash_bootstrap_components as dbc
-from dash import Input, Output, callback, dcc, html
+from dash import Input, Output, State, callback, ctx, dcc, html
 
 from components import doc_ui, ui
 from services import documents, store
@@ -21,28 +21,37 @@ def layout(**_):
                 {'label': '문서(파일)', 'value': 'file'}, {'label': '메모', 'value': 'note'},
                 {'label': '메일로 받은 문서', 'value': 'mail'}]), md=4),
         ], className='g-2 mb-3'),
+        dcc.Store(id='ref-limit', data=PAGE),
         html.Div(id='ref-results'),
+        dbc.Button(id='ref-more', color='secondary', outline=True, size='sm', className='mb-2',
+                   style={'display': 'none'}),
+        html.Div(id='ref-links'),
     ])
 
 
-@callback(Output('ref-results', 'children'), Input('rq', 'value'), Input('rkind', 'value'), Input('doc-changed', 'data'))
-def search(q, kind, _changed=None):
-    """문서(메일 첨부·올린 파일을 같은 문서끼리 판으로)와 링크·메모."""
-    docs = documents.search(q or '') if kind in ('', 'file', 'mail', None) else []
-    if kind == 'mail':  # 메일로 받은 판이 있는 문서만
-        docs = [d for d in docs if any(v['kind'] == 'mail' for v in d['versions'])]
+PAGE = 30  # 문서 카드를 한 번에 몇 개씩
+
+
+@callback(Output('ref-results', 'children'), Output('ref-links', 'children'), Output('ref-limit', 'data'),
+          Output('ref-more', 'children'), Output('ref-more', 'style'),
+          Input('rq', 'value'), Input('rkind', 'value'), Input('doc-changed', 'data'), Input('ref-more', 'n_clicks'),
+          State('ref-limit', 'data'))
+def search(q, kind, _changed=None, _more=None, limit=PAGE):
+    """문서(메일 첨부·올린 파일을 같은 문서끼리 판으로 — 미리 만들어 둔 목록에서)와 링크·메모."""
+    limit = (limit or PAGE) + PAGE if ctx.triggered_id == 'ref-more' else PAGE
+    docs, total = documents.cached(q or '', mail_only=kind == 'mail', limit=limit) \
+        if kind in ('', 'file', 'mail', None) else ([], 0)
     refs = [r for r in store.list_references(query=q or '', kind=kind if kind in ('link', 'note') else '')
             if r['kind'] != 'file'] if kind in ('', 'link', 'note', None) else []
+    hide = {'display': 'none'}
     if not refs and not docs:
-        return dbc.Alert('참고자료가 없습니다.', color='light')
-    sections = []
-    if docs:
-        sections += [html.H6([html.I(className='bi bi-files me-1'), f'문서 {len(docs)}'], className='mb-2'),
-                     doc_ui.document_cards(docs)]
-    if refs:
-        sections += [html.H6([html.I(className='bi bi-link-45deg me-1'), f'링크·메모 {len(refs)}'],
-                             className='mt-3 mb-2' if docs else 'mb-2'), _refs_view(refs)]
-    return html.Div(sections)
+        return dbc.Alert('참고자료가 없습니다.', color='light'), None, limit, '', hide
+    doc_view = html.Div([html.H6([html.I(className='bi bi-files me-1'), f'문서 {total}'], className='mb-2'),
+                         doc_ui.document_cards(docs)]) if docs else None
+    link_view = html.Div([html.H6([html.I(className='bi bi-link-45deg me-1'), f'링크·메모 {len(refs)}'],
+                                  className='mt-3 mb-2' if docs else 'mb-2'), _refs_view(refs)]) if refs else None
+    more = total > len(docs)
+    return doc_view, link_view, limit, f'문서 더 보기 ({len(docs)} / {total})' if more else '', {} if more else hide
 
 
 def _refs_view(refs: list[dict]):
