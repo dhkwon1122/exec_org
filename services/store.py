@@ -299,6 +299,28 @@ def task_tree(statuses: list[str] | None = None, depth: int = 1, hide_done: bool
     return out
 
 
+def history_marks(task_ids: list[int]) -> dict[int, list[dict]]:
+    """업무별 이력이 있었던 날 (간트 표시) — {업무 id: [{'date', 'n', 'items': ['[회의] 제목', ...]}]} 날짜 순.
+    그 업무에 속한 이력과 그 업무에도 걸친 이력 (자동 기록은 뺀다)."""
+    if not task_ids:
+        return {}
+    out: dict[int, dict[str, list[str]]] = {}
+    with db.SessionLocal() as s:
+        own = s.execute(select(HistoryEntry.task_id, HistoryEntry.occurred_at, HistoryEntry.entry_type,
+                               HistoryEntry.title, HistoryEntry.content)
+                        .where(HistoryEntry.task_id.in_(task_ids), HistoryEntry.entry_type.notin_(AUTO_ENTRY_TYPES)))
+        shared = s.execute(select(HistoryTask.task_id, HistoryEntry.occurred_at, HistoryEntry.entry_type,
+                                  HistoryEntry.title, HistoryEntry.content)
+                           .join(HistoryEntry, HistoryEntry.id == HistoryTask.history_id)
+                           .where(HistoryTask.task_id.in_(task_ids), HistoryEntry.entry_type.notin_(AUTO_ENTRY_TYPES)))
+        for tid, when, kind, title, content in list(own) + list(shared):
+            if when is None:
+                continue
+            label = f"[{kind}] {title or (content or '')[:40]}"
+            out.setdefault(tid, {}).setdefault(when.date().isoformat(), []).append(label)
+    return {tid: [{'date': d, 'n': len(v), 'items': v} for d, v in sorted(days.items())] for tid, days in out.items()}
+
+
 def child_progress(task_ids: list[int]) -> dict[int, tuple[int, int]]:
     """업무별 바로 아래 하위 업무 (완료 수, 전체 수)."""
     if not task_ids:

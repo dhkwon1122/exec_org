@@ -102,6 +102,7 @@ class HistoryEntry(Base):
     author = Column(String(100), default='')
     occurred_at = Column(DateTime, default=_now)  # 실제 일이 있었던 시점(사용자가 지정 가능)
     created_at = Column(DateTime, default=_now)
+    updated_at = Column(DateTime, nullable=True, onupdate=_now)  # 고친 시각 (업무 요약이 오래됐는지 볼 때)
     # 검색용 정리본 — LLM 이 채우고 사용자가 고칠 수 있다
     title = Column(String(300), default='')
     summary = Column(Text, default='')
@@ -553,6 +554,19 @@ class DocumentCache(Base):
     latest_at = Column(String(20), default='')  # 가장 최근 판의 받은·올린 시각 (정렬)
     has_mail = Column(Boolean, default=False)
     refreshed_at = Column(DateTime, default=_now)
+
+
+class TaskSummary(Base):
+    """업무 AI 요약 (services/task_summary.py) — 하위 업무·이력·참고자료를 묶어 쉬는 시간에 미리 만든다.
+    source_hash 는 요약에 넣은 글의 sha256 — 같으면 다시 묻지 않는다."""
+    __tablename__ = 'task_summaries'
+
+    id = Column(Integer, primary_key=True)
+    task_id = Column(Integer, ForeignKey('tasks.id', ondelete='CASCADE'), nullable=False, unique=True)
+    data = Column(Text, default='')  # JSON {'overview', 'progress', 'next', 'references'}
+    source_hash = Column(String(64), default='')
+    generated_at = Column(DateTime, nullable=True)
+    error = Column(Text, default='')
 
 
 class Todo(Base):

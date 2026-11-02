@@ -1,11 +1,12 @@
 """업무 간트 차트 — 업무 트리(store.task_tree)를 왼쪽에 들여 쓰고, 오른쪽에 시작일~마감일 막대를 그린다.
 
 막대: 시작 = 시작일(없으면 등록일), 끝 = 마감일(없으면 완료일, 진행 중이면 오늘까지 흐리게 — 마감 미정).
+막대 위 점: 그 업무에 이력(회의·메모 등)이 있었던 날 — 마우스를 올리면 그날의 기록. 업무 이름을 누르면 AI 요약 창.
 색은 상태(예정·진행중·보류·완료), 마감이 지났는데 끝나지 않았으면 빨간 테두리. 세로 실선은 오늘, 점선은 달의 첫날.
 """
 from datetime import date, timedelta
 
-from dash import dcc, html
+from dash import html
 
 _STATUS_CLASS = {'예정': 'plan', '진행중': 'doing', '보류': 'hold', '완료': 'done'}
 MIN_DAYS = 28
@@ -68,8 +69,23 @@ def _ticks(lo: date, hi: date, kind: str) -> list[tuple[date, str]]:
     return out
 
 
-def chart(rows: list[dict], today: date | None = None, scale: str = 'all', offset: int = 0):
-    """rows: store.task_tree 의 줄 [{'task', 'level', ...}]. scale: week / month / quarter / all."""
+def _dots(days: list[dict], lo: date, hi: date, pct) -> list:
+    """이력이 있었던 날마다 점 (같은 날 여러 건이면 크게)."""
+    out = []
+    for m in days:
+        d = _d(m['date'])
+        if d is None or not lo <= d <= hi:
+            continue
+        tip = f"{m['date']} 기록 {m['n']}건\n" + '\n'.join(m['items'][:6]) + ('\n…' if m['n'] > 6 else '')
+        out.append(html.Div(className='gantt-dot' + (' many' if m['n'] > 1 else ''), title=tip,
+                            style={'left': f'{pct(d + timedelta(hours=12)):.2f}%'}))
+    return out
+
+
+def chart(rows: list[dict], today: date | None = None, scale: str = 'all', offset: int = 0,
+          marks: dict[int, list[dict]] | None = None):
+    """rows: store.task_tree 의 줄 [{'task', 'level', ...}]. scale: week / month / quarter / all.
+    marks: 업무별 이력이 있었던 날 (store.history_marks)."""
     today = today or date.today()
     if not rows:
         return None
@@ -117,19 +133,21 @@ def chart(rows: list[dict], today: date | None = None, scale: str = 'all', offse
             html.Div([
                 html.Span(className='gantt-indent', style={'width': f"{r['level'] * 1.1}rem"}),
                 html.I(className='bi bi-arrow-return-right text-muted me-1') if r['level'] else None,
-                dcc.Link([html.Span(f"#{t['id']}", className='task-no'), t['title']], href=f"/task/{t['id']}",
-                         className='task-title text-truncate' + (' done' if t['status'] == '완료' else ''),
-                         title=t['title']),
+                html.A([html.Span(f"#{t['id']}", className='task-no'), t['title']], id={'type': 'gantt-task', 'id': t['id']},
+                       n_clicks=0, className='task-title text-truncate' + (' done' if t['status'] == '완료' else ''),
+                       title=f"{t['title']} — 눌러서 AI 요약 보기", role='button'),
                 html.Span(f"{r['n_done']}/{r['n_children']}", className='small text-muted ms-1')
                 if r.get('n_children') else None,
             ], className='gantt-label'),
             html.Div([*grid, html.Div(className=cls, title=tip,
-                                      style={'left': f'{left:.2f}%', 'width': f'{max(right - left, 0.6):.2f}%'})],
+                                      style={'left': f'{left:.2f}%', 'width': f'{max(right - left, 0.6):.2f}%'}),
+                      *_dots((marks or {}).get(t['id'], []), lo, hi, pct)],
                      className='gantt-track'),
         ], className='gantt-row'))
     legend = html.Div([html.Span([html.Span(className=f'gantt-key {c}'), s], className='me-3')
                        for s, c in _STATUS_CLASS.items()]
                       + [html.Span([html.Span(className='gantt-key doing open'), '마감 미정 (오늘까지)'], className='me-3'),
-                         html.Span([html.Span(className='gantt-key doing late'), '마감 지남'])],
+                         html.Span([html.Span(className='gantt-key doing late'), '마감 지남'], className='me-3'),
+                         html.Span([html.Span(className='gantt-dot-key'), '이력이 있었던 날 (점에 마우스를 올리면 그날 기록) · 업무 이름을 누르면 AI 요약'])],
                       className='small text-muted mt-2')
     return html.Div([html.Div(lines, className='gantt'), legend])

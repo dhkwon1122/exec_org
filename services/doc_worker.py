@@ -129,6 +129,23 @@ def _refresh_documents() -> int:
         return 0
 
 
+def _summarize_task(now: float) -> bool | None:
+    """요약이 없거나 오래된 업무 하나를 요약한다 — 할 것이 없으면 None, 했으면 True, LLM 오류면 False(잠시 쉼)."""
+    global _pause_until
+    from services import task_summary
+    ids = [t for t in task_summary.pending(limit=10) if _fails.get(('task', t), 0) < MAX_FAILS]
+    if not ids:
+        return None
+    try:
+        task_summary.generate(ids[0])
+    except llm.LLMError as e:
+        _fails[('task', ids[0])] = _fails.get(('task', ids[0]), 0) + 1
+        _pause_until = now + PAUSE_ON_ERROR
+        log.warning('업무 요약 실패 %s: %s', ids[0], e)
+        return False
+    return True
+
+
 def step(now: float | None = None) -> bool:
     """한 번 돈다 — 무언가 했으면 True (곧바로 다음 것을 본다)."""
     global _pause_until
@@ -150,9 +167,12 @@ def step(now: float | None = None) -> bool:
     if not ids:  # 메일 첨부가 끝나면 올린 파일
         ids, analyze_one = doc_summary.pending_refs(limit=5), doc_summary.analyze_ref
         ids = [i for i in ids if _fails.get(-i, 0) < MAX_FAILS]  # 실패 기록은 음수 id 로 (메일 첨부 id 와 겹치지 않게)
-        if not ids:
-            _refresh_documents()
-            return False
+        if not ids:  # 첨부·올린 파일이 끝나면 업무 요약 (바뀐 업무부터 하나씩)
+            done = _summarize_task(now)
+            if done is None:
+                _refresh_documents()
+                return False
+            return done
         ids = [-ids[0]]
     att_id = ids[0]
     at = datetime.now().strftime('%Y-%m-%d %H:%M')
