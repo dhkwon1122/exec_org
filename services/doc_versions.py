@@ -120,7 +120,8 @@ def _rows(s, keys: set[str]) -> dict[str, list[dict]]:
             'id': a.id, 'mail_id': a.mail_id, 'filename': a.filename, 'size': a.size or 0, 'sha256': a.sha256 or '',
             'doc_key': a.doc_key, 'base': p['base'], 'name_date': p['date'], 'name_version': p['version'],
             'mail_subject': subject or '(제목 없음)', 'mail_date': mail_date or '',
-            'received': received.strftime('%Y-%m-%d %H:%M') if received else '', 'insight': insight(a, text_len or 0)})
+            'received': received.strftime('%Y-%m-%d %H:%M') if received else '', 'insight': insight(a, text_len or 0),
+            'excluded': bool(a.excluded)})
     return {k: _number(v) for k, v in out.items()}
 
 

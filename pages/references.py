@@ -19,7 +19,8 @@ def layout(**_):
             dbc.Col(dbc.Select(id='rkind', value='', options=[
                 {'label': '전체 유형', 'value': ''}, {'label': '링크', 'value': 'link'},
                 {'label': '문서(파일)', 'value': 'file'}, {'label': '메모', 'value': 'note'},
-                {'label': '메일로 받은 문서', 'value': 'mail'}]), md=4),
+                {'label': '메일로 받은 문서', 'value': 'mail'},
+                {'label': '이력에서 뺀 것', 'value': 'excluded'}]), md=4),
         ], className='g-2 mb-3'),
         dcc.Store(id='ref-limit', data=PAGE),
         html.Div(id='ref-results'),
@@ -39,11 +40,13 @@ PAGE = 30  # 문서 카드를 한 번에 몇 개씩
 def search(q, kind, _changed=None, _more=None, limit=PAGE):
     """문서(메일 첨부·올린 파일을 같은 문서끼리 판으로 — 미리 만들어 둔 목록에서)와 링크·메모."""
     limit = (limit or PAGE) + PAGE if ctx.triggered_id == 'ref-more' else PAGE
+    hide = {'display': 'none'}
+    if kind == 'excluded':  # 판 이력에서 뺀 문서·판 — 되돌리기
+        return doc_ui.excluded_view(documents.excluded()), None, limit, '', hide
     docs, total = documents.cached(q or '', mail_only=kind == 'mail', limit=limit) \
         if kind in ('', 'file', 'mail', None) else ([], 0)
     refs = [r for r in store.list_references(query=q or '', kind=kind if kind in ('link', 'note') else '')
             if r['kind'] != 'file'] if kind in ('', 'link', 'note', None) else []
-    hide = {'display': 'none'}
     if not refs and not docs:
         return dbc.Alert('참고자료가 없습니다.', color='light'), None, limit, '', hide
     doc_view = html.Div([html.H6([html.I(className='bi bi-files me-1'), f'문서 {total}'], className='mb-2'),

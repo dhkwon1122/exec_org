@@ -148,6 +148,7 @@ class Reference(Base):
     key_dates = Column(Text, default='')
     changes = Column(Text, default='')  # 같은 문서의 바로 앞 판(메일 첨부든 올린 파일이든)과 달라진 점
     analyzed_at = Column(DateTime)
+    excluded = Column(Boolean, default=False)  # 참고자료 판 이력에서 뺌 (파일은 그대로)
 
     task = relationship('Task', back_populates='references')
 
@@ -450,6 +451,7 @@ class MailAttachment(Base):
     key_dates = Column(Text, default='')  # JSON [{'date','what'}]
     changes = Column(Text, default='')  # 앞 판과 달라진 점
     analyzed_at = Column(DateTime)
+    excluded = Column(Boolean, default=False)  # 참고자료 판 이력에서 뺌 (메일·파일은 그대로)
 
 
 class OutboundMail(Base):
@@ -526,6 +528,17 @@ class GlossaryTerm(Base):
     description = Column(Text, default='')
     created_at = Column(DateTime, default=_now)
     updated_at = Column(DateTime, default=_now, onupdate=_now)
+
+
+class DocExclusion(Base):
+    """참고자료 판 이력에서 뺀 문서 (services/documents.py exclude) — 이 열쇠의 파일은 앞으로 오는 것도 이력에서 뺀다."""
+    __tablename__ = 'doc_exclusions'
+
+    id = Column(Integer, primary_key=True)
+    key = Column(String(300), nullable=False, unique=True)
+    label = Column(String(300), default='')  # 뺄 때의 문서 이름 (되돌리기 목록)
+    created_by = Column(String(100), default='')
+    created_at = Column(DateTime, default=_now)
 
 
 class DocumentCache(Base):

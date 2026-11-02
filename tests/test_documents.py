@@ -195,3 +195,47 @@ def test_old_mail_resend_does_not_replace_a_newer_uploaded_version():
     doc = documents.for_task(t['id'])[0]
     assert doc['latest']['kind'] == 'ref' and doc['latest']['ref_id'] == ref['id']
     assert doc['latest']['version'] == 2 and doc['n_versions'] == 2
+
+
+def test_exclude_documents_and_versions_from_history():
+    """문서를 통째로(앞으로 오는 파일도) 또는 판 하나만 이력에서 빼고, 되돌린다. 메일·파일은 그대로."""
+    from services import doc_worker
+    mailbox.fetch_new(connect=lambda cfg: FakePOP([
+        _mail('예산', 'Mon, 19 Oct 2026 09:00:00 +0900',
+              [('2027예산안_1019.docx', b'v1'), ('image001.png', b'logo')], '<a@x>')]))
+    t = store.create_task('예산 편성')
+    for m in mailbox.list_mails():
+        mailbox.link_task(m['id'], t['id'], '나')
+    v2 = store.add_reference(t['id'], 'file', file_name='2027예산안_1020_v2.docx', file_bytes=b'v2')
+    store.add_reference(t['id'], 'file', file_name='2027예산안_1021_v3.docx', file_bytes=b'v3')
+    docs = {d['base']: d for d in documents.for_task(t['id'])}
+    assert set(docs) == {'2027예산안', 'image001'} and docs['2027예산안']['n_versions'] == 3
+
+    documents.exclude(docs['image001']['key'], by='나', label='image001.png')
+    documents.exclude_version(f"r{v2['id']}")
+    docs = {d['base']: d for d in documents.for_task(t['id'])}
+    assert set(docs) == {'2027예산안'}
+    assert [v['filename'] for v in docs['2027예산안']['versions']] == ['2027예산안_1019.docx', '2027예산안_1021_v3.docx']
+    assert docs['2027예산안']['n_versions'] == 2  # 판 번호도 다시
+    assert {d['base'] for d in documents.cached()[0]} == {'2027예산안'}
+    assert all(not mailbox.get_mail(m['id']) is None for m in mailbox.list_mails())  # 메일은 그대로
+
+    # 같은 이름으로 다시 와도 빠진 채로, 요약 대기열에도 없다
+    mailbox.fetch_new(connect=lambda cfg: FakePOP([
+        _mail('예산', 'Mon, 19 Oct 2026 09:00:00 +0900',
+              [('2027예산안_1019.docx', b'v1'), ('image001.png', b'logo')], '<a@x>'),
+        _mail('서명', 'Tue, 20 Oct 2026 09:00:00 +0900', [('image001.png', b'logo2')], '<b@x>')]))
+    assert {d['base'] for d in documents.search()} == {'2027예산안'}
+    from services.db import MailAttachment
+    with db.SessionLocal() as s:
+        logos = [a.id for a in s.query(MailAttachment).filter(MailAttachment.filename == 'image001.png')]
+    assert not set(logos) & set(doc_worker.pending())
+
+    ex = documents.excluded()
+    assert [d['label'] for d in ex['docs']] == ['image001.png'] and ex['docs'][0]['by'] == '나'
+    assert [v['filename'] for v in ex['versions']] == ['2027예산안_1020_v2.docx']
+    documents.include(ex['docs'][0]['key'])
+    documents.exclude_version(f"r{v2['id']}", excluded=False)
+    assert {d['base']: d['n_versions'] for d in documents.cached()[0]} == {'2027예산안': 3, 'image001': 2}
+    with pytest.raises(ValueError):
+        documents.exclude_version('x1')

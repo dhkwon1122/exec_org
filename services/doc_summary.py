@@ -15,7 +15,7 @@ from datetime import datetime
 from sqlalchemy import or_, select
 
 from services import db, doc_text, doc_versions, llm
-from services.db import HistoryEntry, InboundMail, MailAttachment, Reference, Task
+from services.db import DocExclusion, HistoryEntry, InboundMail, MailAttachment, Reference, Task
 
 DOC_TYPES = ['보고서', '회의자료', '회의록', '계획서', '공문', '안내문', '명단', '일정표', '예산·집계표', '발표자료',
              '양식', '계약·협약', '기타']
@@ -283,7 +283,8 @@ def pending_refs(limit: int = 1) -> list[int]:
     ensure_reference_keys()
     with db.SessionLocal() as s:
         rows = s.execute(select(Reference.id, Reference.file_name).where(
-            Reference.kind == 'file', Reference.analyzed_at.is_(None),
+            Reference.kind == 'file', Reference.analyzed_at.is_(None), Reference.excluded.is_not(True),
+            Reference.doc_key.notin_(select(DocExclusion.key)),
             or_(Reference.text_at.is_(None), Reference.text != '')).order_by(Reference.id.desc()).limit(limit * 5)).all()
     return [i for i, name in rows if doc_text.supported(name or '')][:limit]
 
