@@ -115,12 +115,14 @@ def _reference_form():
 def _link_form():
     return dbc.Card(dbc.CardBody([
         dbc.Row([
-            dbc.Col(dbc.Select(id='l-rel', value='관련', options=_opts(store.RELATIONS)), xs=4, md=3),
+            dbc.Col(dbc.Select(id='l-rel', value='관련', options=_opts(store.RELATIONS)
+                               + [{'label': v, 'value': k} for k, v in store.HIERARCHY.items()]), xs=4, md=3),
             dbc.Col(dcc.Dropdown(id='l-target', placeholder='연결할 업무 선택'), xs=8, md=9),
         ], className='g-2 mb-2'),
         dbc.Input(id='l-note', placeholder='연결 사유 (선택)', className='mb-2'),
         html.Div([
-            html.Span('"선행"은 이 업무가 선택한 업무보다 먼저라는 뜻입니다.', className='small text-muted me-auto'),
+            html.Span('"선행"은 이 업무가 선택한 업무보다 먼저라는 뜻입니다. "상위 업무로"·"하위 업무로"는 업무 트리에서 '
+                      '위아래로 묶습니다 (하위 업무의 하위까지 함께 옮겨집니다).', className='small text-muted me-auto'),
             dbc.Button('연결', id='l-add', color='primary', size='sm'),
         ], className='d-flex align-items-center'),
         dbc.Alert(id='l-error', color='danger', is_open=False, className='mt-2 mb-0 py-2'),
@@ -340,6 +342,27 @@ def render(_, _t, _h, _d, tid):
         ]) for l in links
     ]) if links else html.Div('연결된 업무가 없습니다.', className='text-muted small')
 
+    # 상하위 — 업무 트리에서 이 업무의 상위와 바로 아래 하위 (연결 업무 탭에서 묶고 뗀다)
+    parent_t = store.get_task(t['parent_id']) if t['parent_id'] else None
+    kids = store.child_tasks(tid)
+
+    def _tree_item(o, label, color):
+        return dbc.ListGroupItem(html.Div([
+            dbc.Badge(label, color=color, className='me-2'), ui.status_badge(o['status']), ui.task_link(o),
+            html.Span(className='me-auto'),
+            dbc.Button([html.I(className='bi bi-scissors me-1'), '떼기'], id={'type': 'l-unparent', 'id': o['id']},
+                       color='link', size='sm', className='text-muted p-0',
+                       title='상하위 묶음 풀기 — 하위 업무가 최상위 업무가 됩니다'),
+        ], className='d-flex align-items-center'))
+    tree_items = ([_tree_item(parent_t, '상위', 'dark')] if parent_t else []) + \
+        [_tree_item(k, '하위', 'secondary') for k in kids]
+    if tree_items:
+        link_view = html.Div([
+            html.H6([html.I(className='bi bi-diagram-3 me-1'), '상하위 업무'], className='mb-2'),
+            dbc.ListGroup(tree_items, className='mb-3'),
+            html.H6([html.I(className='bi bi-link-45deg me-1'), '연결 업무'], className='mb-2'),
+            link_view])
+
     linked_ids = {l['id'] for l in links} | {tid}
     targets = [{'label': f"#{o['id']} {o['title']}", 'value': o['id']}
                for o in store.list_tasks() if o['id'] not in linked_ids]
@@ -527,10 +550,24 @@ def add_link(_, tid, target, rel, note, n):
     if not target:
         return no_update, no_update, no_update, '연결할 업무를 선택하세요.', True
     try:
-        store.link_tasks(tid, int(target), rel, note or '', author or '')
+        if rel in store.HIERARCHY:
+            store.set_hierarchy(tid, int(target), rel, author or '')
+        else:
+            store.link_tasks(tid, int(target), rel, note or '', author or '')
     except ValueError as e:
         return no_update, no_update, no_update, str(e), True
     return (n or 0) + 1, None, '', '', False
+
+
+@callback(Output('td-refresh', 'data', allow_duplicate=True), Input({'type': 'l-unparent', 'id': ALL}, 'n_clicks'),
+          State('td-refresh', 'data'), prevent_initial_call=True)
+def unparent(_, n):
+    """상하위 묶음 풀기 — 눌린 업무를 상위 업무에서 뗀다."""
+    trig = ctx.triggered_id
+    if not trig or not (ctx.triggered and ctx.triggered[0]['value']):
+        return no_update
+    store.detach_parent(trig['id'], auth.current_name() or '')
+    return (n or 0) + 1
 
 
 # ── 출처 보기 ─────────────────────────────────────────────────────────

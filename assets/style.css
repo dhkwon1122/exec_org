@@ -331,3 +331,27 @@ body {
 .doc-timeline { border-left: 2px solid var(--app-border); padding-left: 10px; }
 .doc-version { padding: 4px 0; }
 .doc-version + .doc-version { border-top: 1px dashed var(--app-border); }
+
+/* ── 업무 간트 차트 (components/gantt.py) ── */
+.gantt { border: 1px solid var(--app-border); border-radius: 8px; background: var(--bs-body-bg); overflow: hidden; }
+.gantt-row { display: grid; grid-template-columns: minmax(180px, 34%) 1fr; align-items: center; min-height: 30px;
+             border-top: 1px solid var(--app-border); }
+.gantt-row.gantt-head { border-top: 0; min-height: 26px; background: var(--bs-tertiary-bg); }
+.gantt-label { display: flex; align-items: center; min-width: 0; padding: 2px 8px; font-size: 0.85rem; }
+.gantt-label .task-title { min-width: 0; }
+.gantt-indent { flex: none; display: inline-block; }
+.gantt-track { position: relative; height: 100%; min-height: 26px; border-left: 1px solid var(--app-border); }
+.gantt-month { position: absolute; top: 0; bottom: 0; border-left: 1px dashed var(--app-border); }
+.gantt-today { position: absolute; top: 0; bottom: 0; border-left: 2px solid var(--bs-danger); opacity: .55; z-index: 1; }
+.gantt-month-label { position: absolute; top: 4px; padding-left: 3px; font-size: 0.72rem; color: var(--bs-secondary-color); }
+.gantt-today-label { position: absolute; top: 4px; transform: translateX(-50%); font-size: 0.7rem; color: var(--bs-danger); }
+.gantt-bar { position: absolute; top: 8px; height: 14px; border-radius: 4px; z-index: 2; cursor: default; }
+.gantt-bar.plan, .gantt-key.plan { background: var(--bs-secondary); }
+.gantt-bar.doing, .gantt-key.doing { background: var(--bs-primary); }
+.gantt-bar.hold, .gantt-key.hold { background: var(--bs-warning); }
+.gantt-bar.done, .gantt-key.done { background: var(--bs-success); opacity: .65; }
+.gantt-bar.open, .gantt-key.open { opacity: .45; border-right: 2px dashed var(--bs-body-color); }
+.gantt-bar.late, .gantt-key.late { outline: 2px solid var(--bs-danger); outline-offset: 1px; }
+.gantt-bar.cut { border-top-left-radius: 0; border-bottom-left-radius: 0; }
+.gantt-key { display: inline-block; width: 18px; height: 9px; border-radius: 3px; margin-right: 4px; vertical-align: middle; }
+@media (max-width: 576px) { .gantt-row { grid-template-columns: 130px 1fr; } }

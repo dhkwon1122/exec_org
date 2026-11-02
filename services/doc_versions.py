@@ -109,19 +109,19 @@ def _rows(s, keys: set[str]) -> dict[str, list[dict]]:
     from sqlalchemy import func
     from sqlalchemy.orm import defer
     rows = s.execute(select(MailAttachment, InboundMail.subject, InboundMail.mail_date, InboundMail.received_at,
-                            func.length(MailAttachment.text))
+                            func.length(MailAttachment.text), InboundMail.status)
                      .options(defer(MailAttachment.text))  # 본문은 길어서 읽지 않는다 (길이만)
                      .join(InboundMail, InboundMail.id == MailAttachment.mail_id)
                      .where(MailAttachment.doc_key.in_(keys))) if keys else []
     out: dict[str, list[dict]] = {}
-    for a, subject, mail_date, received, text_len in rows:
+    for a, subject, mail_date, received, text_len, mail_status in rows:
         p = parse_name(a.filename)
         out.setdefault(a.doc_key, []).append({
             'id': a.id, 'mail_id': a.mail_id, 'filename': a.filename, 'size': a.size or 0, 'sha256': a.sha256 or '',
             'doc_key': a.doc_key, 'base': p['base'], 'name_date': p['date'], 'name_version': p['version'],
             'mail_subject': subject or '(제목 없음)', 'mail_date': mail_date or '',
             'received': received.strftime('%Y-%m-%d %H:%M') if received else '', 'insight': insight(a, text_len or 0),
-            'excluded': bool(a.excluded)})
+            'excluded': bool(a.excluded), 'mail_ignored': mail_status == 'ignored'})
     return {k: _number(v) for k, v in out.items()}
 
 

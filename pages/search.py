@@ -15,6 +15,25 @@ from services import doc_summary, embed, glossary, store
 dash.register_page(__name__, path='/search', name='이력 검색', title='업무 기록 · 이력 검색')
 
 
+def _sem_status():
+    """의미 검색(임베딩)이 켜져 있는지 — 설정·서버 연결·색인 현황."""
+    st = embed.summary()
+    if not st['configured']:
+        return dbc.Badge([html.I(className='bi bi-stars me-1'), '의미 검색 꺼짐'], color='light', text_color='secondary',
+                         className='border', id='s-sem-status',
+                         title='임베딩 서버가 설정되지 않았습니다 (.env 의 EMBED_BASE_URL) — 키워드로만 찾습니다.')
+    if st['ok'] is False:
+        return dbc.Badge([html.I(className='bi bi-exclamation-triangle me-1'), '의미 검색: 서버 연결 안 됨'],
+                         color='warning', text_color='dark', id='s-sem-status',
+                         title=f"{st['at']} {st['error']} — 키워드 검색은 그대로 됩니다.")
+    done = st['total'] and st['indexed'] >= st['total']
+    label = '의미 검색 켜짐' + ('' if done else f" · 색인 중 {st['indexed']:,}/{st['total']:,}")
+    return dbc.Badge([html.I(className='bi bi-stars me-1'), label], color='success' if done else 'info',
+                     id='s-sem-status',
+                     title=f"모델 {st['model']} · 색인 {st['indexed']:,}/{st['total']:,}"
+                           + (f" · 마지막 확인 {st['at']}" if st['at'] else ''))
+
+
 def layout(q: str = '', person: str = '', **_):
     return html.Div([
         ui.page_head('이력 검색'),
@@ -38,7 +57,8 @@ def layout(q: str = '', person: str = '', **_):
                     dbc.Col([dbc.Checkbox(id='s-auto', label='자동 기록 포함', value=False, className='me-3'),
                              html.Span(dbc.Checkbox(id='s-sem', label='의미 검색', value=True),
                                        title='글자가 같지 않아도 뜻이 가까운 이력·문서를 함께 찾기',
-                                       style={} if embed.is_configured() else {'display': 'none'})],
+                                       style={} if embed.is_configured() else {'display': 'none'}),
+                             _sem_status()],
                             md=2, className='d-flex align-items-center flex-wrap'),
                 ], className='g-2 mb-3'),
                 html.Div(id='s-count', className='small text-muted mb-2'),
@@ -74,7 +94,8 @@ def search(q, types, person_id, author, date_from, date_to, include_auto, semant
     rows = store.search_history(q or '', **filters)
     docs = doc_summary.search(q or '', limit=20) if terms else []
     similar, sim_docs, sim_refs, sem_note = [], [], [], None
-    if terms and semantic and embed.is_configured():
+    used_sem = bool(terms and semantic and embed.is_configured())
+    if used_sem:
         try:
             sem_q = f"{q} ({', '.join(extra)})" if extra else q  # 같은 말도 함께 넣어 뜻을 찾는다
             similar, sim_docs, sim_refs = _semantic(sem_q, filters, {h['id'] for h in rows}, docs)
@@ -88,6 +109,8 @@ def search(q, types, person_id, author, date_from, date_to, include_auto, semant
     if extra:
         label += f" · 용어집의 같은 말로도 찾음: {', '.join(extra)}"
     terms = terms + extra  # 같은 말도 강조
+    if used_sem and sem_note is None and not (similar or sim_docs or sim_refs):
+        label += ' · 의미 검색: 더 찾은 기록 없음'
     if similar or sim_docs or sim_refs:
         label += f' · 뜻이 비슷한 이력 {len(similar)}건' + (f', 문서·자료 {len(sim_docs) + len(sim_refs)}건'
                                                        if sim_docs or sim_refs else '')

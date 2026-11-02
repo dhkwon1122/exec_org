@@ -83,7 +83,7 @@ def excluded_keys() -> set[str]:
 
 
 def _merge(mail_groups: list[dict], ref_files: list[dict]) -> list[dict]:
-    """판 이력에서 뺀 판·문서(exclude)는 빼고 묶는다."""
+    """판 이력에서 뺀 판·문서(exclude)와 무시한 메일의 첨부는 빼고 묶는다."""
     by_key: dict[str, list[dict]] = {}
     for g in mail_groups:
         by_key.setdefault(g['doc_key'], []).extend(_mail_version(v) for v in g['versions'])
@@ -94,7 +94,7 @@ def _merge(mail_groups: list[dict], ref_files: list[dict]) -> list[dict]:
         by_key.setdefault(v['key'], []).append(v)
     skip = excluded_keys()
     docs = [_document(k, kept) for k, vs in by_key.items() if k not in skip
-            for kept in [[v for v in vs if not v.get('excluded')]] if kept]
+            for kept in [[v for v in vs if not v.get('excluded') and not v.get('mail_ignored')]] if kept]
     return sorted(docs, key=lambda d: (d['updated'], d['latest']['received']), reverse=True)
 
 
@@ -262,8 +262,12 @@ def _stamp(s) -> dict:
     def agg(model, *cond):
         n, mx, an = s.execute(select(func.count(), func.max(model.id), func.max(model.analyzed_at)).where(*cond)).one()
         return [n or 0, mx or 0, an.isoformat() if an else '']
+    from services.db import InboundMail
     return {'mail': agg(MailAttachment), 'ref': agg(Reference, Reference.kind == 'file'),
-            'alias': list(s.execute(select(func.count(), func.max(DocKeyAlias.id))).one())}
+            'alias': list(s.execute(select(func.count(), func.max(DocKeyAlias.id))).one()),
+            # 메일을 무시하거나 되살리면 그 첨부가 빠지거나 다시 들어온다
+            'ignored': list(s.execute(select(func.count(), func.coalesce(func.sum(InboundMail.id), 0))
+                                      .where(InboundMail.status == 'ignored')).one())}
 
 
 def _texts(s, keys: set[str]) -> dict[str, list[str]]:
@@ -353,7 +357,8 @@ def refresh_cache(full: bool = False, idle: bool = False) -> int:
                                             (datetime.now() - meta.refreshed_at).total_seconds() > FULL_EVERY):
             return 0
         shrank = old is not None and (new['mail'][0] < old['mail'][0] or new['ref'][0] < old['ref'][0])
-        if full or old is None or shrank or old['alias'] != new['alias'] or idle:
+        if full or old is None or shrank or old['alias'] != new['alias'] or old.get('ignored') != new['ignored'] \
+                or idle:
             keys = _all_keys(s)
             s.execute(delete(DocumentCache))
         else:  # 그 뒤로 새로 온·새로 요약한 파일의 문서만

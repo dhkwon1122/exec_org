@@ -5,7 +5,7 @@ from dash import ALL, Input, Output, State, callback, ctx, dcc, html, no_update
 
 from datetime import date, timedelta
 
-from components import todo_ui, ui
+from components import gantt, todo_ui, ui
 from components.history_form import decode_text_upload, history_form, register_form_callbacks, save_history
 from services import auth, store
 
@@ -61,6 +61,13 @@ def layout(**_):
                                        color='primary', className='w-100'), md=2),
                 ], className='g-2 mb-2'),
                 html.Div([
+                    dbc.RadioItems(id='home-view', value='list', inline=True, className='d-flex me-3',
+                                   inputClassName='btn-check', labelClassName='btn btn-sm btn-outline-primary me-1',
+                                   labelCheckedClassName='active', persistence=True, persistence_type='local',
+                                   options=[{'label': html.Span([html.I(className='bi bi-list-ul me-1'), '목록']),
+                                             'value': 'list'},
+                                            {'label': html.Span([html.I(className='bi bi-bar-chart-steps me-1'), '간트']),
+                                             'value': 'gantt'}]),
                     html.Span('하위 업무 펼치기', className='small text-muted me-2'),
                     dbc.RadioItems(id='home-depth', value=1, inline=True, className='d-flex',
                                    inputClassName='btn-check', labelClassName='btn btn-sm btn-outline-secondary me-1',
@@ -68,11 +75,13 @@ def layout(**_):
                                    options=[{'label': '최상위만', 'value': 0}, {'label': '1단계', 'value': 1},
                                             {'label': '2단계', 'value': 2}, {'label': '3단계', 'value': 3},
                                             {'label': '전체', 'value': 99}]),
-                    html.Span('체크 = 완료', className='small text-muted ms-auto'),
+                    dbc.Switch(id='home-show-done', label='완료 업무 표시', value=True, persistence=True,
+                               persistence_type='local', className='small ms-auto mb-0 me-3'),
+                    html.Span('체크 = 완료', className='small text-muted'),
                 ], className='d-flex align-items-center flex-wrap mb-2'),
                 html.Div(id='task-list'),
-            ], lg=8),
-            dbc.Col([
+            ], lg=8, id='home-main-col'),
+            dbc.Col(id='home-side-col', lg=4, children=[
                 dbc.Card([
                     dbc.CardHeader(html.Div([html.I(className='bi bi-list-check me-1'), '내 업무 (7일 이내·지난 마감)',
                                              dcc.Link('전체', href='/todos', className='ms-auto small')],
@@ -91,7 +100,7 @@ def layout(**_):
                 ], className='mb-3'),
                 html.H6('최근 이력', className='text-muted'),
                 html.Div(id='recent-history'),
-            ], lg=4),
+            ]),
         ]),
     ])
 
@@ -133,19 +142,28 @@ def _task_row(t: dict, level: int = 0, n_children: int = 0, n_done: int = 0, n_h
 
 @callback(Output('task-list', 'children'), Output('recent-history', 'children'), Output('f-tag', 'options'),
           Input('q', 'value'), Input('f-status', 'value'), Input('f-tag', 'value'), Input('home-refresh', 'data'),
-          Input('home-depth', 'value'), Input('todo-changed', 'data'))
-def render_list(q, statuses, tag, _, depth, _t):
+          Input('home-depth', 'value'), Input('todo-changed', 'data'), Input('home-show-done', 'value'),
+          Input('home-view', 'value'))
+def render_list(q, statuses, tag, _, depth, _t, show_done=True, view='list'):
+    hide_done = not show_done and '완료' not in (statuses or [])  # 상태에서 '완료'를 고르면 그대로 보인다
     if q or tag:  # 검색·태그는 하위 업무까지 찾아 평평하게
         tasks = store.list_tasks(query=q or '', status=statuses or None, tag=tag or '')
+        if hide_done:
+            tasks = [t for t in tasks if t['status'] != '완료']
         titles = {t['id']: t['title'] for t in store.list_tasks()}
         progress = store.child_progress([t['id'] for t in tasks])
         rows = [_task_row(t, 0, progress.get(t['id'], (0, 0))[1], progress.get(t['id'], (0, 0))[0],
                           parent_title=titles.get(t['parent_id'], '')) for t in tasks]
+        tree = [{'task': t, 'level': 0, 'n_children': progress.get(t['id'], (0, 0))[1],
+                 'n_done': progress.get(t['id'], (0, 0))[0]} for t in tasks]
     else:  # 최상위 업무 아래로 고른 단계만큼 하위 업무를 펼친다
-        tree = store.task_tree(statuses or None, depth if depth is not None else 1)
+        tree = store.task_tree(statuses or None, depth if depth is not None else 1, hide_done=hide_done)
         rows = [_task_row(r['task'], r['level'], r['n_children'], r['n_done'], r['n_hidden']) for r in tree]
-    task_view = dbc.ListGroup(rows) if rows else \
-        dbc.Alert('조건에 맞는 업무가 없습니다. 오른쪽 위 "새 업무"로 등록하세요.', color='light')
+    if view == 'gantt' and tree:  # 같은 트리를 기간 막대로
+        task_view = gantt.chart(tree)
+    else:
+        task_view = dbc.ListGroup(rows) if rows else \
+            dbc.Alert('조건에 맞는 업무가 없습니다. 오른쪽 위 "새 업무"로 등록하세요.', color='light')
 
     recent = store.recent_history(15)
     history_view = dbc.ListGroup([
@@ -270,3 +288,9 @@ def change_status(_d, _s, n):
         if changed:
             store.update_task(t['id'], author=auth.current_name(), status=value)
     return (n or 0) + 1 if changed else no_update
+
+
+@callback(Output('home-main-col', 'lg'), Output('home-side-col', 'style'), Input('home-view', 'value'))
+def widen_for_gantt(view):
+    """간트는 넓게 — 오른쪽 '내 업무·빠른 기록·최근 이력'을 접는다."""
+    return (12, {'display': 'none'}) if view == 'gantt' else (8, {})

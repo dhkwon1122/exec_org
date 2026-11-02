@@ -240,6 +240,44 @@ def status() -> dict:
     return {'indexed': indexed, 'total': total}
 
 
+def _state_file() -> str:
+    return os.path.join(db.DATA_DIR, '.embed_status.json')
+
+
+def _save_state(ok: bool, error: str = '') -> None:
+    """백그라운드 색인의 마지막 결과 — 여러 워커가 같은 파일을 읽어 화면에 보여 준다."""
+    import json
+    try:
+        with open(_state_file(), 'w', encoding='utf-8') as f:
+            json.dump({'at': datetime.now().strftime('%Y-%m-%d %H:%M'), 'ok': ok, 'error': error[:300]}, f,
+                      ensure_ascii=False)
+    except OSError:
+        pass
+
+
+def last_state() -> dict:
+    import json
+    try:
+        with open(_state_file(), encoding='utf-8') as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return {}
+
+
+def summary() -> dict:
+    """화면 표시용 — {'configured', 'model', 'indexed', 'total', 'ok', 'error', 'at'}.
+    ok: 마지막으로 임베딩 서버에 닿았는지 (아직 모르면 None)."""
+    if not is_configured():
+        return {'configured': False}
+    last = last_state()
+    try:
+        st = status()
+    except Exception:  # noqa: BLE001 — 표시 때문에 화면이 안 뜨면 안 된다
+        st = {'indexed': 0, 'total': 0}
+    return {'configured': True, 'model': model_name(), **st, 'ok': last.get('ok'), 'error': last.get('error', ''),
+            'at': last.get('at', '')}
+
+
 # ── 찾기 ──────────────────────────────────────────────────────────
 
 _matrix: dict[str, tuple] = {}   # kind → (판별 열쇠, id 배열, 행렬)
@@ -328,9 +366,11 @@ def start() -> bool:
             try:
                 did = step()
                 wait = 60
+                _save_state(True)
             except EmbedError as e:  # 서버가 꺼져 있으면 점점 덜 자주
                 log.warning('의미 검색 색인 실패: %s', e)
                 did, wait = False, min(wait * 2, 1800)
+                _save_state(False, str(e))
             except Exception:  # noqa: BLE001 — 백그라운드가 죽지 않게
                 log.exception('의미 검색 색인 오류')
                 did = False
