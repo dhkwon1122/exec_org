@@ -200,3 +200,22 @@ def test_gantt_spans_and_chart():
     assert "className='gantt-bar doing late'" in html_ and "className='gantt-bar doing open'" in html_
     assert "'26.10'" in html_ and "gantt-today-label" in html_  # 달 눈금, 오늘
     assert gantt.chart([], today) is None
+
+
+def test_gantt_scales_and_paging():
+    from datetime import date
+    from components import gantt
+    today = date(2026, 11, 4)  # 수요일
+    spans = [(date(2026, 1, 1), date(2026, 12, 31), True)]
+    lo, hi = gantt.window(spans, today, 'week')
+    assert lo == date(2026, 10, 26) and (hi - lo).days == 42 and lo.weekday() == 0  # 월요일부터 6주
+    assert gantt.window(spans, today, 'week', 1)[0] == date(2026, 12, 7)  # 한 화면 뒤
+    lo, hi = gantt.window(spans, today, 'month')
+    assert lo == date(2026, 10, 5) and (hi - lo).days == 180
+    assert gantt.window(spans, today, 'all')[0] == date(2025, 12, 29)  # 전체 — 업무 기간에 맞춤
+    assert gantt.window([(date(2020, 1, 1), today, True)], today, 'all')[0] == date(2025, 11, 4)  # 최대 1년 전부터
+    assert [t for _, t in gantt._ticks(date(2026, 10, 26), date(2026, 11, 10), 'week')] == ['10/26', '11/2', '11/9']
+    base = {'id': 1, 'title': 'x', 'status': '진행중', 'start_date': '2026-01-05', 'due_date': '2026-02-01',
+            'done_at': '', 'created_at': '2026-01-01 09:00'}
+    html_ = str(gantt.chart([{'task': base, 'level': 0}], today, 'week'))
+    assert 'outside' in html_ and "'오늘'" in html_  # 보이는 기간 밖 업무는 끝에 흐리게

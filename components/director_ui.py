@@ -12,6 +12,7 @@ from datetime import date, timedelta
 import dash_bootstrap_components as dbc
 from dash import ALL, Input, Output, State, callback, ctx, dash_table, dcc, html, no_update
 
+from components import sched_edit
 from services import auth, llm, mail_text, outbox, schedules, store
 
 WEEKDAYS = ['월', '화', '수', '목', '금', '토', '일']
@@ -109,9 +110,10 @@ def layout():
                 html.Div(id='dr-imp-list'),
                 html.Div(id='dr-imp-preview', className='mt-3', children=[
                     html.Div(id='dr-imp-preview-head'),
+                    sched_edit.editor('dr-imp-table'),
                     dash_table.DataTable(
                         id='dr-imp-table', editable=True, row_deletable=True, data=[],
-                        columns=[{'name': '상태', 'id': 'state_label', 'editable': False},
+                        columns=[sched_edit.EDIT_COLUMN, {'name': '상태', 'id': 'state_label', 'editable': False},
                                  {'name': '날짜', 'id': 'date'}, {'name': '마지막 날', 'id': 'end_date'},
                                  {'name': '시작', 'id': 'start_time'},
                                  {'name': '종료', 'id': 'end_time'}, {'name': '일정', 'id': 'title'},
@@ -126,7 +128,8 @@ def layout():
                             {'if': {'filter_query': '{state} = "changed"'}, 'backgroundColor': 'rgba(255,193,7,.12)'},
                             {'if': {'filter_query': '{state} = "same"'}, 'color': '#888'},
                             {'if': {'filter_query': '{state} = "check"'}, 'backgroundColor': 'rgba(220,53,69,.08)'},
-                            {'if': {'column_id': 'note'}, 'color': '#6b7280', 'fontSize': '0.75rem'}]),
+                            {'if': {'column_id': 'note'}, 'color': '#6b7280', 'fontSize': '0.75rem'},
+                            sched_edit.EDIT_STYLE]),
                     dbc.Button([html.I(className='bi bi-check2 me-1'), '이 메일 반영'], id='dr-imp-apply',
                                color='primary', size='sm', className='mt-2'),
                 ], style={'display': 'none'}),
@@ -567,17 +570,13 @@ def show_preview(sel, _list, shown):
     key = [imp['id'], imp['status'], imp['applied_at']]
     if ctx.triggered_id == 'dr-imp-list' and shown == key:
         return no_update, no_update, no_update, no_update  # 목록만 다시 그려진 것 — 고치던 표는 그대로
-    rows = schedules.preview(imp['events'], imp['owner'])
-    for r in rows:
-        label, _ = _STATE[r['state']]
-        r['state_label'] = label + (f" ({', '.join(schedules.LABELS[f] for f in r['changed'])})" if r['changed'] else '')
-        r['changed'] = ', '.join(r['changed'])  # 표 칸에는 글자만 넣을 수 있다
+    rows = [sched_edit.label(r) for r in schedules.preview(imp['events'], imp['owner'])]
     counts = {k: sum(r['state'] == k for r in rows) for k in _STATE}
     head = html.Div([
         html.Span(imp['name'], className='fw-semibold me-2'),
         *[dbc.Badge(f'{_STATE[k][0]} {v}', color=_STATE[k][1], className='me-1') for k, v in counts.items() if v],
         dbc.Badge('반영됨', color='success', className='ms-1') if imp['applied'] else None,
-        html.Div('칸을 눌러 고치고, 넣지 않을 줄은 × 로 지운 뒤 반영하세요. 이미 있는 일정과 같은 일정이면 기존 값과 '
+        html.Div('이미 있는 일정과 같은 일정이면 기존 값과 '
                  '비교해 정말 바뀐 칸만 고칩니다 — 칸이 밀려 잘못 읽은 값은 기존 값으로 되돌려 보여 줍니다(검증 칸).',
                  className='small text-muted'),
         html.Details([html.Summary('메일 원문 보기', className='small'),
@@ -595,3 +594,7 @@ def mail_schedule(n, view, anchor, owner):
         return no_update
     lo, hi = _range('week' if view == 'week' else 'list', date.fromisoformat(anchor))
     return outbox.draft_schedule(lo.isoformat(), hi.isoformat(), owner)
+
+
+# 일정 표 고치기 (일정 추가·✎ 편집 칸·고치면 다시 대조하고 저장) — components/sched_edit.py
+sched_edit.register('dr-imp-table', (State('dr-imp-sel', 'data'), lambda iid: iid))

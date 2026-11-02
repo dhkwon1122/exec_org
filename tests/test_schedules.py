@@ -552,3 +552,24 @@ def test_calendar_weeks_start_on_sunday():
     assert weeks[0][0] == _date(2026, 9, 27) and weeks[0][0].weekday() == 6 and weeks[-1][-1].weekday() == 5
     assert schedules.WEEK_HEAD[0] == '일' and schedules.WEEK_HEAD[-1] == '토'
 
+
+
+def test_edited_import_rows_are_rechecked_and_kept():
+    """메일 일정 표를 고치면 기존 일정과 다시 대조하고(사람이 고친 값은 그대로), 반영 전까지 고친 표가 남는다."""
+    from components import sched_edit
+    schedules.save({'date': '2026-10-27', 'start_time': '09:00', 'title': '주간 임원회의', 'location': '본관'})
+    iid = schedules.create_import('주간 일정', '2026-10-23', '…')
+    rows = [{'date': '2026-10-27', 'start_time': '09:00', 'title': '주간 임원회의', 'location': '본관'},
+            {'date': '2026-10-28', 'start_time': '14:00', 'title': 'AI센터 보고'},
+            {'date': '', 'title': '날짜 없는 줄'}]
+    out = sched_edit.relabel(rows, 'director')
+    assert [r['state_label'] for r in out] == ['동일', '신규', '확인 필요']
+    assert out[0]['match_id'] and out[2]['note'].startswith('날짜와') and all(r['edit'] == '✎' for r in out)
+    out[0]['location'] = '신관'  # 장소를 고침 — 고친 값은 그대로 두고 '변경'
+    out = sched_edit.relabel(out, 'director')
+    assert out[0]['location'] == '신관' and out[0]['state_label'] == '변경 (장소)'
+    assert schedules.save_import_events(iid, out) is True
+    assert [e['title'] for e in schedules.get_import(iid)['events']] == ['주간 임원회의', 'AI센터 보고']
+    schedules.apply_events(out, iid, '나')
+    assert schedules.save_import_events(iid, []) is False  # 반영한 뒤에는 그대로
+    assert [e['location'] for e in schedules.list_range('2026-10-27', '2026-10-27')] == ['신관']

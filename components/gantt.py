@@ -31,34 +31,66 @@ def span(t: dict, today: date) -> tuple[date, date, bool]:
     return start, end, fixed
 
 
-def chart(rows: list[dict], today: date | None = None):
-    """rows: store.task_tree 의 줄 [{'task', 'level', ...}]."""
+# 보기 — (이름, 오늘 앞 날수, 전체 날수, 눈금). 'all' 은 업무 기간에 맞춘다. offset 은 한 화면 단위로 앞뒤로 옮긴다.
+SCALES = {'week': ('주', 7, 42, 'week'), 'month': ('월', 30, 180, 'month'), 'quarter': ('분기', 90, 450, 'month'),
+          'all': ('전체', 0, 0, 'month')}
+
+
+def window(spans: list[tuple[date, date, bool]], today: date, scale: str = 'all', offset: int = 0) -> tuple[date, date]:
+    """보여 줄 기간. 주·월·분기는 오늘 기준 고정 폭(offset 만큼 한 화면씩 앞뒤로), 전체는 업무 기간에 맞춘다."""
+    if scale in SCALES and scale != 'all':
+        _, before, days, _ = SCALES[scale]
+        lo = today - timedelta(days=before) + timedelta(days=days * (offset or 0))
+        if scale == 'week':
+            lo -= timedelta(days=lo.weekday())  # 월요일부터
+        return lo, lo + timedelta(days=days)
+    lo = min(s for s, _, _ in spans) - timedelta(days=3)
+    hi = max(max(e for _, e, _ in spans), today) + timedelta(days=3)
+    lo = max(lo, today - timedelta(days=MAX_PAST_DAYS))
+    if (hi - lo).days < MIN_DAYS:
+        hi = lo + timedelta(days=MIN_DAYS)
+    return lo, hi
+
+
+def _ticks(lo: date, hi: date, kind: str) -> list[tuple[date, str]]:
+    if kind == 'week':  # 월요일마다
+        d = lo + timedelta(days=(7 - lo.weekday()) % 7)
+        out = []
+        while d <= hi:
+            out.append((d, f'{d.month}/{d.day}'))
+            d += timedelta(days=7)
+        return out
+    out, m = [], date(lo.year, lo.month, 1)
+    while m <= hi:
+        if m >= lo:
+            out.append((m, f'{m:%y.%m}'))
+        m = date(m.year + (m.month == 12), m.month % 12 + 1, 1)
+    return out
+
+
+def chart(rows: list[dict], today: date | None = None, scale: str = 'all', offset: int = 0):
+    """rows: store.task_tree 의 줄 [{'task', 'level', ...}]. scale: week / month / quarter / all."""
     today = today or date.today()
     if not rows:
         return None
     spans = {r['task']['id']: span(r['task'], today) for r in rows}
-    lo = min(s for s, _, _ in spans.values()) - timedelta(days=3)
-    hi = max(max(e for _, e, _ in spans.values()), today) + timedelta(days=3)
-    lo = max(lo, today - timedelta(days=MAX_PAST_DAYS))
-    if (hi - lo).days < MIN_DAYS:
-        hi = lo + timedelta(days=MIN_DAYS)
+    lo, hi = window(list(spans.values()), today, scale, offset)
     total = (hi - lo).days
 
     def pct(d: date) -> float:
         return max(0.0, min(100.0, (d - lo).days / total * 100))
 
-    months, m = [], date(lo.year, lo.month, 1)
-    while m <= hi:
-        if m >= lo:
-            months.append(m)
-        m = date(m.year + (m.month == 12), m.month % 12 + 1, 1)
-    grid = [html.Div(className='gantt-month', style={'left': f'{pct(x):.2f}%'}) for x in months] + \
-        [html.Div(className='gantt-today', style={'left': f'{pct(today):.2f}%'}, title=f'오늘 {today}')]
+    ticks = _ticks(lo, hi, SCALES.get(scale, SCALES['all'])[3])
+    in_view = lo <= today <= hi
+    grid = [html.Div(className='gantt-month', style={'left': f'{pct(x):.2f}%'}) for x, _ in ticks] + \
+        ([html.Div(className='gantt-today', style={'left': f'{pct(today):.2f}%'}, title=f'오늘 {today}')]
+         if in_view else [])
     head = html.Div([
-        html.Div('업무', className='gantt-label small text-muted'),
-        html.Div([*[html.Span(f"{x:%y.%m}", className='gantt-month-label', style={'left': f'{pct(x):.2f}%'})
-                    for x in months if abs(pct(x) - pct(today)) > 4],  # '오늘'과 겹치는 달 글자는 뺀다
-                  html.Span('오늘', className='gantt-today-label', style={'left': f'{pct(today):.2f}%'})],
+        html.Div(f'업무 · {lo:%y.%m.%d} ~ {hi:%y.%m.%d}', className='gantt-label small text-muted'),
+        html.Div([*[html.Span(t, className='gantt-month-label', style={'left': f'{pct(x):.2f}%'})
+                    for x, t in ticks if not in_view or abs(pct(x) - pct(today)) > 4],  # '오늘'과 겹치는 눈금 글자는 뺀다
+                  html.Span('오늘', className='gantt-today-label', style={'left': f'{pct(today):.2f}%'})
+                  if in_view else None],
                  className='gantt-track'),
     ], className='gantt-row gantt-head')
 
@@ -73,7 +105,12 @@ def chart(rows: list[dict], today: date | None = None):
             cls += ' late'
         if start < lo:
             cls += ' cut'
+        if end + timedelta(days=1) > hi:
+            cls += ' cut-end'
         left, right = pct(start), pct(end + timedelta(days=1))
+        if right <= 0 or left >= 100:  # 보이는 기간 밖 — 줄만 남기고 막대는 끝에 화살표로
+            cls += ' outside'
+            left, right = (0, 0.8) if right <= 0 else (99.2, 100)
         tip = (f"#{t['id']} {t['title']} · {t['status']} · {start} ~ " + (f'{end}' if fixed else '마감 미정')
                + (f" · 하위 {r['n_done']}/{r['n_children']}" if r.get('n_children') else ''))
         lines.append(html.Div([

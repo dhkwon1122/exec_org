@@ -68,6 +68,21 @@ def layout(**_):
                                              'value': 'list'},
                                             {'label': html.Span([html.I(className='bi bi-bar-chart-steps me-1'), '간트']),
                                              'value': 'gantt'}]),
+                    html.Div([
+                        dbc.RadioItems(id='gantt-scale', value='month', inline=True, className='d-flex me-1',
+                                       inputClassName='btn-check',
+                                       labelClassName='btn btn-sm btn-outline-secondary me-1',
+                                       labelCheckedClassName='active', persistence=True, persistence_type='local',
+                                       options=[{'label': v[0], 'value': k} for k, v in gantt.SCALES.items()]),
+                        dbc.ButtonGroup([
+                            dbc.Button(html.I(className='bi bi-chevron-left'), id='gantt-prev', size='sm',
+                                       color='secondary', outline=True, title='앞으로'),
+                            dbc.Button('오늘', id='gantt-today', size='sm', color='secondary', outline=True),
+                            dbc.Button(html.I(className='bi bi-chevron-right'), id='gantt-next', size='sm',
+                                       color='secondary', outline=True, title='뒤로'),
+                        ], id='gantt-nav', className='me-3'),
+                        dcc.Store(id='gantt-offset', data=0),
+                    ], id='gantt-controls', className='d-flex align-items-center', style={'display': 'none'}),
                     html.Span('하위 업무 펼치기', className='small text-muted me-2'),
                     dbc.RadioItems(id='home-depth', value=1, inline=True, className='d-flex',
                                    inputClassName='btn-check', labelClassName='btn btn-sm btn-outline-secondary me-1',
@@ -143,8 +158,8 @@ def _task_row(t: dict, level: int = 0, n_children: int = 0, n_done: int = 0, n_h
 @callback(Output('task-list', 'children'), Output('recent-history', 'children'), Output('f-tag', 'options'),
           Input('q', 'value'), Input('f-status', 'value'), Input('f-tag', 'value'), Input('home-refresh', 'data'),
           Input('home-depth', 'value'), Input('todo-changed', 'data'), Input('home-show-done', 'value'),
-          Input('home-view', 'value'))
-def render_list(q, statuses, tag, _, depth, _t, show_done=True, view='list'):
+          Input('home-view', 'value'), Input('gantt-scale', 'value'), Input('gantt-offset', 'data'))
+def render_list(q, statuses, tag, _, depth, _t, show_done=True, view='list', scale='month', offset=0):
     hide_done = not show_done and '완료' not in (statuses or [])  # 상태에서 '완료'를 고르면 그대로 보인다
     if q or tag:  # 검색·태그는 하위 업무까지 찾아 평평하게
         tasks = store.list_tasks(query=q or '', status=statuses or None, tag=tag or '')
@@ -160,7 +175,7 @@ def render_list(q, statuses, tag, _, depth, _t, show_done=True, view='list'):
         tree = store.task_tree(statuses or None, depth if depth is not None else 1, hide_done=hide_done)
         rows = [_task_row(r['task'], r['level'], r['n_children'], r['n_done'], r['n_hidden']) for r in tree]
     if view == 'gantt' and tree:  # 같은 트리를 기간 막대로
-        task_view = gantt.chart(tree)
+        task_view = gantt.chart(tree, scale=scale or 'month', offset=offset or 0)
     else:
         task_view = dbc.ListGroup(rows) if rows else \
             dbc.Alert('조건에 맞는 업무가 없습니다. 오른쪽 위 "새 업무"로 등록하세요.', color='light')
@@ -290,7 +305,22 @@ def change_status(_d, _s, n):
     return (n or 0) + 1 if changed else no_update
 
 
-@callback(Output('home-main-col', 'lg'), Output('home-side-col', 'style'), Input('home-view', 'value'))
+@callback(Output('home-main-col', 'lg'), Output('home-side-col', 'style'), Output('gantt-controls', 'style'),
+          Input('home-view', 'value'))
 def widen_for_gantt(view):
-    """간트는 넓게 — 오른쪽 '내 업무·빠른 기록·최근 이력'을 접는다."""
-    return (12, {'display': 'none'}) if view == 'gantt' else (8, {})
+    """간트는 넓게 — 오른쪽 '내 업무·빠른 기록·최근 이력'을 접고, 주·월·분기·전체와 앞뒤 이동을 보인다."""
+    return (12, {'display': 'none'}, {'display': 'flex'}) if view == 'gantt' else (8, {}, {'display': 'none'})
+
+
+@callback(Output('gantt-offset', 'data'), Output('gantt-nav', 'style'),
+          Input('gantt-prev', 'n_clicks'), Input('gantt-next', 'n_clicks'), Input('gantt-today', 'n_clicks'),
+          Input('gantt-scale', 'value'), State('gantt-offset', 'data'))
+def move_gantt(_p, _n, _t, scale, offset):
+    """한 화면씩 앞뒤로 (보기를 바꾸거나 '오늘'이면 처음으로). '전체'는 옮길 것이 없다."""
+    nav = {'display': 'none'} if scale == 'all' else {}
+    trig = ctx.triggered_id
+    if trig == 'gantt-prev':
+        return (offset or 0) - 1, nav
+    if trig == 'gantt-next':
+        return (offset or 0) + 1, nav
+    return 0, nav
