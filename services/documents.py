@@ -66,8 +66,9 @@ def _document(key: str, versions: list[dict]) -> dict:
                 seen[v['sha256']] = n
     for v in versions:
         v['latest'] = v['version'] == n
-    latest = versions[-1]
-    insight = next((v['insight'] for v in reversed(versions) if v['insight'] and v['insight']['analyzed']), None)
+    latest = doc_versions.latest_version(versions)
+    by_version = sorted(reversed(versions), key=lambda v: v['version'], reverse=True)
+    insight = next((v['insight'] for v in by_version if v['insight'] and v['insight']['analyzed']), None)
     return {'key': key, 'base': latest['base'], 'ext': key.rsplit('.', 1)[-1] if '.' in key else '',
             'versions': versions, 'latest': latest, 'n_versions': n,
             'updated': max(v['date'] for v in versions), 'insight': insight}

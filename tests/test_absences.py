@@ -79,3 +79,61 @@ def test_old_half_and_deputy_move(tmp_path):
     db.configure('sqlite:///' + str(path))
     got = absences.get(a['id'])
     assert (got['time_range'], got['note']) == ('오전', '연락처 010\n대결: 박민수 상무')
+
+
+def _trip(person='김영수', time_range='09:00~12:00'):
+    return {'person': person, 'kind': '출장', 'start_date': '2026-11-02', 'end_date': '2026-11-03',
+            'time_range': time_range, 'place': '부산', 'content': '고객 미팅', 'note': ''}
+
+
+def test_duplicate_absences_are_skipped_in_preview_and_apply():
+    p = store.create_person('김영수', aliases=['김부사장'])
+    rows = [_trip(time_range='9시~12시'), _trip('김부사장')]
+    assert [r['state'] for r in absences.preview(rows)] == ['new', 'same']
+    assert absences.apply_rows(rows) == {'added': 1, 'same': 1, 'unknown': 0}
+    saved = absences.list_range('2026-11-02', '2026-11-03')
+    assert len(saved) == 1 and saved[0]['person_id'] == p['id']
+    assert saved[0]['time_range'] == '09:00~12:00'
+    assert absences.apply_rows(rows) == {'added': 0, 'same': 2, 'unknown': 0}
+
+
+def test_absence_checks_use_the_callers_transaction_and_rollback():
+    from sqlalchemy import select
+    from services.db import Person
+    p = store.create_person('김영수')
+    before = store.get_person(p['id'])['updated_at']
+    with pytest.raises(ValueError, match='rollback'):
+        with db.transaction() as s:
+            assert absences.apply_rows([_trip()], session=s)['added'] == 1
+            assert absences.preview([_trip()], session=s)[0]['state'] == 'same'
+            assert absences.apply_rows([_trip()], session=s) == {'added': 0, 'same': 1, 'unknown': 0}
+            assert s.scalar(select(Person.updated_at).where(Person.id == p['id'])).strftime('%Y-%m-%d %H:%M') == before
+            raise ValueError('rollback')
+    assert absences.list_range('2026-11-02', '2026-11-03') == []
+
+
+def test_absence_dedup_keeps_other_people_times_and_overlapping_periods():
+    store.create_person('김영수')
+    store.create_person('이영희')
+    rows = [_trip(), _trip('이영희'), _trip(time_range='14:00~18:00'),
+            {**_trip(), 'end_date': '2026-11-04'}, _trip('미등록임원')]
+    assert absences.apply_rows(rows) == {'added': 4, 'same': 0, 'unknown': 1}
+    assert len(absences.list_range('2026-11-02', '2026-11-04')) == 4
+
+
+def test_concurrent_absence_imports_do_not_insert_the_same_row_twice():
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Barrier
+    store.create_person('김영수')
+    barrier = Barrier(2)
+
+    def apply():
+        barrier.wait(timeout=5)
+        return absences.apply_rows([_trip()])
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = list(pool.map(lambda _: apply(), range(2)))
+    assert sorted(r['added'] for r in results) == [0, 1]
+    assert sorted(r['same'] for r in results) == [0, 1]
+    assert len(absences.list_range('2026-11-02', '2026-11-03')) == 1
+

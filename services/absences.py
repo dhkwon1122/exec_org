@@ -8,7 +8,7 @@
 import re
 from datetime import date, timedelta
 
-from sqlalchemy import select
+from sqlalchemy import select, update
 
 from services import db, llm
 from services.db import Absence, Person
@@ -203,8 +203,8 @@ def _base(mail_date: str) -> date:
         return date.today()
 
 
-def _people() -> list[Person]:
-    with db.SessionLocal() as s:
+def _people(*, session=None) -> list[Person]:
+    with db.transaction(session) as s:
         return list(s.scalars(select(Person).order_by(Person.active.desc(), Person.id)))
 
 
@@ -291,12 +291,12 @@ def extract(text: str, mail_date: str, subject: str = '') -> tuple[list[dict], s
     return rule_extract(text, mail_date, subject), 'LLM 미설정 — 임원 이름·날짜가 있는 줄을 규칙으로 읽었습니다.'
 
 
-def match_person(name: str) -> tuple[int | None, str]:
+def match_person(name: str, *, session=None) -> tuple[int | None, str]:
     """이름(직위가 붙어 있어도) → (임원 id, 찾은 이름). 같은 이름이 여럿이면 추적 중인 임원 먼저."""
     name = (name or '').strip()
     if not name:
         return None, ''
-    people = _people()
+    people = _people(session=session)
     for p in people:  # 이름이 정확히 같거나
         if name == p.name or name in _names(p):
             return p.id, p.name
@@ -306,25 +306,28 @@ def match_person(name: str) -> tuple[int | None, str]:
     return None, ''
 
 
-def preview(rows: list[dict]) -> list[dict]:
+def preview(rows: list[dict], *, session=None) -> list[dict]:
     """후보마다 상태 — new(신규) / same(이미 등록됨) / overlap(그 기간에 다른 부재가 있음) / unknown(임원 모름).
     상태는 표의 '상태' 칸 글자와 줄 색으로만 보여 준다."""
-    out = []
-    for r in rows:
-        r = {**r}
-        pid, pname = match_person(r.get('person', ''))
-        r['person_id'] = pid
-        if pid is None:
-            r['state'] = 'unknown'
+    out, seen = [], set()
+    with db.transaction(session) as s:
+        for r in rows:
+            r = {**r}
+            pid, _ = match_person(r.get('person', ''), session=s)
+            r['person_id'] = pid
+            if pid is None:
+                r['state'] = 'unknown'
+                out.append(r)
+                continue
+            others = list(s.scalars(select(Absence).where(
+                Absence.person_id == pid, Absence.start_date <= r['end_date'], Absence.end_date >= r['start_date'])))
+            key = (pid, r['kind'], r['start_date'], r['end_date'], norm_time_range(r.get('time_range') or ''))
+            if key in seen or any((pid, o.kind, o.start_date, o.end_date, o.time_range or '') == key for o in others):
+                r['state'] = 'same'
+            else:
+                r['state'] = 'overlap' if others else 'new'
+            seen.add(key)
             out.append(r)
-            continue
-        others = overlaps(pid, r['start_date'], r['end_date'])
-        key = (r['kind'], r['start_date'], r['end_date'], norm_time_range(r.get('time_range') or ''))
-        if any((o['kind'], o['start_date'], o['end_date'], o['time_range']) == key for o in others):
-            r['state'] = 'same'
-        else:
-            r['state'] = 'overlap' if others else 'new'
-        out.append(r)
     return out
 
 
@@ -332,7 +335,14 @@ def apply_rows(rows: list[dict], by: str = '', source_mail_id: int | None = None
     """미리보기 줄을 등록 — 이미 같은 부재가 있으면 건너뛰고, 임원을 못 찾은 줄도 건너뛴다."""
     added = same = unknown = 0
     with db.transaction(session) as s:
-        for r in preview([x for x in (_clean_row(x, date.today()) for x in rows) if x]):
+        cleaned = [x for x in (_clean_row(x, date.today()) for x in rows) if x]
+        pids = {pid for r in cleaned if (pid := match_person(r.get('person', ''), session=s)[0]) is not None}
+        # 같은 임원을 여러 워커가 반영해도 검사·저장을 직렬화한다. SQLite 에서도 쓰기 잠금을 얻고,
+        # updated_at 은 그대로 두어 임원 정보 자체가 수정된 것으로 남지 않게 한다.
+        for pid in sorted(pids):
+            s.execute(update(Person).where(Person.id == pid).values(updated_at=Person.updated_at)
+                      .execution_options(synchronize_session=False))
+        for r in preview(cleaned, session=s):
             if r['state'] == 'unknown':
                 unknown += 1
                 continue
@@ -342,3 +352,4 @@ def apply_rows(rows: list[dict], by: str = '', source_mail_id: int | None = None
             save(r, person_ids=[r['person_id']], by=by, source_mail_id=source_mail_id, session=s)
             added += 1
     return {'added': added, 'same': same, 'unknown': unknown}
+
