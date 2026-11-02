@@ -13,9 +13,10 @@ tea-meeting-agenda 와 같은 이름(DATABASE_URL)이라 그쪽 .env 값을 그�
 비밀번호 해시는 Researcher-board 와 같은 werkzeug(generate/check_password_hash).
 """
 import os
+import secrets
 from datetime import datetime
 
-from sqlalchemy import Boolean, Column, DateTime, MetaData, String, Table, create_engine, select, text
+from sqlalchemy import Boolean, Column, DateTime, MetaData, String, Table, create_engine, func, select, text
 from werkzeug.security import check_password_hash, generate_password_hash
 
 from services import db
@@ -136,3 +137,33 @@ def create_local_user(user_id: str, password: str, display_name: str, role: str 
         conn.execute(t.insert().values(user_id=user_id, password_hash=generate_password_hash(password),
                                        display_name=display_name or user_id, role=role, email=email,
                                        must_change_password=False, is_admin=False, created_at=datetime.now()))
+
+
+def get_or_create_sso_user(login_id: str, name: str = '') -> dict | None:
+    """SSO 로 들어온 로그인 ID 의 사용자. 아이디는 대소문자를 가리지 않고 찾는다(AD 는 대소문자 무시).
+    공유 사용자 DB 에는 쓰지 않으므로 없으면 None — 계정은 People in SAIT 에서 만든다.
+    단독 실행 모드에서만 비밀번호로는 로그인할 수 없는 계정을 만든다. 역할은 SSO_NEW_USER_ROLE
+    (기본: 빈 값 → 접속 권한 없음, 관리자가 역할을 줘야 들어온다)."""
+    login_id = (login_id or '').strip()
+    if not login_id:
+        return None
+    _, t = _get()
+    rows = _execute(select(t).where(t.c.user_id == login_id))
+    if not rows:
+        rows = _execute(select(t).where(func.lower(t.c.user_id) == login_id.lower()))
+    if len(rows) == 1:
+        return _public(rows[0])
+    if rows or is_shared():
+        return None  # 대소문자만 다른 계정이 여럿이면 고르지 않는다
+    engine, t = _get()
+    role = os.environ.get('SSO_NEW_USER_ROLE', '').strip()
+    try:
+        with engine.begin() as conn:
+            conn.execute(t.insert().values(
+                user_id=login_id, password_hash=generate_password_hash(secrets.token_urlsafe(32)),
+                display_name=name or login_id, role=role, email='', must_change_password=False, is_admin=False,
+                created_at=datetime.now()))
+    except Exception as e:  # noqa: BLE001
+        raise UserDBError(f'SSO 사용자 생성 실패: {type(e).__name__}') from e
+    print(f'[sso] 로컬 사용자 생성 user_id={login_id!r} role={role!r}', flush=True)
+    return get_user(login_id)

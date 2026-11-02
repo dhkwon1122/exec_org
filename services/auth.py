@@ -6,6 +6,9 @@
 
 역할은 매 요청마다 사용자 DB 에서 다시 확인하므로, People in SAIT 에서 역할이 바뀌면
 이미 로그인해 있던 사람도 다음 클릭부터 바로 막힌다.
+
+로그인 방법은 두 가지이고 세션은 똑같이 만든다(start_session): 아이디·비밀번호(login) 와
+AD SSO(sso_login — services/sso.py 가 ADFS id_token 을 검증한 뒤 호출).
 """
 import os
 import time
@@ -66,9 +69,34 @@ def login(user_id: str, password: str, client: str = '') -> tuple[dict | None, s
         print(f"[login] 역할 불일치 user_id={user_id!r} role={user['role']!r} 허용={sorted(allowed_roles())}",
               flush=True)
         return None, 'role'
+    start_session(user)
+    return user, ''
+
+
+def start_session(user: dict, **extra) -> None:
+    """로그인 세션 만들기 — 비밀번호 로그인과 SSO 로그인이 같이 쓴다."""
     flask.session.clear()
     flask.session.permanent = True
-    flask.session['user'] = {'user_id': user['user_id'], 'name': user['name']}
+    flask.session['user'] = {'user_id': user['user_id'], 'name': user['name'], **extra}
+
+
+def sso_login(identity: dict) -> tuple[dict | None, str]:
+    """검증된 SSO 신원(services/sso.extract_identity)으로 로그인. 반환은 login() 과 같다.
+    사유 코드: sso_unknown / role / userdb"""
+    login_id = identity['login_id']
+    try:
+        user = users.get_or_create_sso_user(login_id, identity.get('name', ''))
+    except users.UserDBError as e:
+        print(f'[sso] 사용자 DB 오류: {e}', flush=True)
+        return None, 'userdb'
+    if user is None:
+        print(f'[sso] 사용자 DB 에 계정 없음 login_id={login_id!r}', flush=True)
+        return None, 'sso_unknown'
+    if not is_allowed(user):
+        print(f"[sso] 역할 불일치 user_id={user['user_id']!r} role={user['role']!r} 허용={sorted(allowed_roles())}",
+              flush=True)
+        return None, 'role'
+    start_session(user, dept=identity.get('dept', ''), via='sso')
     return user, ''
 
 

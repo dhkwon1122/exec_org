@@ -8,3 +8,4 @@ backups/
 certs/*.crt
 certs/*.pem
 certs/*.key
+certs/*.cer
