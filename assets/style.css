@@ -355,3 +355,5 @@ body {
 .gantt-bar.cut { border-top-left-radius: 0; border-bottom-left-radius: 0; }
 .gantt-key { display: inline-block; width: 18px; height: 9px; border-radius: 3px; margin-right: 4px; vertical-align: middle; }
 @media (max-width: 576px) { .gantt-row { grid-template-columns: 130px 1fr; } }
+.gantt-bar.cut-end { border-top-right-radius: 0; border-bottom-right-radius: 0; }
+.gantt-bar.outside { opacity: .3; }

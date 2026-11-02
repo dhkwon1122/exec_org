@@ -708,6 +708,17 @@ def set_import_owner(import_id: int, owner: str) -> None:
             s.commit()
 
 
+def save_import_events(import_id: int, events: list[dict]) -> bool:
+    """메일에서 정리한 일정 표를 사람이 고친 대로 저장한다 (반영 전에만 — 다시 열어도 고친 내용이 남게). 저장했으면 True."""
+    with db.SessionLocal() as s:
+        x = s.get(ScheduleImport, import_id)
+        if x is None or x.applied_at is not None:
+            return False
+        x.events = json.dumps([ev for e in events if (ev := clean_event(e))], ensure_ascii=False)
+        s.commit()
+        return True
+
+
 def delete_import(import_id: int) -> None:
     with db.SessionLocal() as s:
         x = s.get(ScheduleImport, import_id)

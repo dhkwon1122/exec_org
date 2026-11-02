@@ -4,7 +4,7 @@ import dash
 import dash_bootstrap_components as dbc
 from dash import ALL, Input, Output, State, callback, ctx, dash_table, dcc, html, no_update
 
-from components import absence_ui, doc_ui, ui
+from components import absence_ui, doc_ui, sched_edit, ui
 from services import absences, auth, doc_versions, doc_worker, llm, mailbox, outbox, schedules, store
 
 dash.register_page(__name__, path='/inbox', name='받은 메일', title='업무 기록 · 받은 메일')
@@ -141,8 +141,10 @@ def layout(mail=None, **_):
                     ], className='d-flex align-items-center flex-wrap mt-3 mb-1'),
                     html.Div(id='ib-sched-body', children=[
                     html.Div(id='ib-sched-note', className='small text-muted mb-1'),
+                    sched_edit.editor('ib-sched'),
                     dash_table.DataTable(id='ib-sched', editable=True, row_deletable=True, data=[],
-                                         columns=[{'name': '상태', 'id': 'state_label', 'editable': False},
+                                         columns=[sched_edit.EDIT_COLUMN,
+                                                  {'name': '상태', 'id': 'state_label', 'editable': False},
                                                   {'name': '날짜', 'id': 'date'},
                                                   {'name': '마지막 날', 'id': 'end_date'},
                                                   {'name': '시작', 'id': 'start_time'},
@@ -150,7 +152,8 @@ def layout(mail=None, **_):
                                                   {'name': '장소', 'id': 'location'},
                                                   {'name': '참석자', 'id': 'attendees'}, {'name': '세부', 'id': 'details'},
                                                   {'name': '검증', 'id': 'note', 'editable': False}],
-                                         style_table={'overflowX': 'auto'}, style_cell={**cell, 'fontSize': '0.8rem'}),
+                                         style_table={'overflowX': 'auto'}, style_cell={**cell, 'fontSize': '0.8rem'},
+                                         style_data_conditional=[sched_edit.EDIT_STYLE]),
                     dbc.Button([html.I(className='bi bi-check2 me-1'), '일정에 반영'], id='ib-sched-apply',
                                color='primary', size='sm', className='mt-1'),
                     ]),
@@ -332,11 +335,7 @@ def render_detail(sel, _):
         imp = schedules.get_import(m['schedule_import_id'])
         owner = imp['owner'] if imp else None
         if imp and imp['status'] == 'done':
-            sched_rows = schedules.preview(imp['events'], imp['owner'])
-            for r in sched_rows:
-                r['state_label'] = {'new': '신규', 'changed': '변경', 'same': '동일', 'check': '확인 필요'}[r['state']] + (
-                    f" ({', '.join(schedules.LABELS[f] for f in r['changed'])})" if r['changed'] else '')
-                r['changed'] = ', '.join(r['changed'])
+            sched_rows = [sched_edit.label(r) for r in schedules.preview(imp['events'], imp['owner'])]
             note = imp['error'] or ''
         elif imp:
             note = f"일정 정리 실패: {imp['error']}"
@@ -490,6 +489,11 @@ def link_actions(_l, _ld, _m, _u, sel, task_id, title, parent, due, n):
     except ValueError as e:
         return no_update, str(e), True, 'danger'
     return no_update, no_update, no_update, no_update
+
+
+# 일정 표 고치기 (일정 추가·✎ 편집 칸·고치면 다시 대조하고 저장) — components/sched_edit.py
+sched_edit.register('ib-sched', (State('ib-sel', 'data'),
+                                 lambda sel: (mailbox.get_mail(sel) or {}).get('schedule_import_id')))
 
 
 # ── 임원 부재 ─────────────────────────────────────────────────────────
