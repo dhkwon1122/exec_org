@@ -328,4 +328,5 @@ def test_old_uploads_get_keys_and_worker_summarizes_uploads(monkeypatch):
         assert s.get(Reference, up['id']).doc_key == '보고.docx'
     assert doc_worker.step(10 ** 10) is True
     assert doc_summary.get_ref_insight(up['id'])['summary'] == '요약1'
-    assert doc_worker.step(10 ** 10 + 1) is False and doc_summary.pending_refs(5) == []
+    assert doc_worker.step(10 ** 10 + 1) is True  # 올린 파일이 끝나면 업무 요약
+    assert doc_worker.step(10 ** 10 + 2) is False and doc_summary.pending_refs(5) == []

@@ -5,7 +5,7 @@ import dash
 import dash_bootstrap_components as dbc
 from dash import ALL, Input, Output, State, callback, ctx, dcc, html, no_update
 
-from components import doc_ui, todo_ui, ui
+from components import doc_ui, task_summary_ui, todo_ui, ui
 from components.history_form import (decode_text_upload, history_form, register_form_callbacks, save_history,
                                      task_options)
 from services import auth, confluence, documents, llm, mailbox, outbox, store
@@ -251,6 +251,7 @@ def render(_, _t, _h, _d, tid):
         html.Div([ui.status_badge(t['status']), *ui.tag_badges(t['tags'])], className='mb-2'),
         ui.multiline(t['description']) if t['description'] else html.Div('설명 없음', className='text-muted small'),
     ]))
+    header = html.Div([header, html.Div(task_summary_ui.card(tid), className='mt-3')])  # 하위 업무·이력·자료 AI 요약
 
     def row(label, value):
         return html.Tr([html.Th(label, className='text-muted fw-normal small', style={'width': '35%'}),

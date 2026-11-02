@@ -5,7 +5,7 @@ from dash import ALL, Input, Output, State, callback, ctx, dcc, html, no_update
 
 from datetime import date, timedelta
 
-from components import gantt, todo_ui, ui
+from components import gantt, task_summary_ui, todo_ui, ui
 from components.history_form import decode_text_upload, history_form, register_form_callbacks, save_history
 from services import auth, store
 
@@ -95,6 +95,8 @@ def layout(**_):
                     html.Span('체크 = 완료', className='small text-muted'),
                 ], className='d-flex align-items-center flex-wrap mb-2'),
                 html.Div(id='task-list'),
+                dbc.Offcanvas(id='gantt-panel', placement='end', is_open=False, scrollable=True,
+                              style={'width': 'min(560px, 100vw)'}),  # 간트에서 업무를 누르면 AI 요약
             ], lg=8, id='home-main-col'),
             dbc.Col(id='home-side-col', lg=4, children=[
                 dbc.Card([
@@ -175,7 +177,8 @@ def render_list(q, statuses, tag, _, depth, _t, show_done=True, view='list', sca
         tree = store.task_tree(statuses or None, depth if depth is not None else 1, hide_done=hide_done)
         rows = [_task_row(r['task'], r['level'], r['n_children'], r['n_done'], r['n_hidden']) for r in tree]
     if view == 'gantt' and tree:  # 같은 트리를 기간 막대로
-        task_view = gantt.chart(tree, scale=scale or 'month', offset=offset or 0)
+        task_view = gantt.chart(tree, scale=scale or 'month', offset=offset or 0,
+                                marks=store.history_marks([r['task']['id'] for r in tree]))
     else:
         task_view = dbc.ListGroup(rows) if rows else \
             dbc.Alert('조건에 맞는 업무가 없습니다. 오른쪽 위 "새 업무"로 등록하세요.', color='light')
@@ -324,3 +327,29 @@ def move_gantt(_p, _n, _t, scale, offset):
     if trig == 'gantt-next':
         return (offset or 0) + 1, nav
     return 0, nav
+
+
+@callback(Output('gantt-panel', 'is_open'), Output('gantt-panel', 'title'), Output('gantt-panel', 'children'),
+          Input({'type': 'gantt-task', 'id': ALL}, 'n_clicks'), prevent_initial_call=True)
+def open_task_panel(_):
+    """간트에서 업무 이름을 누르면 — 그 업무의 AI 요약(하위 업무·이력·참고자료)과 하위 업무, 업무 화면으로 가는 길."""
+    trig = ctx.triggered_id
+    if not trig or not (ctx.triggered and ctx.triggered[0]['value']):
+        return no_update, no_update, no_update
+    t = store.get_task(trig['id'])
+    if t is None:
+        return no_update, no_update, no_update
+    kids = store.child_tasks(t['id'])
+    body = [
+        html.Div([ui.status_badge(t['status']),
+                  html.Span(' · '.join(x for x in [t['start_date'] and f"시작 {t['start_date']}",
+                                                   t['due_date'] and f"마감 {t['due_date']}"] if x),
+                            className='small text-muted ms-1'),
+                  dcc.Link([html.I(className='bi bi-box-arrow-up-right me-1'), '업무 열기'], href=f"/task/{t['id']}",
+                           className='small ms-auto')], className='d-flex align-items-center mb-3'),
+        task_summary_ui.card(t['id']),
+        html.Div([html.Div(f'하위 업무 {len(kids)}', className='small fw-semibold mb-1'),
+                  dbc.ListGroup([dbc.ListGroupItem([ui.status_badge(k['status']), ui.task_link(k)], className='small py-1')
+                                 for k in kids], flush=True)]) if kids else None,
+    ]
+    return True, f"#{t['id']} {t['title']}", body
