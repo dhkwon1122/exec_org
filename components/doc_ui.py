@@ -158,6 +158,10 @@ def _version_line(v: dict, delete: bool, key: str = '', splittable: bool = False
             dbc.Button(html.I(className='bi bi-scissors'), id={'type': 'doc-split', 'key': _kid(key), 'id': v['id']},
                        color='link', size='sm', className='text-muted p-0 ms-2',
                        title='이 판을 다른 문서로 떼어 내기 (잘못 묶였을 때)') if splittable else None,
+            dbc.Button(html.I(className='bi bi-eye-slash'), id={'type': 'doc-vx', 'id': v['id']},
+                       color='link', size='sm', className='text-muted p-0 ms-2',
+                       title='이 판을 이력에서 빼기 (메일·파일은 그대로, 참고자료 > 이력에서 뺀 것에서 되돌리기)')
+            if splittable else None,
             dbc.Button(html.I(className='bi bi-x'), id={'type': 'r-del', 'id': v['ref_id']}, color='link', size='sm',
                        className='text-muted p-0 ms-2', title='이 파일 지우기') if delete and v['kind'] == 'ref' else None,
         ], className='d-flex align-items-center flex-wrap'),
@@ -228,6 +232,10 @@ def document_cards(docs: list[dict], delete: bool = False, empty: str = ''):
                            id={'type': 'doc-merge', 'key': _kid(d['key'])}, color='link', size='sm',
                            className='text-muted p-0 ms-2 text-decoration-none',
                            title='이름이 조금 달라 따로 묶인 같은 문서와 합치기'),
+                dbc.Button([html.I(className='bi bi-eye-slash me-1'), '빼기'],
+                           id={'type': 'doc-exclude', 'key': _kid(d['key'])}, color='link', size='sm',
+                           className='text-muted p-0 ms-2 text-decoration-none',
+                           title='이 문서를 이력 관리에서 빼기 (앞으로 같은 이름으로 오는 파일도)'),
             ], className='d-flex align-items-center flex-wrap'),
             html.Div([
                 dbc.Badge(ins['doc_type'], color='light', text_color='dark', className='me-1 border') if ins['doc_type'] else None,
@@ -290,14 +298,22 @@ def _version_name(vid: str) -> str:
           Output('doc-tool-name', 'value'), Output('doc-tool-target-box', 'style'),
           Output('doc-tool-name-box', 'style'), Output('doc-tool-msg', 'children', allow_duplicate=True),
           Input({'type': 'doc-merge', 'key': ALL}, 'n_clicks'),
-          Input({'type': 'doc-split', 'key': ALL, 'id': ALL}, 'n_clicks'), prevent_initial_call=True)
-def open_doc_tool(_m, _s):
+          Input({'type': 'doc-split', 'key': ALL, 'id': ALL}, 'n_clicks'),
+          Input({'type': 'doc-exclude', 'key': ALL}, 'n_clicks'), prevent_initial_call=True)
+def open_doc_tool(_m, _s, _x):
     from services import documents
     trig = ctx.triggered_id
     if not trig or not (ctx.triggered and ctx.triggered[0]['value']):
         return (no_update,) * 10
     hide, show = {'display': 'none'}, {}
     key = bytes.fromhex(trig['key']).decode('utf-8')
+    if trig['type'] == 'doc-exclude':
+        versions = documents.timeline(key)
+        name = versions[-1]['filename'] if versions else key
+        desc = [html.Span(name, className='fw-semibold'), f' 문서(판 {len(versions)}개)를 참고자료 이력 관리에서 뺍니다. ',
+                html.B('앞으로 같은 이름으로 오는 파일도 빠지고 AI 요약도 하지 않습니다.'),
+                ' 메일과 파일은 지우지 않으며, 참고자료 화면의 "이력에서 뺀 것"에서 되돌릴 수 있습니다.']
+        return True, {'mode': 'exclude', 'key': key, 'label': name}, '이력 관리에서 빼기', desc, [], None, '', hide, hide, ''
     if trig['type'] == 'doc-merge':
         opts = [{'label': d['label'], 'value': d['key']} for d in documents.catalog(exclude=key)]
         desc = ['이 문서의 모든 판을 고른 문서로 옮겨 한 문서로 봅니다. 판 번호는 이름 속 날짜·판 표시와 받은·올린 '
@@ -323,7 +339,10 @@ def run_doc_tool(_ok, _cancel, tool, target, name, changed):
     if ctx.triggered_id == 'doc-tool-cancel' or not tool:
         return False, no_update, ''
     try:
-        if tool['mode'] == 'merge':
+        if tool['mode'] == 'exclude':
+            from services import auth
+            documents.exclude(tool['key'], by=auth.current_name() or '', label=tool.get('label', ''))
+        elif tool['mode'] == 'merge':
             documents.merge(tool['key'], target or '')
         else:
             documents.split(tool['key'], [tool['id']], name or '')
@@ -345,3 +364,46 @@ def show_older(n, info, ident):
     versions = documents.timeline(key)
     return [_version_line(v, bool((info or {}).get('del')), key, len(versions) > 1)
             for v in reversed(versions) if v['id'] not in shown]
+
+
+@callback(Output('doc-changed', 'data', allow_duplicate=True),
+          Input({'type': 'doc-vx', 'id': ALL}, 'n_clicks'), Input({'type': 'doc-vinclude', 'id': ALL}, 'n_clicks'),
+          Input({'type': 'doc-include', 'key': ALL}, 'n_clicks'), State('doc-changed', 'data'),
+          prevent_initial_call=True)
+def toggle_excluded(_x, _vi, _i, changed):
+    """판 하나 빼기, 뺀 판·문서 되돌리기 (참고자료 > 이력에서 뺀 것)."""
+    from services import documents
+    trig = ctx.triggered_id
+    if not trig or not (ctx.triggered and ctx.triggered[0]['value']):
+        return no_update
+    if trig['type'] == 'doc-include':
+        documents.include(bytes.fromhex(trig['key']).decode('utf-8'))
+    else:
+        documents.exclude_version(trig['id'], excluded=trig['type'] == 'doc-vx')
+    return (changed or 0) + 1
+
+
+def excluded_view(items: dict):
+    """참고자료 > 이력에서 뺀 것 — 되돌리기 단추와 함께."""
+    docs, versions = items['docs'], items['versions']
+    if not docs and not versions:
+        return dbc.Alert('이력에서 뺀 문서가 없습니다.', color='light')
+    restore = {'color': 'link', 'size': 'sm', 'className': 'p-0 ms-auto text-decoration-none'}
+    parts = []
+    if docs:
+        parts += [html.H6([html.I(className='bi bi-eye-slash me-1'), f'뺀 문서 {len(docs)}',
+                           html.Span(' — 같은 이름으로 오는 파일도 빠집니다', className='small text-muted fw-normal')],
+                          className='mb-2'),
+                  dbc.ListGroup([dbc.ListGroupItem(html.Div([
+                      html.I(className=f"bi {_icon(d['label'])} me-2"), html.Span(d['label'], className='me-2'),
+                      html.Span(f"{d['at']} {d['by']}", className='text-muted'),
+                      dbc.Button('되돌리기', id={'type': 'doc-include', 'key': _kid(d['key'])}, **restore),
+                  ], className='d-flex align-items-center'), className='small') for d in docs], className='mb-3')]
+    if versions:
+        parts += [html.H6([html.I(className='bi bi-eye-slash me-1'), f'뺀 판 {len(versions)}'], className='mb-2'),
+                  dbc.ListGroup([dbc.ListGroupItem(html.Div([
+                      html.I(className=f"bi {_icon(v['filename'])} me-2"), html.Span(v['filename'], className='me-2'),
+                      html.Span(v['source'], className='text-muted text-truncate'),
+                      dbc.Button('되돌리기', id={'type': 'doc-vinclude', 'id': v['id']}, **restore),
+                  ], className='d-flex align-items-center'), className='small') for v in versions])]
+    return html.Div(parts)

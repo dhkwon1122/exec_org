@@ -23,7 +23,7 @@ def _ref_version(r: dict, hist_titles: dict, extra: dict) -> dict:
             'date': (r.get('created_at') or '')[:10], 'received': r.get('created_at') or '',
             'source': '기록 첨부' if r.get('history_id') else '직접 등록',
             'history_title': hist_titles.get(r.get('history_id'), ''), 'via_task': r.get('via_task'),
-            'insight': more.get('insight')}
+            'insight': more.get('insight'), 'excluded': more.get('excluded', False)}
 
 
 def _ref_extra(ref_ids) -> dict:
@@ -36,7 +36,8 @@ def _ref_extra(ref_ids) -> dict:
     from sqlalchemy import func
     from sqlalchemy.orm import defer
     with db.SessionLocal() as s:
-        return {r.id: {'sha256': r.sha256 or '', 'doc_key': r.doc_key or '', 'insight': doc_summary.insight(r, n or 0)}
+        return {r.id: {'sha256': r.sha256 or '', 'doc_key': r.doc_key or '', 'insight': doc_summary.insight(r, n or 0),
+                       'excluded': bool(r.excluded)}
                 for r, n in s.execute(select(Reference, func.length(Reference.text)).options(defer(Reference.text))
                                       .where(Reference.id.in_(ids)))}
 
@@ -74,7 +75,15 @@ def _document(key: str, versions: list[dict]) -> dict:
             'updated': max(v['date'] for v in versions), 'insight': insight}
 
 
+def excluded_keys() -> set[str]:
+    from sqlalchemy import select
+    from services.db import DocExclusion
+    with db.SessionLocal() as s:
+        return set(s.scalars(select(DocExclusion.key)))
+
+
 def _merge(mail_groups: list[dict], ref_files: list[dict]) -> list[dict]:
+    """판 이력에서 뺀 판·문서(exclude)는 빼고 묶는다."""
     by_key: dict[str, list[dict]] = {}
     for g in mail_groups:
         by_key.setdefault(g['doc_key'], []).extend(_mail_version(v) for v in g['versions'])
@@ -83,7 +92,9 @@ def _merge(mail_groups: list[dict], ref_files: list[dict]) -> list[dict]:
     for r in ref_files:
         v = _ref_version(r, hist_titles, extra)
         by_key.setdefault(v['key'], []).append(v)
-    docs = [_document(k, vs) for k, vs in by_key.items()]
+    skip = excluded_keys()
+    docs = [_document(k, kept) for k, vs in by_key.items() if k not in skip
+            for kept in [[v for v in vs if not v.get('excluded')]] if kept]
     return sorted(docs, key=lambda d: (d['updated'], d['latest']['received']), reverse=True)
 
 
@@ -379,3 +390,66 @@ def cached(query: str = '', mail_only: bool = False, limit: int = 30) -> tuple[l
         rows = s.scalars(select(DocumentCache.data).where(*cond)
                          .order_by(DocumentCache.updated.desc(), DocumentCache.latest_at.desc()).limit(limit)).all()
     return [json.loads(r) for r in rows], total
+
+
+# ── 판 이력에서 빼기 ────────────────────────────────────────────────
+# 서명 그림(image001.png)이나 업무와 상관없는 첨부처럼 이력을 볼 필요가 없는 문서는 통째로 빼고(앞으로 같은 이름
+# 규칙으로 오는 파일도), 잘못 끼어든 판은 하나만 뺀다. 메일·올린 파일 자체는 지우지 않고, 되돌릴 수 있다.
+
+def _version_model(vid: str):
+    from services.db import MailAttachment, Reference
+    if not vid or vid[0] not in 'mr' or not vid[1:].isdigit():
+        raise ValueError('판을 찾을 수 없습니다.')
+    return (MailAttachment if vid[0] == 'm' else Reference), int(vid[1:])
+
+
+def exclude_version(vid: str, excluded: bool = True) -> None:
+    """판 하나('m12' 메일 첨부 / 'r5' 올린 파일)를 이력에서 빼거나 되돌린다."""
+    model, num = _version_model(vid)
+    with db.SessionLocal() as s:
+        x = s.get(model, num)
+        if x is None:
+            raise ValueError('판을 찾을 수 없습니다.')
+        x.excluded = excluded
+        s.commit()
+    invalidate()
+
+
+def exclude(key: str, by: str = '', label: str = '') -> None:
+    """문서를 통째로 이력에서 뺀다 — 앞으로 같은 이름 규칙으로 오는 파일도."""
+    from sqlalchemy import select
+    from services.db import DocExclusion
+    if not key:
+        raise ValueError('문서를 찾을 수 없습니다.')
+    with db.SessionLocal() as s:
+        if s.scalar(select(DocExclusion).where(DocExclusion.key == key)) is None:
+            s.add(DocExclusion(key=key, label=(label or key)[:300], created_by=by[:100]))
+            s.commit()
+    invalidate()
+
+
+def include(key: str) -> None:
+    """뺀 문서를 되돌린다."""
+    from sqlalchemy import delete
+    from services.db import DocExclusion
+    with db.SessionLocal() as s:
+        s.execute(delete(DocExclusion).where(DocExclusion.key == key))
+        s.commit()
+    invalidate()
+
+
+def excluded() -> dict:
+    """뺀 것 — {'docs': [{'key', 'label', 'by', 'at'}], 'versions': [{'id', 'filename', 'source'}]} (되돌리기 화면)."""
+    from sqlalchemy import select
+    from services.db import DocExclusion, InboundMail, MailAttachment, Reference
+    with db.SessionLocal() as s:
+        docs = [{'key': x.key, 'label': x.label or x.key, 'by': x.created_by or '',
+                 'at': x.created_at.strftime('%Y-%m-%d') if x.created_at else ''}
+                for x in s.scalars(select(DocExclusion).order_by(DocExclusion.id.desc()))]
+        versions = [{'id': f'm{a.id}', 'filename': a.filename, 'source': f"메일: {subject or '(제목 없음)'}"}
+                    for a, subject in s.execute(select(MailAttachment, InboundMail.subject)
+                                                .join(InboundMail, InboundMail.id == MailAttachment.mail_id)
+                                                .where(MailAttachment.excluded.is_(True)))]
+        versions += [{'id': f'r{r.id}', 'filename': r.file_name or r.title, 'source': '올린 파일'}
+                     for r in s.scalars(select(Reference).where(Reference.excluded.is_(True)))]
+    return {'docs': docs, 'versions': versions}

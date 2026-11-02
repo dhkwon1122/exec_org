@@ -74,8 +74,11 @@ def idle_seconds(now: float | None = None) -> float:
 
 def _unread_cond():
     """요약할 거리: 아직 요약 안 했고, 글자를 아직 안 뽑았거나 뽑은 글자가 있는 첨부."""
+    from services.db import DocExclusion
     return and_(MailAttachment.analyzed_at.is_(None),
-                or_(MailAttachment.text_at.is_(None), func.coalesce(MailAttachment.text, '') != ''))
+                or_(MailAttachment.text_at.is_(None), func.coalesce(MailAttachment.text, '') != ''),
+                MailAttachment.excluded.is_not(True),  # 판 이력에서 뺀 파일은 요약하지 않는다
+                MailAttachment.doc_key.notin_(select(DocExclusion.key)))
 
 
 def pending(limit: int = 200) -> list[int]:
