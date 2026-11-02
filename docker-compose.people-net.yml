@@ -12,6 +12,7 @@
 # 네트워크 이름은 People in SAIT 를 띄운 디렉터리 이름(compose 프로젝트명) + "_default" 다.
 # `docker network ls` 로 확인하고 다르면 .env 의 PEOPLE_NETWORK 로 지정한다.
 # People in SAIT 가 외부 PostgreSQL 서버를 쓰면 이 파일은 필요 없다(DATABASE_URL 에 그 주소를 쓰면 됨).
+# 의미 검색(EMBED_BASE_URL=http://bge-embed:7138)도 이 네트워크로 People in SAIT 의 bge-embed 를 부른다.
 
 services:
   app:

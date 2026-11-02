@@ -162,7 +162,8 @@ CLASSIFY_SYSTEM = """너는 임원조직 담당자의 메일을 정리하는 비
 - schedule: 원장님(기관장) 또는 피플팀장의 일정을 알리거나 바꾸는 메일 (비서실 주간 일정, 회의·행사 일시 안내 등)
 - task: 담당자가 해야 할 일이 있는 메일 (요청·지시·자료 제출·검토·회신 요청 등)
 - both: 둘 다
-- absence: 임원의 휴가·출장·교육·병가 등 부재(자리 비움)를 알리는 메일 (부재 현황, 휴가·출장 신청·안내)
+- absence: 임원(상무·부사장·마스터 등)의 휴가·출장·교육·병가 등 부재(자리 비움)를 알리는 메일 (부재 현황, 휴가·출장
+  신청·안내). 날짜·시간이 표로 정리돼 있어도 원장님·피플팀장 본인 일정이 아니라 임원들의 부재면 schedule 이 아니라 absence.
 - ignore: 공지·광고·자동 발송·참고용이라 할 일이 없는 메일
 task 나 both 면 해야 할 일을 tasks 에 넣는다(제목은 동사로 끝나는 한 문장, 기한은 YYYY-MM-DD — '금요일까지' 같은
 상대 표현은 메일 날짜 기준, 없으면 빈 문자열, 담당자는 메일에 이름이 있을 때만, 여러 명이면 쉼표로).
@@ -224,6 +225,9 @@ def _owner_words(owner: str) -> list[str]:
 
 def _owner_senders(owner: str) -> list[str]:
     return [w.strip().lower() for w in _env(f'{_OWNER_ENV[owner]}_SENDERS').split(',') if w.strip()]
+
+
+_WEAK_OWNER = ('AI 판단', '본문에 피플팀장', '기본(원장님)')  # 제목·보낸 사람이 아닌 약한 근거
 
 
 def schedule_owner(subject: str, sender: str, body: str, ai_owner: str = '') -> tuple[str, str]:
@@ -476,9 +480,18 @@ def process(mail_id: int) -> None:
         iid, reason = None, c['reason']
         if c['kind'] in ('schedule', 'both'):
             owner, why = schedule_owner(m['subject'], m['sender'], m['body'], c.get('owner', ''))
-            iid = _make_schedule_import(m, owner)
-            reason = f"{reason} · {schedules.OWNERS[owner]} 일정({why})"
+            if why in _WEAK_OWNER and absences.rule_extract(m['body'], m['mail_date'], m['subject']):
+                # 제목·보낸 사람으로 원장님·피플팀장 일정이라는 단서가 없고 임원 이름 + 휴가·출장이 보이면 임원 부재
+                c['kind'] = 'absence' if c['kind'] == 'schedule' else 'task'
+                reason = f'{reason} · 원장님·피플팀장 일정이라는 단서 없이 임원 부재가 보여 임원 부재로'
+                if c['kind'] == 'task':
+                    c['also_absence'] = True
+            else:
+                iid = _make_schedule_import(m, owner)
+                reason = f"{reason} · {schedules.OWNERS[owner]} 일정({why})"
         sug = {'tasks': c['tasks']}
+        if c.get('also_absence'):
+            sug['absences'], sug['absence_note'] = absences.extract(m['body'], m['mail_date'], m['subject'])
         if c['kind'] == 'absence':
             sug['absences'], sug['absence_note'] = absences.extract(m['body'], m['mail_date'], m['subject'])
         if c['kind'] in ('task', 'both') and c['tasks']:
@@ -719,14 +732,36 @@ def add_tasks(mail_id: int, items: list[dict], parent_id: int | None, by: str) -
 
 
 def set_schedule_owner(mail_id: int, owner: str) -> bool:
-    """메일의 일정이 누구 일정인지 바꾼다 (반영 전에만). 바뀌었으면 True."""
+    """메일의 일정이 누구 일정인지 바꾼다 (반영 전에만). 바뀌었으면 True.
+    owner 'absence' — 원장님·피플팀장 일정으로 정리된 표를 임원 부재 후보로 옮긴다 (일정 표는 그대로 두어 되돌릴 수 있다)."""
     m = get_mail(mail_id)
     if m is None or not m['schedule_import_id']:
         raise ValueError('이 메일에는 정리된 일정이 없습니다.')
-    owner = schedules.owner_of(owner)
     imp = schedules.get_import(m['schedule_import_id'])
+    sug = dict(m['suggestion'])
+    as_absence = bool(sug.get('schedule_as_absence'))
+    if owner == 'absence':
+        if as_absence:
+            return False
+        rows = absences.from_schedule_events(imp['events'] if imp else [], m['subject'])
+        how = f"{schedules.OWNERS[imp['owner']] if imp else ''} 일정으로 정리된 {len(rows)}건을 임원 부재로 옮겼습니다"
+        if not any(r['person'] for r in rows):  # 일정 표에서 임원을 못 찾으면 메일에서 부재를 다시 읽는다
+            found, note = absences.extract(m['body'], m['mail_date'], m['subject'])
+            if found:
+                rows, how = found, f'일정 표에서 임원을 찾지 못해 메일에서 부재를 다시 읽었습니다 — {note}'
+        sug.update({'schedule_as_absence': True, 'absences': rows,
+                    'absence_note': how + ' — 임원·종류를 확인하고 반영하세요.',
+                    'kind_before_absence': m['kind']})
+        _update(mail_id, kind='absence', suggestion=sug)
+        return True
+    owner = schedules.owner_of(owner)
+    if as_absence:  # 임원 부재로 옮겼던 것을 다시 일정으로
+        kind = sug.pop('kind_before_absence', 'schedule') or 'schedule'
+        for k in ('schedule_as_absence', 'absences', 'absence_note'):
+            sug.pop(k, None)
+        _update(mail_id, kind=kind, suggestion=sug)
     if imp is None or imp['owner'] == owner:
-        return False
+        return as_absence
     if imp['applied'] or (m['suggestion'].get('done') or {}).get('schedule'):
         raise ValueError(f"이미 {schedules.OWNERS[imp['owner']]} 일정에 반영했습니다 — 캘린더에서 지우고 다시 반영하세요.")
     schedules.set_import_owner(imp['id'], owner)

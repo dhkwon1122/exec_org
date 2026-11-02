@@ -5,6 +5,7 @@
 자동으로 남겨, 업무의 흐름을 이력 타임라인 하나로 따라갈 수 있게 한다.
 """
 import calendar
+import hashlib
 import json
 import math
 import os
@@ -12,7 +13,7 @@ import re
 import uuid
 from datetime import date, datetime, timedelta
 
-from sqlalchemy import func, or_, select, update
+from sqlalchemy import false, func, or_, select, update
 from sqlalchemy.orm import aliased
 
 from services import db
@@ -126,7 +127,8 @@ def _ref_dict(r: Reference) -> dict:
         'id': r.id, 'task_id': r.task_id, 'history_id': r.history_id, 'kind': r.kind, 'title': r.title, 'url': r.url or '',
         'file_name': r.file_name or '', 'file_path': r.file_path or '', 'note': r.note or '',
         'created_at': _dt(r.created_at), 'content': r.content or '', 'content_at': _dt(r.content_at),
-        'content_error': r.content_error or '', 'content_summary': r.content_summary or '',
+        'content_error': r.content_error or '', 'content_summary': r.content_summary or '', 'summary': r.summary or '',
+        'content_tries': r.content_tries or 0,
     }
 
 
@@ -316,6 +318,19 @@ def all_owners() -> list[str]:
         return sorted({o for (o,) in s.execute(select(TaskAssignee.name).distinct()) if o})
 
 
+def task_scope(task_id: int, include_children: bool = True) -> list[int]:
+    """업무와 (선택) 그 아래 모든 하위 업무의 id — 업무 자신이 먼저."""
+    out, todo = [task_id], [task_id]
+    if not include_children:
+        return out
+    with db.SessionLocal() as s:
+        while todo:
+            kids = list(s.scalars(select(Task.id).where(Task.parent_id.in_(todo))))
+            todo = [k for k in kids if k not in out]  # 부모 고리가 꼬여 있어도 멈춘다
+            out += todo
+    return out
+
+
 def child_tasks(task_id: int) -> list[dict]:
     with db.SessionLocal() as s:
         return [_task_dict(t) for t in s.scalars(select(Task).where(Task.parent_id == task_id).order_by(Task.id))]
@@ -393,10 +408,11 @@ def link_history_task(entry_id: int, task_id: int) -> bool:
         return True
 
 
-def reference_history_counts(task_id: int) -> dict[int, int]:
-    """업무의 참고자료별 기록 수 — 자료가 붙은 이력 + 그 자료를 다룬 기록."""
+def reference_history_counts(task_id: int, ref_ids: list[int] | None = None) -> dict[int, int]:
+    """참고자료별 기록 수 — 자료가 붙은 이력 + 그 자료를 다룬 기록. ref_ids 를 주면 그 자료들(하위 업무 것 포함)."""
     with db.SessionLocal() as s:
-        refs = list(s.scalars(select(Reference).where(Reference.task_id == task_id)))
+        cond = Reference.id.in_(ref_ids or [0]) if ref_ids is not None else Reference.task_id == task_id
+        refs = list(s.scalars(select(Reference).where(cond)))
         ids = [r.id for r in refs]
         out = {r.id: 1 if r.history_id else 0 for r in refs}
         if ids:
@@ -405,6 +421,16 @@ def reference_history_counts(task_id: int) -> dict[int, int]:
                                     .group_by(HistoryReference.reference_id)):
                 out[rid] += n
         return out
+
+
+def history_titles(ids) -> dict[int, str]:
+    """이력 id → '날짜 제목' (참고자료가 어느 기록에 붙었는지 보여 줄 때)."""
+    ids = [i for i in set(ids) if i]
+    if not ids:
+        return {}
+    with db.SessionLocal() as s:
+        return {h.id: f"{_dt(h.occurred_at)[:10]} {h.title or (h.content or '')[:30]}"
+                for h in s.scalars(select(HistoryEntry).where(HistoryEntry.id.in_(ids)))}
 
 
 def shared_history_count(a: int, b: int) -> int:
@@ -618,31 +644,38 @@ def delete_history(entry_id: int) -> None:
             s.commit()
 
 
+def _history_match(like: str, other_task):
+    """이력이 like 를 원문·AI 정리·작성자·업무명(걸친 업무 포함)·붙은 자료·연결된 임원 중 어디에든 가졌는지."""
+    ref_hist = select(Reference.history_id).where(Reference.history_id.is_not(None), or_(
+        Reference.title.like(like), Reference.url.like(like), Reference.file_name.like(like),
+        Reference.note.like(like)))
+    person_hist = select(HistoryPerson.history_id).join(Person, Person.id == HistoryPerson.person_id).where(
+        or_(Person.name.like(like), Person.aliases.like(like), Person.position.like(like),
+            Person.org.like(like)))
+    return or_(HistoryEntry.content.like(like), HistoryEntry.title.like(like),
+               HistoryEntry.summary.like(like), HistoryEntry.keywords.like(like),
+               HistoryEntry.author.like(like), Task.title.like(like),
+               HistoryEntry.id.in_(select(HistoryTask.history_id)
+                                   .join(other_task, other_task.id == HistoryTask.task_id)
+                                   .where(other_task.title.like(like))),
+               HistoryEntry.id.in_(ref_hist), HistoryEntry.id.in_(person_hist))
+
+
 def search_history(query: str = '', entry_types: list[str] | None = None, author: str = '',
                    date_from: str = '', date_to: str = '', task_id: int | None = None,
                    person_id: int | None = None,
-                   include_auto: bool = False, limit: int = 200) -> list[dict]:
+                   include_auto: bool = False, limit: int = 200, ids: list[int] | None = None) -> list[dict]:
     """이력 검색. 검색어가 여러 개면 모두 포함(AND)해야 하며, 각 검색어는
     원문·AI 제목·요약·키워드·작성자·업무명 중 어디에든 있으면 된다.
-    include_auto=False 면 상태변경/연결/자료 같은 자동 이력은 뺀다."""
+    include_auto=False 면 상태변경/연결/자료 같은 자동 이력은 뺀다. ids 를 주면 그 이력 중에서만 (의미 검색 결과 거르기)."""
     with db.SessionLocal() as s:
         stmt = select(HistoryEntry, Task.title).outerjoin(Task, Task.id == HistoryEntry.task_id)
         other_task = aliased(Task)  # 함께 걸친 업무의 제목 (바깥 Task 와 섞이지 않게 별칭)
-        for term in search_terms(query):
-            like = f'%{term}%'
-            ref_hist = select(Reference.history_id).where(Reference.history_id.is_not(None), or_(
-                Reference.title.like(like), Reference.url.like(like), Reference.file_name.like(like),
-                Reference.note.like(like)))
-            person_hist = select(HistoryPerson.history_id).join(Person, Person.id == HistoryPerson.person_id).where(
-                or_(Person.name.like(like), Person.aliases.like(like), Person.position.like(like),
-                    Person.org.like(like)))
-            stmt = stmt.where(or_(HistoryEntry.content.like(like), HistoryEntry.title.like(like),
-                                  HistoryEntry.summary.like(like), HistoryEntry.keywords.like(like),
-                                  HistoryEntry.author.like(like), Task.title.like(like),
-                                  HistoryEntry.id.in_(select(HistoryTask.history_id)
-                                                      .join(other_task, other_task.id == HistoryTask.task_id)
-                                                      .where(other_task.title.like(like))),
-                                  HistoryEntry.id.in_(ref_hist), HistoryEntry.id.in_(person_hist)))
+        from services import glossary
+        for term in search_terms(query):  # 검색어마다 — 용어집의 같은 말 중 하나라도 있으면
+            stmt = stmt.where(or_(*(_history_match(f'%{w}%', other_task) for w in glossary.expand(term))))
+        if ids is not None:
+            stmt = stmt.where(HistoryEntry.id.in_(ids or [0]))
         if entry_types:
             stmt = stmt.where(HistoryEntry.entry_type.in_(entry_types))
         elif not include_auto:
@@ -772,6 +805,9 @@ def add_reference(task_id: int | None, kind: str, title: str = '', url: str = ''
             except OSError as e:
                 raise ValueError('첨부 파일을 저장하지 못했습니다. 저장을 취소했으니 다시 시도하세요.') from e
             r.file_name, r.file_path = file_name, rel
+            from services import doc_versions  # 같은 문서끼리 판으로 묶을 열쇠 (메일 첨부와 같은 규칙)
+            r.doc_key = doc_versions.key_for(s, file_name)
+            r.sha256 = hashlib.sha256(file_bytes).hexdigest()
         s.add(r)
         if history_id is None:
             label = {'link': '링크', 'file': '파일', 'note': '메모'}[kind]
@@ -790,13 +826,45 @@ def list_references(task_id: int | None = None, query: str = '', kind: str = '')
         if kind:
             stmt = stmt.where(Reference.kind == kind)
         if query:
-            like = f'%{query.strip()}%'
-            stmt = stmt.where(or_(Reference.title.like(like), Reference.note.like(like),
-                                  Reference.url.like(like), Reference.file_name.like(like),
-                                  Reference.content.like(like), Reference.content_summary.like(like),
-                                  Task.title.like(like)))
+            from services import glossary  # 같은 말로도 찾는다
+            stmt = stmt.where(or_(*(c.like(f'%{w}%') for w in glossary.expand(query.strip())
+                                    for c in (Reference.title, Reference.note, Reference.url, Reference.file_name,
+                                              Reference.content, Reference.content_summary, Task.title))))
         rows = s.execute(stmt.order_by(Reference.created_at.desc(), Reference.id.desc()))
         return [{**_ref_dict(r), 'task_title': title or ''} for r, title in rows]
+
+
+def references_for_task(task_id: int, include_children: bool = True) -> list[dict]:
+    """업무 참고자료 탭에 모을 자료 — 이 업무(와 하위 업무)에 직접 등록한 자료, 그 업무들의 기록에 붙은 자료,
+    여러 업무에 걸친 기록(history_tasks)에 붙은 자료. 'source': 직접 등록 / 기록 첨부,
+    'via_task': 다른 업무(하위 업무·기록의 주 업무)에서 온 자료면 {id, title}, 'via': self / child / shared."""
+    scope = task_scope(task_id, include_children)
+    with db.SessionLocal() as s:
+        shared = set(s.scalars(select(HistoryTask.history_id).where(HistoryTask.task_id.in_(scope))))
+        stmt = select(Reference, Task.title).outerjoin(Task, Task.id == Reference.task_id).where(
+            or_(Reference.task_id.in_(scope), Reference.history_id.in_(shared) if shared else false()))
+        rows = s.execute(stmt.order_by(Reference.created_at.desc(), Reference.id.desc())).all()
+        out = []
+        for r, title in rows:
+            d = {**_ref_dict(r), 'task_title': title or '', 'source': '기록 첨부' if r.history_id else '직접 등록'}
+            if r.task_id == task_id:
+                d['via'], d['via_task'] = 'self', None
+            elif r.task_id in scope:
+                d['via'], d['via_task'] = 'child', {'id': r.task_id, 'title': title or ''}
+            else:  # 다른 업무가 주 업무인, 이 업무에도 걸친 기록의 자료
+                d['via'] = 'shared'
+                d['via_task'] = {'id': r.task_id, 'title': title or ''} if r.task_id else None
+            out.append(d)
+        return out
+
+
+def get_references(ids) -> list[dict]:
+    """여러 참고자료를 한 번에 (id 순서는 보장하지 않음)."""
+    ids = list(ids)
+    if not ids:
+        return []
+    with db.SessionLocal() as s:
+        return [_ref_dict(r) for r in s.scalars(select(Reference).where(Reference.id.in_(ids)))]
 
 
 def get_reference(ref_id: int) -> dict | None:

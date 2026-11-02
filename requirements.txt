@@ -9,5 +9,6 @@ Werkzeug>=3.0
 openpyxl==3.1.5
 olefile==0.47
 pypdf==6.17.0
+numpy==2.2.6
 PyJWT==2.10.1
 cryptography==44.0.3

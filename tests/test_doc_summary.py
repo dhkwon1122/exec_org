@@ -256,3 +256,76 @@ def test_worker_fills_text_for_old_attachments_without_llm(monkeypatch):
     assert doc_worker.step(10 ** 10) is True
     assert '예전 첨부' in _att('가.docx').text
     assert doc_worker.step(10 ** 10) is False  # LLM 없으면 요약은 안 함
+
+
+# ── 올린 파일도 요약하고, 메일로 받은 판과 섞인 판 순서에서 바로 앞 판과 비교 ─────
+
+def _chat_recording(monkeypatch, prompts):
+    def fake_chat(system, user, temperature=0.2):
+        prompts.append(user)
+        return json.dumps({'doc_type': '계획서', 'summary': f'요약{len(prompts)}', 'tags': ['예산'], 'key_dates': [],
+                           'changes': f'바뀜{len(prompts)}'}, ensure_ascii=False)
+    monkeypatch.setattr(llm, 'chat', fake_chat)
+
+
+def test_uploaded_version_compared_with_mail_versions_around_it(monkeypatch):
+    from services import store
+    prompts = []
+    _chat_recording(monkeypatch, prompts)
+    _fetch([_mail('예산', 'Mon, 19 Oct 2026 09:00:00 +0900', [('예산안_1019.docx', _docx(['총액 3억']))], '<a@x>'),
+            _mail('예산 수정', 'Wed, 21 Oct 2026 09:00:00 +0900', [('예산안_1021_v3.docx', _docx(['총액 5억']))], '<b@x>')],
+           monkeypatch)
+    t = store.create_task('예산 편성')
+    up = store.add_reference(t['id'], 'file', file_name='예산안_1020_v2.docx', file_bytes=_docx(['총액 4억']))
+
+    ins = doc_summary.analyze_ref(up['id'])
+    assert '- 총액 3억' in prompts[-1] and '+ 총액 4억' in prompts[-1]  # 앞 판은 메일로 받은 1판
+    assert '직접 올린 파일 — 업무: 예산 편성' in prompts[-1]
+    assert ins['summary'] == '요약1' and ins['changes'] == '바뀜1' and ins['tags'] == ['예산']
+    assert doc_summary.get_ref_insight(up['id'])['analyzed'] is True
+
+    v3 = _att('예산안_1021_v3.docx')
+    doc_summary.analyze(v3.id)
+    assert '- 총액 4억' in prompts[-1] and '+ 총액 5억' in prompts[-1]  # 앞 판은 올린 2판
+    assert dict(doc_summary.known_tags()) == {'예산': 2}
+
+
+def test_uploaded_copy_of_mail_file_reuses_summary(monkeypatch):
+    from services import store
+    prompts = []
+    _chat_recording(monkeypatch, prompts)
+    data = _docx(['같은 내용'])
+    _fetch([_mail('1', 'Mon, 19 Oct 2026 09:00:00 +0900', [('보고.docx', data)], '<a@x>')], monkeypatch)
+    doc_summary.analyze(_att('보고.docx').id)
+    t = store.create_task('보고')
+    up = store.add_reference(t['id'], 'file', file_name='보고_사본.docx', file_bytes=data)
+    assert doc_summary.analyze_ref(up['id'])['summary'] == '요약1'
+    assert len(prompts) == 1  # 같은 내용 — 다시 묻지 않는다
+    note = store.add_reference(t['id'], 'note', title='메모', note='x')
+    with pytest.raises(ValueError):
+        doc_summary.analyze_ref(note['id'])
+
+
+def test_old_uploads_get_keys_and_worker_summarizes_uploads(monkeypatch):
+    from services import doc_worker, store
+    from services.db import Reference
+    monkeypatch.setattr(doc_worker, '_fails', {})
+    monkeypatch.setattr(doc_worker, '_pause_until', 0.0)
+    monkeypatch.setattr(doc_worker, '_last_touch', 0.0)
+    monkeypatch.setenv('DOC_SUMMARY_IDLE_MINUTES', '10')
+    prompts = []
+    _chat_recording(monkeypatch, prompts)
+    monkeypatch.setattr(llm, 'is_configured', lambda: True)
+    t = store.create_task('보고')
+    up = store.add_reference(t['id'], 'file', file_name='보고_1020.docx', file_bytes=_docx(['내용']))
+    store.add_reference(t['id'], 'file', file_name='사진.png', file_bytes=b'PNG')
+    with db.SessionLocal() as s:  # 문서 열쇠 칸이 생기기 전에 올린 파일처럼
+        r = s.get(Reference, up['id'])
+        r.doc_key, r.sha256 = '', ''
+        s.commit()
+    assert doc_summary.pending_refs(5) == [up['id']]
+    with db.SessionLocal() as s:
+        assert s.get(Reference, up['id']).doc_key == '보고.docx'
+    assert doc_worker.step(10 ** 10) is True
+    assert doc_summary.get_ref_insight(up['id'])['summary'] == '요약1'
+    assert doc_worker.step(10 ** 10 + 1) is False and doc_summary.pending_refs(5) == []

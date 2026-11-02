@@ -29,8 +29,8 @@ from datetime import datetime
 
 from dotenv import load_dotenv
 from sqlalchemy import (
-    Boolean, Column, DateTime, ForeignKey, Integer, String, Text, UniqueConstraint, create_engine, event, inspect,
-    text,
+    Boolean, Column, DateTime, ForeignKey, Integer, LargeBinary, String, Text, UniqueConstraint, create_engine, event,
+    inspect, text,
 )
 from sqlalchemy import MetaData
 from sqlalchemy.orm import declarative_base, relationship, sessionmaker
@@ -135,6 +135,19 @@ class Reference(Base):
     content_at = Column(DateTime)
     content_error = Column(String(500), default='')
     content_summary = Column(Text, default='')  # 페이지 AI 요약 (읽은 내용이 바뀌면 다시)
+    content_tries = Column(Integer, default=0)  # 읽기 연속 실패 횟수 — 쉬는 시간 재시도 간격 (confluence.retry_failed_references)
+    # 올린 파일의 문서 판·AI 요약 — 메일 첨부(MailAttachment)와 같은 칸 이름 (services/doc_summary.py 가 둘을 같이 다룸)
+    doc_key = Column(String(300), default='', index=True)  # 같은 문서 열쇠 (doc_versions.parse_name)
+    sha256 = Column(String(64), default='')
+    text = Column(Text, default='')
+    text_note = Column(String(300), default='')
+    text_at = Column(DateTime)
+    doc_type = Column(String(50), default='')
+    summary = Column(Text, default='')
+    tags = Column(String(500), default='')
+    key_dates = Column(Text, default='')
+    changes = Column(Text, default='')  # 같은 문서의 바로 앞 판(메일 첨부든 올린 파일이든)과 달라진 점
+    analyzed_at = Column(DateTime)
 
     task = relationship('Task', back_populates='references')
 
@@ -192,6 +205,8 @@ class ConfluenceUpdate(Base):
     diff = Column(Text, default='')
     summary = Column(Text, default='')
     summary_status = Column(String(10), default='')  # '' 아직 / done / failed / none(LLM 없음)
+    tries = Column(Integer, default=0)  # 본문 읽기·요약 재시도 횟수 (confluence_watch.retry_failed_updates)
+    retried_at = Column(DateTime)
     seen = Column(Boolean, default=False, index=True)
     created_at = Column(DateTime, default=_now)
 
@@ -470,6 +485,61 @@ class MailRule(Base):
     sort = Column(Integer, default=0)
     active = Column(Boolean, nullable=False, default=True)
     created_at = Column(DateTime, default=_now)
+
+
+class DocKeyAlias(Base):
+    """사용자가 합친 문서 — 파일 이름에서 나온 열쇠(key)를 다른 문서의 열쇠(target)로 본다 (services/documents.py
+    merge/split). 앞으로 같은 이름 규칙의 파일이 와도 합친 문서로 들어간다."""
+    __tablename__ = 'doc_key_aliases'
+
+    id = Column(Integer, primary_key=True)
+    key = Column(String(300), nullable=False, unique=True)
+    target = Column(String(300), nullable=False)
+    created_at = Column(DateTime, default=_now)
+
+
+class Embedding(Base):
+    """의미 검색용 벡터 (services/embed.py) — 이력·메일 첨부·참고자료마다 하나. 만든 글의 sha256 으로 바뀐 것을 안다."""
+    __tablename__ = 'embeddings'
+    __table_args__ = (UniqueConstraint('kind', 'item_id', name='uq_embedding_item'),)
+
+    id = Column(Integer, primary_key=True)
+    kind = Column(String(10), nullable=False)  # history / mail / ref
+    item_id = Column(Integer, nullable=False)
+    model = Column(String(100), default='')
+    text_hash = Column(String(64), default='')
+    dim = Column(Integer, nullable=True)
+    vector = Column(LargeBinary, nullable=False)  # float32 단위 벡터
+    updated_at = Column(DateTime, default=_now)
+
+
+class GlossaryTerm(Base):
+    """사내 용어집 (services/glossary.py) — 사람이 아닌 것(조직·과제·회의·약어 등)의 대표 용어와 같은 말.
+    검색할 때 같은 말로도 찾고, AI 에게 원문에 나온 용어의 뜻을 알려 주고, AI 태그를 대표 용어로 맞춘다.
+    사람은 임원 별칭(people.aliases)이 맡는다."""
+    __tablename__ = 'glossary_terms'
+
+    id = Column(Integer, primary_key=True)
+    term = Column(String(100), nullable=False, unique=True)
+    synonyms = Column(String(1000), default='')  # 쉼표 구분
+    category = Column(String(20), default='')
+    description = Column(Text, default='')
+    created_at = Column(DateTime, default=_now)
+    updated_at = Column(DateTime, default=_now, onupdate=_now)
+
+
+class DocumentCache(Base):
+    """참고자료 문서 목록 미리 만들어 두기 (services/documents.py refresh_cache) — 문서마다 판 이력을 JSON 으로,
+    검색할 글(파일 이름·요약·태그·메일 제목·본문 앞부분)과 함께. key '' 줄은 만들 때의 원본 상태(stamp)."""
+    __tablename__ = 'document_cache'
+
+    key = Column(String(300), primary_key=True)
+    data = Column(Text, default='')
+    search_text = Column(Text, default='')
+    updated = Column(String(10), default='')  # 가장 최근 판 날짜 (정렬)
+    latest_at = Column(String(20), default='')  # 가장 최근 판의 받은·올린 시각 (정렬)
+    has_mail = Column(Boolean, default=False)
+    refreshed_at = Column(DateTime, default=_now)
 
 
 class Todo(Base):

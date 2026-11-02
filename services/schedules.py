@@ -747,17 +747,31 @@ def _digits(t: str) -> list[str]:
     return re.findall(r'\d+', t or '')
 
 
-def _match(s, ev: dict, taken: set | None = None, owner: str = DEFAULT_OWNER) -> tuple[Schedule | None, str]:
+def _slot(ev: dict) -> tuple[str, str, str]:
+    return ev['date'], _norm_title(ev['title']), ev['start_time'] or ''
+
+
+def _match(s, ev: dict, taken: set | None = None, owner: str = DEFAULT_OWNER,
+           slots: set | None = None) -> tuple[Schedule | None, str]:
     """이미 있는 같은 일정 찾기 → (일정, 어떻게 찾았나). 칸이 밀려 제목이 달라도 같은 날의 기존 일정으로 알아보도록:
     1) 날짜·제목 일치 2) 기존 제목이 새 일정의 어느 칸엔가 들어 있음 3) 제목이 비슷함 4) 같은 시작 시간에 제목도 꽤 비슷.
-    제목 속 숫자가 다르면('일정 1' / '일정 2') 다른 일정. taken: 이번 메일의 다른 줄이 이미 차지한 일정 id."""
+    제목 속 숫자가 다르면('일정 1' / '일정 2') 다른 일정. taken: 이번 메일의 다른 줄이 이미 차지한 일정 id.
+    slots: 이번 목록의 날짜·제목·시각. 다른 줄과 시각까지 맞는 기존 일정은 그 줄을 위해 남겨 둔다."""
     all_rows = list(s.scalars(select(Schedule).where(Schedule.owner == owner_of(owner),
                                                      Schedule.date == ev['date'])))
     key = _norm_title(ev['title'])
-    for x in all_rows:
-        if _norm_title(x.title) == key:
-            return x, 'title'
-    rows = [x for x in all_rows if x.id not in (taken or set())]
+    slot = _slot(ev)
+    exact = [x for x in all_rows if _slot(_dict(x)) == slot]
+    if len(exact) == 1:  # 같은 목록을 다시 반영하거나 같은 줄이 반복돼도 동일한 시간대에 맞춘다
+        return exact[0], 'title'
+    if len(exact) > 1:
+        return None, ''  # 이미 같은 시간대가 여럿이면 임의로 하나를 덮어쓰지 않는다
+    rows = [x for x in all_rows if x.id not in (taken or set()) and _slot(_dict(x)) not in (slots or set())]
+    titled = [x for x in rows if _norm_title(x.title) == key]
+    if len(titled) == 1:
+        return titled[0], 'title'  # 대응이 하나로 정해질 때는 기존처럼 시간 변경도 반영
+    if len(titled) > 1:
+        return None, ''
     blob, best, how, score = _blob(ev), None, '', 0.0
     for x in rows:
         xt = _norm_title(x.title)
@@ -832,12 +846,11 @@ def preview(events: list[dict], owner: str = DEFAULT_OWNER) -> list[dict]:
     기존 일정과 같은 일정이면, 잘못 읽은 것으로 보이는 칸은 기존 값으로 되돌려 보여 준다(그대로 반영해도 안전).
     'match_id' 는 대응하는 기존 일정, 'note' 는 검증 내용."""
     out, taken = [], set()
+    cleaned = [ev for e in events if (ev := clean_event(e)) is not None]
+    slots = {_slot(ev) for ev in cleaned}
     with db.SessionLocal() as s:
-        for e in events:
-            ev = clean_event(e)
-            if ev is None:
-                continue
-            x, how = _match(s, ev, taken, owner)
+        for ev in cleaned:
+            x, how = _match(s, ev, taken, owner, slots)
             if x is None:
                 bad = is_date_only(ev['title'])
                 out.append({**ev, 'state': 'check' if bad else 'new', 'changed': [], 'match_id': None,
@@ -866,20 +879,19 @@ def apply_events(events: list[dict], import_id: int | None = None, by: str = '',
     제목이 날짜·시간뿐인 새 일정(칸이 밀린 줄)은 넣지 않는다(skipped)."""
     added = updated = same = skipped = 0
     taken = set()
+    cleaned = [(e, ev) for e in events if (ev := clean_event(e)) is not None]
+    slots = {_slot(ev) for _, ev in cleaned}
     with db.transaction(session) as s:
         if owner is None:
             imp = s.get(ScheduleImport, import_id) if import_id else None
             owner = imp.owner if imp is not None else DEFAULT_OWNER
         owner = owner_of(owner)
-        for e in events:
-            ev = clean_event(e)
-            if ev is None:
-                continue
+        for e, ev in cleaned:
             x = s.get(Schedule, int(e['match_id'])) if str(e.get('match_id') or '').isdigit() else None
             if x is not None:
                 fields = [f for f in FIELDS if ev[f] and (getattr(x, f) or '') != ev[f]]
             else:
-                x, how = _match(s, ev, taken, owner)
+                x, how = _match(s, ev, taken, owner, slots)
                 fields = verify_changes(x, ev, how)[0] if x is not None else []
             if x is not None:
                 taken.add(x.id)
@@ -887,9 +899,11 @@ def apply_events(events: list[dict], import_id: int | None = None, by: str = '',
                 if is_date_only(ev['title']):
                     skipped += 1
                     continue
-                s.add(Schedule(**ev, owner=owner, source='mail' if import_id else 'manual', import_id=import_id,
-                               created_by=by))
+                x = Schedule(**ev, owner=owner, source='mail' if import_id else 'manual', import_id=import_id,
+                             created_by=by)
+                s.add(x)
                 s.flush()
+                taken.add(x.id)
                 added += 1
                 continue
             for f in fields:
@@ -939,3 +953,4 @@ def month_weeks(year: int, month: int) -> list[list[date]]:
 def day_color(d: date) -> str:
     """일요일 빨강·토요일 파랑 글자 클래스."""
     return ' text-danger' if d.weekday() == 6 else ' text-primary' if d.weekday() == 5 else ''
+

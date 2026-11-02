@@ -11,7 +11,7 @@ import re
 from sqlalchemy import select
 
 from services import db
-from services.db import InboundMail, MailAttachment
+from services.db import DocKeyAlias, InboundMail, MailAttachment
 
 _VERSION = re.compile(r'(?i)(?:^|(?<=[\s_\-.(\[]))(?:rev|ver|v|r)\.?\s?(\d+(?:\.\d+)?)(?=$|[\s_\-.)\]])')
 _COPY = re.compile(r'\s*\(\d{1,2}\)\s*$')  # 윈도우가 붙이는 '(1)'
@@ -57,6 +57,22 @@ def parse_name(filename: str) -> dict:
             'version': version}
 
 
+def resolve(s, key: str) -> str:
+    """사용자가 합친 문서면 합친 쪽 열쇠로 (DocKeyAlias, 몇 단계든)."""
+    seen = {key}
+    while True:
+        target = s.scalar(select(DocKeyAlias.target).where(DocKeyAlias.key == key))
+        if not target or target in seen:
+            return key
+        seen.add(target)
+        key = target
+
+
+def key_for(s, filename: str) -> str:
+    """파일 이름 → 문서 열쇠 (이름 규칙 + 사용자가 합친 것)."""
+    return resolve(s, parse_name(filename)['key'][:300])[:300]
+
+
 def _order(item: dict) -> tuple:
     d = item['name_date']
     when = item['mail_date'] or ''
@@ -83,19 +99,28 @@ def _number(items: list[dict]) -> list[dict]:
     return items
 
 
+def latest_version(versions: list[dict]) -> dict:
+    """판 번호를 매긴 목록의 최신 판. 구판 재전송은 제외하고, 최신 판의 재전송은 사용할 수 있다."""
+    return next(v for v in reversed(versions) if v['latest'])
+
+
 def _rows(s, keys: set[str]) -> dict[str, list[dict]]:
     from services.doc_summary import insight  # doc_summary 가 이 모듈을 쓰므로 여기서
-    rows = s.execute(select(MailAttachment, InboundMail.subject, InboundMail.mail_date, InboundMail.received_at)
+    from sqlalchemy import func
+    from sqlalchemy.orm import defer
+    rows = s.execute(select(MailAttachment, InboundMail.subject, InboundMail.mail_date, InboundMail.received_at,
+                            func.length(MailAttachment.text))
+                     .options(defer(MailAttachment.text))  # 본문은 길어서 읽지 않는다 (길이만)
                      .join(InboundMail, InboundMail.id == MailAttachment.mail_id)
                      .where(MailAttachment.doc_key.in_(keys))) if keys else []
     out: dict[str, list[dict]] = {}
-    for a, subject, mail_date, received in rows:
+    for a, subject, mail_date, received, text_len in rows:
         p = parse_name(a.filename)
         out.setdefault(a.doc_key, []).append({
             'id': a.id, 'mail_id': a.mail_id, 'filename': a.filename, 'size': a.size or 0, 'sha256': a.sha256 or '',
             'doc_key': a.doc_key, 'base': p['base'], 'name_date': p['date'], 'name_version': p['version'],
             'mail_subject': subject or '(제목 없음)', 'mail_date': mail_date or '',
-            'received': received.strftime('%Y-%m-%d %H:%M') if received else '', 'insight': insight(a)})
+            'received': received.strftime('%Y-%m-%d %H:%M') if received else '', 'insight': insight(a, text_len or 0)})
     return {k: _number(v) for k, v in out.items()}
 
 
@@ -113,7 +138,7 @@ def save(mail_id: int, files: list[tuple[str, bytes]]) -> int:
             with open(os.path.join(db.UPLOAD_DIR, rel), 'wb') as f:
                 f.write(data)
             s.add(MailAttachment(mail_id=mail_id, filename=name[:300], file_path=rel, size=len(data),
-                                 sha256=hashlib.sha256(data).hexdigest(), doc_key=parse_name(name)['key'][:300]))
+                                 sha256=hashlib.sha256(data).hexdigest(), doc_key=key_for(s, name)))
             n += 1
         s.commit()
     return n
@@ -138,15 +163,69 @@ def for_mails(mail_ids: list[int]) -> list[dict]:
     out = []
     for key, versions in groups.items():
         files = [v for v in versions if v['id'] in ids]
-        out.append({'doc_key': key, 'base': versions[-1]['base'], 'files': files, 'versions': versions,
-                    'latest': versions[-1]})
+        latest = latest_version(versions)
+        out.append({'doc_key': key, 'base': latest['base'], 'files': files, 'versions': versions,
+                    'latest': latest})
     return sorted(out, key=lambda g: max(f['id'] for f in g['files']), reverse=True)
 
 
-def for_task(task_id: int) -> list[dict]:
-    """업무와 연결된 메일들의 첨부 문서 (판별)."""
+def for_task(task_id: int, include_children: bool = True) -> list[dict]:
+    """업무(와 하위 업무)와 연결된 메일, 그 업무들을 만든 메일의 첨부 문서 (판별).
+    다른 업무(하위 업무)의 메일에서 온 문서는 그룹에 'via_tasks': [{id, title}] 를 단다."""
+    from services import store
+    from services.db import Task
+    scope = store.task_scope(task_id, include_children)
+    want = {str(t) for t in scope}
+    mail_tasks: dict[int, set[int]] = {}
     with db.SessionLocal() as s:
-        mids = [m_id for m_id, ids in s.execute(select(InboundMail.id, InboundMail.task_ids)
-                                                .where(InboundMail.task_ids.like(f'%{task_id}%')))
-                if str(task_id) in (ids or '').split(',')]
-    return for_mails(mids)
+        for m_id, ids in s.execute(select(InboundMail.id, InboundMail.task_ids)
+                                   .where(InboundMail.task_ids.is_not(None), InboundMail.task_ids != '')):
+            hit = want & set((ids or '').split(','))
+            if hit:
+                mail_tasks.setdefault(m_id, set()).update(int(t) for t in hit)
+        for tid, mid in s.execute(select(Task.id, Task.source_mail_id).where(Task.id.in_(scope),
+                                                                            Task.source_mail_id.is_not(None))):
+            mail_tasks.setdefault(mid, set()).add(tid)
+        titles = dict(s.execute(select(Task.id, Task.title).where(Task.id.in_(scope))).all())
+    groups = for_mails(list(mail_tasks))
+    for g in groups:
+        tids = set().union(*(mail_tasks.get(f['mail_id'], set()) for f in g['files']))
+        g['via_tasks'] = [] if task_id in tids else [{'id': t, 'title': titles.get(t, '')} for t in sorted(tids)]
+    return groups
+
+
+def latest_documents(query: str = '', limit: int = 100) -> list[dict]:
+    """메일 첨부 문서를 문서별 최신 판 하나씩 (최근 받은 순) — 전체 참고자료 화면.
+    query 가 있으면 파일 이름·AI 요약·태그·본문에 모든 낱말이 들어간 문서만.
+    {'file': 최신 판(판 정보·insight 포함), 'n_versions', 'mail_subject', 'mail_date', 'mail_id', 'tasks': [{id,title}]}"""
+    import re as _re
+    from services.db import Task
+    from sqlalchemy import or_
+    terms = [a or b for a, b in _re.findall(r'"([^"]+)"|(\S+)', query or '') if (a or b).strip()]
+    with db.SessionLocal() as s:
+        stmt = select(MailAttachment.doc_key)
+        from services import glossary  # 같은 말로도 찾는다
+        for t in terms:
+            stmt = stmt.where(or_(*(c.ilike(f'%{w}%') for w in glossary.expand(t)
+                                    for c in (MailAttachment.filename, MailAttachment.summary, MailAttachment.tags,
+                                              MailAttachment.text))))
+        keys = list(dict.fromkeys(s.scalars(stmt.order_by(MailAttachment.id.desc()).limit(limit * 10))))[:limit]
+        groups = _rows(s, set(keys))
+        mails = {m.id: m for m in s.scalars(select(InboundMail).where(
+            InboundMail.id.in_({v['mail_id'] for vs in groups.values() for v in vs})))} if groups else {}
+        tids = {int(t) for m in mails.values() for t in (m.task_ids or '').split(',') if t.isdigit()}
+        titles = dict(s.execute(select(Task.id, Task.title).where(Task.id.in_(tids))).all()) if tids else {}
+    out = []
+    for key in keys:
+        versions = groups.get(key) or []
+        if not versions:
+            continue
+        latest = latest_version(versions)
+        m = mails.get(latest['mail_id'])
+        task_ids = sorted({int(t) for v in versions for t in ((mails.get(v['mail_id']).task_ids or '')
+                                                              if mails.get(v['mail_id']) else '').split(',') if t.isdigit()})
+        out.append({'file': latest, 'n_versions': latest['n_versions'], 'mail_id': latest['mail_id'],
+                    'mail_subject': latest['mail_subject'], 'mail_date': latest['mail_date'],
+                    'tasks': [{'id': t, 'title': titles.get(t, '')} for t in task_ids if t in titles]})
+    return out
+

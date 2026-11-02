@@ -22,7 +22,8 @@ import components.todo_ui  # noqa: F401  업무 체크/삭제 공용 콜백 등�
 from services import mailbox
 from components.history_actions import history_edit_modal, history_link_modal, todo_review_modal  # 이력 수정·삭제·AI 할 일 등록 공용 콜백
 from components.mail_ui import compose_modal  # 메일 보내기 창 (화면은 'mail-draft' 에 초안을 넣어 연다)
-from services import auth, confluence_watch, doc_versions, doc_worker, sso, store, users
+from components import doc_ui  # 문서 합치기·나누기 창 (문서 카드의 단추가 연다)
+from services import auth, confluence_watch, doc_versions, doc_worker, embed, sso, store, users
 from services.db import DATA_DIR
 
 
@@ -312,6 +313,7 @@ _NAV = [  # (이름, 주소, 아이콘, 주소 맞춤)
     ('이력 검색', '/search', 'bi-search', 'exact'),
     ('참고자료', '/references', 'bi-folder2', 'exact'),
     ('컨플루언스', '/confluence', 'bi-journal-text', 'exact'),
+    ('용어집', '/glossary', 'bi-book', 'exact'),
 ]
 
 
@@ -371,6 +373,7 @@ def serve_layout():
         dcc.Location(id='app-url'),
         dcc.Interval(id='app-tick', interval=60_000),
         compose_modal(),
+        doc_ui.doc_tools_modal(),
         html.Div([
             _sidebar(),
             html.Main(dbc.Container(dash.page_container, fluid=True), className='app-main'),
@@ -404,6 +407,8 @@ mailbox.start_poller()
 doc_worker.start()
 # 지켜보는 컨플루언스 공간·페이지의 변경 확인 (CONFLUENCE_WATCH_MINUTES, 0 이면 끔)
 confluence_watch.start()
+# 의미 검색 색인 — 이력·첨부 문서·참고자료를 임베딩 서버로 벡터화해 둔다 (EMBED_BASE_URL, 비우면 끔)
+embed.start()
 
 if __name__ == '__main__':
     app.run(debug=os.environ.get('DASH_DEBUG', '1') == '1', host='0.0.0.0', port=int(os.environ.get('PORT', 8050)))

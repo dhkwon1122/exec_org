@@ -135,7 +135,9 @@ def _update_item(u: dict, show_watch: bool = True, unseen: int = 0, n: int = 1):
         ], className='d-flex align-items-center flex-wrap'),
         html.Div(f"{u['space']} · {u['modified_by']} · {u['modified_at']}" + (f" · 메모: {u['message']}" if u['message'] else '')
                  + (f" · {u['watch_title']}" if show_watch else ''), className='small text-muted'),
-        html.Div(u['summary'], className='small mt-1' + (' text-danger' if u['summary_status'] == 'failed' else ''),
+        html.Div([u['summary'], html.Span(' (쉬는 시간에 다시 시도합니다)', className='text-muted')
+                  if u['summary_status'] == 'failed' else None],
+                 className='small mt-1' + (' text-danger' if u['summary_status'] == 'failed' else ''),
                  style={'whiteSpace': 'pre-wrap'}) if u['summary'] else
         html.Div('AI 요약 대기 중' if u['summary_status'] == '' else '', className='small text-muted mt-1'),
         html.Details([html.Summary('바뀐 줄 보기', className='small'),
