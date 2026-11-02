@@ -3,7 +3,7 @@ import base64
 
 import pytest
 
-from services import db, documents, llm, mailbox, store
+from services import db, doc_versions, documents, llm, mailbox, store
 from tests.test_doc_versions import _mail
 from tests.test_mailbox import FakePOP
 
@@ -239,3 +239,24 @@ def test_exclude_documents_and_versions_from_history():
     assert {d['base']: d['n_versions'] for d in documents.cached()[0]} == {'2027예산안': 3, 'image001': 2}
     with pytest.raises(ValueError):
         documents.exclude_version('x1')
+
+
+def test_ignored_mail_attachments_are_not_managed():
+    """무시한 메일의 첨부는 참고자료 문서·자동 요약에서 빠지고, 되살리면 돌아온다."""
+    from services import doc_worker
+    from services.db import InboundMail
+    mailbox.fetch_new(connect=lambda cfg: FakePOP([
+        _mail('광고', 'Mon, 19 Oct 2026 09:00:00 +0900', [('행사안내.pdf', b'ad')], '<ad@x>'),
+        _mail('예산', 'Mon, 19 Oct 2026 10:00:00 +0900', [('예산안.docx', b'v1')], '<a@x>')]))
+    ad = next(m for m in mailbox.list_mails() if m['subject'] == '광고')
+    assert {d['base'] for d in documents.cached()[0]} == {'행사안내', '예산안'}
+    mailbox.ignore(ad['id'], '나')
+    assert {d['base'] for d in documents.cached()[0]} == {'예산안'}
+    assert {d['base'] for d in documents.search()} == {'예산안'}
+    att_ids = {f['id'] for g in doc_versions.for_mails([ad['id']]) for f in g['files']}
+    assert att_ids and not att_ids & set(doc_worker.pending())  # 요약도 안 함
+    assert doc_versions.for_mails([ad['id']])  # 받은 메일 화면의 첨부 목록은 그대로
+    with db.SessionLocal() as s:
+        s.get(InboundMail, ad['id']).status = 'review'
+        s.commit()
+    assert {d['base'] for d in documents.cached()[0]} == {'행사안내', '예산안'}

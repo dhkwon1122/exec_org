@@ -148,3 +148,18 @@ def test_history_about_reference_and_linked_task():
     assert store.shared_history_count(a['id'], b['id']) == 1 == store.shared_history_count(b['id'], a['id'])
     store.delete_reference(ref['id'])  # 자료를 지우면 연결도 사라짐
     assert store.get_history(h1['id'])['refs'] == []
+
+
+def test_task_tree_can_hide_completed_tasks():
+    a = store.create_task('상위 A')
+    done = store.create_task('끝난 하위', parent_id=a['id'], status='완료')
+    store.create_task('남은 일', parent_id=done['id'])
+    b = store.create_task('끝난 상위 B', status='완료')
+    store.create_task('B 아래 남은 일', parent_id=b['id'])
+    titles = lambda **kw: [(r['task']['title'], r['level']) for r in store.task_tree(depth=99, **kw)]
+    assert ('끝난 하위', 1) in titles() and ('끝난 상위 B', 0) in titles()
+    shown = titles(hide_done=True)
+    assert ('끝난 하위', 1) not in shown and ('끝난 상위 B', 0) not in shown
+    assert ('남은 일', 1) in shown and ('B 아래 남은 일', 0) in shown  # 남은 일은 한 단계 올려 보인다
+    a_row = next(r for r in store.task_tree(depth=99, hide_done=True) if r['task']['id'] == a['id'])
+    assert a_row['n_children'] == 1 and a_row['n_done'] == 1  # 진행률은 숨긴 것까지

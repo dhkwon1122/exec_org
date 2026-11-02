@@ -260,9 +260,11 @@ def list_tasks(query: str = '', status: str | list[str] | None = None, tag: str 
         return tasks
 
 
-def task_tree(statuses: list[str] | None = None, depth: int = 1) -> list[dict]:
+def task_tree(statuses: list[str] | None = None, depth: int = 1, hide_done: bool = False) -> list[dict]:
     """최상위 업무부터 depth 단계 아래 하위 업무까지 펼친 목록 — [{'task', 'level', 'n_children', 'n_hidden'}].
     statuses 가 있으면 그 상태의 업무만(상위가 걸러지면 그 아래도 안 보임). 형제는 최근 수정 순, 하위는 만든 순.
+    hide_done 이면 완료한 업무를 뺀다 (완료한 업무 아래의 남은 하위 업무는 한 단계 올려 보인다).
+    n_children·n_done 은 숨긴 것까지 센다 (진행률).
     n_hidden = depth 를 넘어 펼치지 않은 바로 아래 하위 업무 수. 고리(잘못된 상위 지정)가 있어도 멈춘다."""
     tasks = list_tasks()
     keep = set(statuses or [])
@@ -277,6 +279,11 @@ def task_tree(statuses: list[str] | None = None, depth: int = 1) -> list[dict]:
 
     def walk(t, level):
         if t['id'] in seen or (keep and t['status'] not in keep):
+            return
+        if hide_done and t['status'] == '완료':  # 완료한 업무는 빼고, 아래에 남은 일이 있으면 그 자리에
+            seen.add(t['id'])
+            for k in children.get(t['id'], []):
+                walk(k, level)
             return
         seen.add(t['id'])
         kids = children.get(t['id'], [])

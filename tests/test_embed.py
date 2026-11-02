@@ -144,3 +144,17 @@ def test_search_page_adds_similar_records(fresh_db, monkeypatch):
     assert '보직 변경' in text and '비슷함' in text
     out, label = page.search('인사 발령', None, None, None, None, None, False, False)
     assert label == '1건'
+
+
+def test_summary_shows_whether_semantic_search_is_on(fresh_db, monkeypatch, tmp_path):
+    store.add_history(store.create_task('x')['id'], '인사 발령')
+    st = embed.summary()
+    assert st['configured'] and st['indexed'] == 0 and st['total'] == 1 and st['ok'] is None
+    _index_all()
+    embed._save_state(True)
+    st = embed.summary()
+    assert st['indexed'] == st['total'] == 1 and st['ok'] is True and st['model'] == 'bge-m3'
+    embed._save_state(False, '임베딩 서버에 연결할 수 없습니다')
+    assert embed.summary()['ok'] is False and '연결' in embed.summary()['error']
+    monkeypatch.delenv('EMBED_BASE_URL')
+    assert embed.summary() == {'configured': False}

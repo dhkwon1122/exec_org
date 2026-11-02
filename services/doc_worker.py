@@ -77,7 +77,8 @@ def _unread_cond():
     from services.db import DocExclusion
     return and_(MailAttachment.analyzed_at.is_(None),
                 or_(MailAttachment.text_at.is_(None), func.coalesce(MailAttachment.text, '') != ''),
-                MailAttachment.excluded.is_not(True),  # 판 이력에서 뺀 파일은 요약하지 않는다
+                MailAttachment.excluded.is_not(True),  # 판 이력에서 뺀 파일·무시한 메일의 첨부는 요약하지 않는다
+                InboundMail.status != 'ignored',
                 MailAttachment.doc_key.notin_(select(DocExclusion.key)))
 
 

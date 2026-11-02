@@ -68,7 +68,9 @@ def layout(**_):
                                    options=[{'label': '최상위만', 'value': 0}, {'label': '1단계', 'value': 1},
                                             {'label': '2단계', 'value': 2}, {'label': '3단계', 'value': 3},
                                             {'label': '전체', 'value': 99}]),
-                    html.Span('체크 = 완료', className='small text-muted ms-auto'),
+                    dbc.Switch(id='home-show-done', label='완료 업무 표시', value=True, persistence=True,
+                               persistence_type='local', className='small ms-auto mb-0 me-3'),
+                    html.Span('체크 = 완료', className='small text-muted'),
                 ], className='d-flex align-items-center flex-wrap mb-2'),
                 html.Div(id='task-list'),
             ], lg=8),
@@ -133,16 +135,19 @@ def _task_row(t: dict, level: int = 0, n_children: int = 0, n_done: int = 0, n_h
 
 @callback(Output('task-list', 'children'), Output('recent-history', 'children'), Output('f-tag', 'options'),
           Input('q', 'value'), Input('f-status', 'value'), Input('f-tag', 'value'), Input('home-refresh', 'data'),
-          Input('home-depth', 'value'), Input('todo-changed', 'data'))
-def render_list(q, statuses, tag, _, depth, _t):
+          Input('home-depth', 'value'), Input('todo-changed', 'data'), Input('home-show-done', 'value'))
+def render_list(q, statuses, tag, _, depth, _t, show_done=True):
+    hide_done = not show_done and '완료' not in (statuses or [])  # 상태에서 '완료'를 고르면 그대로 보인다
     if q or tag:  # 검색·태그는 하위 업무까지 찾아 평평하게
         tasks = store.list_tasks(query=q or '', status=statuses or None, tag=tag or '')
+        if hide_done:
+            tasks = [t for t in tasks if t['status'] != '완료']
         titles = {t['id']: t['title'] for t in store.list_tasks()}
         progress = store.child_progress([t['id'] for t in tasks])
         rows = [_task_row(t, 0, progress.get(t['id'], (0, 0))[1], progress.get(t['id'], (0, 0))[0],
                           parent_title=titles.get(t['parent_id'], '')) for t in tasks]
     else:  # 최상위 업무 아래로 고른 단계만큼 하위 업무를 펼친다
-        tree = store.task_tree(statuses or None, depth if depth is not None else 1)
+        tree = store.task_tree(statuses or None, depth if depth is not None else 1, hide_done=hide_done)
         rows = [_task_row(r['task'], r['level'], r['n_children'], r['n_done'], r['n_hidden']) for r in tree]
     task_view = dbc.ListGroup(rows) if rows else \
         dbc.Alert('조건에 맞는 업무가 없습니다. 오른쪽 위 "새 업무"로 등록하세요.', color='light')
