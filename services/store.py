@@ -967,6 +967,43 @@ def link_tasks(src_id: int, dst_id: int, relation: str = '관련', note: str = '
         s.commit()
 
 
+HIERARCHY = {'parent': '상위 업무로', 'child': '하위 업무로'}  # 연결 업무 화면에서 상하위로 묶기
+
+
+def set_hierarchy(task_id: int, other_id: int, role: str, author: str = '') -> None:
+    """업무를 상하위로 묶는다 — role 'parent': other 를 이 업무의 상위로, 'child': other 를 이 업무의 하위로.
+    고리가 생기면 ValueError (update_task 가 막는다). 두 업무 이력에 남긴다."""
+    if role not in HIERARCHY:
+        raise ValueError(f'알 수 없는 관계: {role}')
+    if task_id == other_id:
+        raise ValueError('같은 업무입니다.')
+    child, parent = (task_id, other_id) if role == 'parent' else (other_id, task_id)
+    p, c = get_task(parent), get_task(child)
+    if p is None or c is None:
+        raise ValueError('업무를 찾을 수 없습니다.')
+    if c['parent_id'] == parent:
+        raise ValueError('이미 그렇게 묶여 있습니다.')
+    update_task(child, author=author, parent_id=parent)
+    with db.SessionLocal() as s:
+        _log(s, child, '연결', f"상위 업무 지정: #{parent} {p['title']}", author)
+        _log(s, parent, '연결', f"하위 업무로 묶음: #{child} {c['title']}", author)
+        s.commit()
+
+
+def detach_parent(task_id: int, author: str = '') -> None:
+    """상위 업무에서 떼어 최상위 업무로 (하위 업무들은 그대로 따라온다)."""
+    t = get_task(task_id)
+    if t is None or not t['parent_id']:
+        return
+    p = get_task(t['parent_id'])
+    update_task(task_id, author=author, parent_id=None)
+    with db.SessionLocal() as s:
+        _log(s, task_id, '연결', f"상위 업무에서 뗌: #{t['parent_id']} {p['title'] if p else ''}", author)
+        if p:
+            _log(s, p['id'], '연결', f"하위 업무를 뗌: #{task_id} {t['title']}", author)
+        s.commit()
+
+
 def unlink_tasks(link_id: int) -> None:
     with db.SessionLocal() as s:
         link = s.get(TaskLink, link_id)

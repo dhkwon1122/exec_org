@@ -163,3 +163,40 @@ def test_task_tree_can_hide_completed_tasks():
     assert ('남은 일', 1) in shown and ('B 아래 남은 일', 0) in shown  # 남은 일은 한 단계 올려 보인다
     a_row = next(r for r in store.task_tree(depth=99, hide_done=True) if r['task']['id'] == a['id'])
     assert a_row['n_children'] == 1 and a_row['n_done'] == 1  # 진행률은 숨긴 것까지
+
+
+def test_link_tasks_as_parent_or_child():
+    a = store.create_task('조직 개편')
+    b = store.create_task('조직도 초안')
+    c = store.create_task('직제 규정 개정')
+    store.set_hierarchy(b['id'], a['id'], 'parent', '나')  # b 의 상위 = a
+    store.set_hierarchy(b['id'], c['id'], 'child', '나')  # c 를 b 아래로
+    assert store.get_task(b['id'])['parent_id'] == a['id'] and store.get_task(c['id'])['parent_id'] == b['id']
+    with pytest.raises(ValueError, match='하위 업무를 상위'):
+        store.set_hierarchy(a['id'], c['id'], 'parent')  # 손자를 상위로 — 고리
+    with pytest.raises(ValueError, match='이미'):
+        store.set_hierarchy(a['id'], b['id'], 'child')
+    with pytest.raises(ValueError):
+        store.set_hierarchy(a['id'], a['id'], 'child')
+    assert any('하위 업무로 묶음' in h['content'] for h in store.list_history(a['id']))
+    store.detach_parent(b['id'], '나')
+    assert store.get_task(b['id'])['parent_id'] is None and store.get_task(c['id'])['parent_id'] == b['id']
+    assert {r['task']['id'] for r in store.task_tree(depth=99) if r['level'] == 0} == {a['id'], b['id']}
+
+
+def test_gantt_spans_and_chart():
+    from datetime import date
+    from components import gantt
+    today = date(2026, 11, 2)
+    base = {'id': 1, 'title': 'x', 'status': '진행중', 'start_date': '', 'due_date': '', 'done_at': '',
+            'created_at': '2026-10-01 09:00'}
+    assert gantt.span({**base, 'start_date': '2026-10-10', 'due_date': '2026-10-20'}, today) == \
+        (date(2026, 10, 10), date(2026, 10, 20), True)
+    assert gantt.span(base, today) == (date(2026, 10, 1), today, False)  # 마감 미정 — 오늘까지
+    assert gantt.span({**base, 'status': '완료', 'done_at': '2026-10-15 10:00'}, today)[1] == date(2026, 10, 15)
+    rows = [{'task': {**base, 'due_date': '2026-10-20'}, 'level': 0, 'n_children': 1, 'n_done': 0},
+            {'task': {**base, 'id': 2, 'title': 'y'}, 'level': 1, 'n_children': 0, 'n_done': 0}]
+    html_ = str(gantt.chart(rows, today))
+    assert "className='gantt-bar doing late'" in html_ and "className='gantt-bar doing open'" in html_
+    assert "'26.10'" in html_ and "gantt-today-label" in html_  # 달 눈금, 오늘
+    assert gantt.chart([], today) is None
