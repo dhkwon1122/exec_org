@@ -528,6 +528,20 @@ class GlossaryTerm(Base):
     updated_at = Column(DateTime, default=_now, onupdate=_now)
 
 
+class DocumentCache(Base):
+    """참고자료 문서 목록 미리 만들어 두기 (services/documents.py refresh_cache) — 문서마다 판 이력을 JSON 으로,
+    검색할 글(파일 이름·요약·태그·메일 제목·본문 앞부분)과 함께. key '' 줄은 만들 때의 원본 상태(stamp)."""
+    __tablename__ = 'document_cache'
+
+    key = Column(String(300), primary_key=True)
+    data = Column(Text, default='')
+    search_text = Column(Text, default='')
+    updated = Column(String(10), default='')  # 가장 최근 판 날짜 (정렬)
+    latest_at = Column(String(20), default='')  # 가장 최근 판의 받은·올린 시각 (정렬)
+    has_mail = Column(Boolean, default=False)
+    refreshed_at = Column(DateTime, default=_now)
+
+
 class Todo(Base):
     """예전 '할 일' — 지금은 업무(하위 업무)로 합쳐졌다. 예전 DB 에 남은 행은 시작할 때 업무로 옮기고 지운다
     (_merge_todos_into_tasks). 새로 쓰지 않는다."""

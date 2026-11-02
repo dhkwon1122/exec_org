@@ -115,6 +115,16 @@ def last_status() -> dict:
         return {}
 
 
+def _refresh_documents() -> int:
+    """요약할 것이 없을 때 — 참고자료 화면의 문서 목록을 미리 만들어 둔다 (바뀐 것이 있거나 오래됐을 때만)."""
+    from services import documents
+    try:
+        return documents.refresh_cache(idle=True)
+    except Exception:  # noqa: BLE001 — 미리 만들기가 실패해도 백그라운드는 계속
+        log.exception('참고자료 문서 목록 미리 만들기 실패')
+        return 0
+
+
 def step(now: float | None = None) -> bool:
     """한 번 돈다 — 무언가 했으면 True (곧바로 다음 것을 본다)."""
     global _pause_until
@@ -129,6 +139,7 @@ def step(now: float | None = None) -> bool:
     if _fill_texts() or read_refs:  # 예전 첨부 글자 · 아직 안 읽은 컨플루언스 링크
         return True
     if not llm.is_configured():
+        _refresh_documents()  # 할 일이 없을 때 — 다 하면 평소처럼 잠시 쉰다
         return False
     ids = pending(limit=1)
     analyze_one = doc_summary.analyze
@@ -136,6 +147,7 @@ def step(now: float | None = None) -> bool:
         ids, analyze_one = doc_summary.pending_refs(limit=5), doc_summary.analyze_ref
         ids = [i for i in ids if _fails.get(-i, 0) < MAX_FAILS]  # 실패 기록은 음수 id 로 (메일 첨부 id 와 겹치지 않게)
         if not ids:
+            _refresh_documents()
             return False
         ids = [-ids[0]]
     att_id = ids[0]

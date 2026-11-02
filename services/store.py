@@ -858,6 +858,15 @@ def references_for_task(task_id: int, include_children: bool = True) -> list[dic
         return out
 
 
+def get_references(ids) -> list[dict]:
+    """여러 참고자료를 한 번에 (id 순서는 보장하지 않음)."""
+    ids = list(ids)
+    if not ids:
+        return []
+    with db.SessionLocal() as s:
+        return [_ref_dict(r) for r in s.scalars(select(Reference).where(Reference.id.in_(ids)))]
+
+
 def get_reference(ref_id: int) -> dict | None:
     with db.SessionLocal() as s:
         r = s.get(Reference, ref_id)

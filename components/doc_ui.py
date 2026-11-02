@@ -214,7 +214,9 @@ def document_cards(docs: list[dict], delete: bool = False, empty: str = ''):
     cards = []
     for d in docs:
         ins = d['insight']
-        rows = [_version_line(v, delete, d['key'], len(d['versions']) > 1) for v in reversed(d['versions'])]
+        n_rows = len(d['versions'])
+        rows = [_version_line(v, delete, d['key'], n_rows > 1)  # 최근 판만 그리고 나머지는 '이전 판 보기'로
+                for v in list(reversed(d['versions']))[:SHOW_VERSIONS]]
         cards.append(dbc.Card(dbc.CardBody([
             html.Div([
                 html.I(className=f"bi {_icon(d['latest']['filename'])} me-2"),
@@ -233,10 +235,14 @@ def document_cards(docs: list[dict], delete: bool = False, empty: str = ''):
                   for t in ins['tags']],
                 html.Div(ins['summary'], className='small mt-1', style={'whiteSpace': 'pre-wrap'}) if ins['summary'] else None,
             ], className='mt-1') if ins else None,
-            html.Div(rows[:SHOW_VERSIONS], className='doc-timeline small mt-2'),
-            html.Details([html.Summary(f'이전 판 {len(rows) - SHOW_VERSIONS}개', className='small text-muted'),
-                          html.Div(rows[SHOW_VERSIONS:], className='doc-timeline small mt-1')])
-            if len(rows) > SHOW_VERSIONS else None,
+            html.Div(rows, className='doc-timeline small mt-2'),
+            html.Div([dbc.Button(f'이전 판 {n_rows - SHOW_VERSIONS}개 보기', color='link', size='sm',
+                                 className='p-0 small text-muted text-decoration-none',
+                                 id={'type': 'doc-older', 'key': _kid(d['key'])}),
+                      dcc.Store(id={'type': 'doc-older-info', 'key': _kid(d['key'])},
+                                data={'del': delete, 'shown': [v['id'] for v in reversed(d['versions'])][:SHOW_VERSIONS]})],
+                     id={'type': 'doc-older-box', 'key': _kid(d['key'])}, className='doc-timeline small mt-1')
+            if n_rows > SHOW_VERSIONS else None,  # 오래된 판은 누를 때 불러온다 (화면을 가볍게)
         ]), className='mb-2'))
     return html.Div(cards)
 
@@ -324,3 +330,18 @@ def run_doc_tool(_ok, _cancel, tool, target, name, changed):
     except ValueError as e:
         return no_update, no_update, str(e)
     return False, (changed or 0) + 1, ''
+
+
+@callback(Output({'type': 'doc-older-box', 'key': MATCH}, 'children'),
+          Input({'type': 'doc-older', 'key': MATCH}, 'n_clicks'), State({'type': 'doc-older-info', 'key': MATCH}, 'data'),
+          State({'type': 'doc-older', 'key': MATCH}, 'id'), prevent_initial_call=True)
+def show_older(n, info, ident):
+    """'이전 판 보기' — 그 문서의 나머지 판 (최근 판부터)."""
+    from services import documents
+    if not n:
+        return no_update
+    key = bytes.fromhex(ident['key']).decode('utf-8')
+    shown = set((info or {}).get('shown') or [])
+    versions = documents.timeline(key)
+    return [_version_line(v, bool((info or {}).get('del')), key, len(versions) > 1)
+            for v in reversed(versions) if v['id'] not in shown]

@@ -288,7 +288,8 @@ def pending_refs(limit: int = 1) -> list[int]:
     return [i for i, name in rows if doc_text.supported(name or '')][:limit]
 
 
-def insight(a) -> dict:
+def insight(a, text_len: int | None = None) -> dict:
+    """text_len: 본문 길이를 따로 셌으면 (본문 칸을 읽지 않으려고 — doc_versions._rows)."""
     try:
         dates = json.loads(a.key_dates or '[]')
     except ValueError:
@@ -298,7 +299,7 @@ def insight(a) -> dict:
             'doc_type': a.doc_type or '', 'summary': a.summary or '',
             'tags': [t.strip() for t in (a.tags or '').split(',') if t.strip()], 'key_dates': dates,
             'changes': a.changes or '', 'note': a.text_note or '', 'readable': doc_text.supported(_name(a)),
-            'text_len': len(a.text or '')}
+            'text_len': len(a.text or '') if text_len is None else text_len}
 
 
 def get_insight(att_id: int) -> dict | None:
