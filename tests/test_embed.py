@@ -158,3 +158,55 @@ def test_summary_shows_whether_semantic_search_is_on(fresh_db, monkeypatch, tmp_
     assert embed.summary()['ok'] is False and '연결' in embed.summary()['error']
     monkeypatch.delenv('EMBED_BASE_URL')
     assert embed.summary() == {'configured': False}
+
+
+def _page_text(out) -> str:
+    return json.dumps(out, default=lambda o: o.to_plurality_json() if hasattr(o, 'to_plurality_json') else str(o),
+                      ensure_ascii=False)
+
+
+def test_references_similar_documents_and_notes(fresh_db):
+    from services import documents
+    t = store.create_task('조직 운영')
+    store.add_reference(t['id'], 'file', file_name='해외 방문 일정.docx', file_bytes=b'a')
+    note = store.add_reference(t['id'], 'note', title='비용 정리 메모', note='항목별 현황')
+    kw = store.add_reference(t['id'], 'note', title='출장 준비물', note='여권')
+    _index_all()
+    documents.refresh_cache(full=True)
+
+    docs, refs = documents.similar('출장')  # 글자는 달라도 뜻이 가까운 문서와, 키워드로도 걸리는 메모
+    assert [d['base'] for d in docs] == ['해외 방문 일정'] and docs[0]['score'] > 0.9
+    assert [r['id'] for r in refs] == [kw['id']]
+    docs, refs = documents.similar('출장', skip_keys={docs[0]['key']}, skip_refs={kw['id']})
+    assert docs == [] and refs == []  # 키워드로 이미 보여 준 것은 빼기
+    docs, refs = documents.similar('예산')
+    assert docs == [] and [(r['id'], r['task_title']) for r in refs] == [(note['id'], '조직 운영')]
+    assert documents.similar('예산', kind='file') == ([], [])  # 유형 고르기를 따른다
+    assert documents.similar('출장', kind='link') == ([], [])
+    assert documents.similar('출장', kind='mail') == ([], [])  # 메일로 받은 문서만 — 올린 파일은 빠짐
+
+
+def test_references_page_adds_similar_section(fresh_db, monkeypatch):
+    monkeypatch.setattr(embed, '_started', True)
+    import app  # noqa: F401 — 페이지 등록
+    from types import SimpleNamespace
+    from pages import references as page
+    monkeypatch.setattr(page, 'ctx', SimpleNamespace(triggered_id='rq'))  # 검색창에서 부른 것처럼
+    t = store.create_task('조직 운영')
+    store.add_reference(t['id'], 'file', file_name='해외 방문 일정.docx', file_bytes=b'a')
+    store.add_reference(t['id'], 'note', title='비용 정리 메모', note='항목별 현황')
+    _index_all()
+    out = page.search('예산', '')
+    assert out[0] is None and '뜻이 비슷한 자료' in _page_text(out[5]) and '비용 정리 메모' in _page_text(out[5])
+    out = page.search('출장', '')
+    assert '해외 방문 일정' in _page_text(out[5]) and '비슷함' in _page_text(out[5])
+    assert page.search('', '')[5] is None  # 검색어가 없으면 의미 검색 안 함
+    out = page.search('점심', '')
+    assert out[5] is None and '참고자료가 없습니다' in _page_text(out[0])
+
+    monkeypatch.setattr(embed.requests, 'post', lambda *a, **k: FakeResp({'detail': 'down'}, 500))
+    monkeypatch.setattr(embed, '_queries', {})
+    out = page.search('인사', '')
+    assert '의미 검색을 하지 못했습니다' in _page_text(out[5]) and '참고자료가 없습니다' in _page_text(out[0])
+    monkeypatch.delenv('EMBED_BASE_URL')
+    assert page.search('예산', '')[5] is None

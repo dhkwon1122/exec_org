@@ -397,6 +397,56 @@ def cached(query: str = '', mail_only: bool = False, limit: int = 30) -> tuple[l
     return [json.loads(r) for r in rows], total
 
 
+
+def similar(query: str, kind: str = '', skip_keys=(), skip_refs=(), limit: int = 10) -> tuple[list[dict], list[dict]]:
+    """참고자료 화면의 의미 검색 (services/embed.py) — 검색어와 뜻이 가까운 (문서들, 링크·메모들), 높은 순.
+    문서는 메일 첨부·올린 파일의 벡터를 같은 문서끼리 묶어 가장 높은 유사도로, 미리 만든 목록에서 꺼낸다.
+    kind 는 화면의 유형 고르기('' / file / mail / link / note), skip_* 는 키워드로 이미 보여 준 것.
+    임베딩 서버가 없으면 ([], []), 실패하면 embed.EmbedError."""
+    import json
+    from sqlalchemy import select
+    from services import embed
+    from services.db import DocumentCache, MailAttachment, Reference, Task
+    want_docs, want_refs = kind in ('', 'file', 'mail'), kind in ('', 'link', 'note')
+    kinds = (('mail',) if kind == 'mail' else ('mail', 'ref')) if want_docs else ('ref',)
+    if not (want_docs or want_refs):
+        return [], []
+    hits = embed.search(query, kinds=kinds, limit=30)
+    if not hits:
+        return [], []
+    mail_ids = [h['id'] for h in hits if h['kind'] == 'mail']
+    ref_ids = [h['id'] for h in hits if h['kind'] == 'ref']
+    with db.SessionLocal() as s:
+        mail_key = dict(s.execute(select(MailAttachment.id, MailAttachment.doc_key)
+                                  .where(MailAttachment.id.in_(mail_ids or [0]))).all())
+        refs = {r.id: (r, title) for r, title in s.execute(
+            select(Reference, Task.title).outerjoin(Task, Task.id == Reference.task_id)
+            .where(Reference.id.in_(ref_ids or [0])))}
+        doc_score: dict[str, float] = {}
+        link_refs = []
+        for h in hits:  # 높은 순
+            if h['kind'] == 'mail':
+                key = mail_key.get(h['id'])
+            else:
+                r, title = refs.get(h['id'], (None, ''))
+                if r is None:
+                    continue
+                if r.kind != 'file':
+                    if want_refs and (kind in ('', r.kind)) and r.id not in skip_refs and len(link_refs) < limit:
+                        link_refs.append({**store._ref_dict(r), 'task_title': title or '', 'score': h['score']})
+                    continue
+                key = r.doc_key
+            if want_docs and key and key not in skip_keys and key not in doc_score:
+                doc_score[key] = h['score']
+        keys = list(doc_score)[:limit * 2]
+        cond = [DocumentCache.key.in_(keys or [''])]
+        if kind == 'mail':
+            cond.append(DocumentCache.has_mail.is_(True))
+        rows = dict(s.execute(select(DocumentCache.key, DocumentCache.data).where(*cond)).all())
+    # 미리 만든 목록에 없는 문서(판 이력에서 뺀 것 등)는 보여 주지 않는다
+    docs = [{**json.loads(rows[k]), 'score': doc_score[k]} for k in keys if k in rows][:limit]
+    return docs, link_refs
+
 # ── 판 이력에서 빼기 ────────────────────────────────────────────────
 # 서명 그림(image001.png)이나 업무와 상관없는 첨부처럼 이력을 볼 필요가 없는 문서는 통째로 빼고(앞으로 같은 이름
 # 규칙으로 오는 파일도), 잘못 끼어든 판은 하나만 뺀다. 메일·올린 파일 자체는 지우지 않고, 되돌릴 수 있다.
