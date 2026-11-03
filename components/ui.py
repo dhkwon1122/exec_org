@@ -19,6 +19,12 @@ def status_badge(status: str):
     return dbc.Badge(status, color=STATUS_COLOR.get(status, 'secondary'), className='me-1')
 
 
+def score_badge(score: float):
+    """의미 검색 유사도 배지 (이력 검색·참고자료 화면)."""
+    return dbc.Badge(f'비슷함 {round(score * 100)}%', color='info', className='me-2',
+                     title='의미 검색 유사도 (검색어 글자가 그대로 들어 있지 않아도 뜻이 가까운 것)')
+
+
 def page_head(title: str, sub=None):
     """화면 맨 위 큰 제목 (assets/style.css 의 .page-head)."""
     return html.Div([html.H3(title), html.Span(sub, className='page-sub') if sub else None], className='page-head')

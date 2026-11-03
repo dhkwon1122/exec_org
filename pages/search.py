@@ -142,11 +142,6 @@ def _semantic(q: str, filters: dict, shown: set[int], docs: list[dict]):
     return similar, sim_docs, sim_refs
 
 
-def _score_badge(score: float):
-    return dbc.Badge(f'비슷함 {round(score * 100)}%', color='info', className='me-2',
-                     title='의미 검색 유사도 (검색어 글자가 그대로 들어 있지 않아도 뜻이 가까운 것)')
-
-
 def _similar_section(similar: list[dict], sim_docs: list[dict], sim_refs: list[dict]):
     if not similar and not sim_docs and not sim_refs:
         return None
@@ -154,13 +149,13 @@ def _similar_section(similar: list[dict], sim_docs: list[dict], sim_refs: list[d
                       html.Span(' — 검색어가 그대로 들어 있지는 않은 것', className='small text-muted fw-normal')],
                      className='mt-4 mb-2')]
     if similar:
-        parts.append(dbc.ListGroup([html.Div([_score_badge(h['score']),
+        parts.append(dbc.ListGroup([html.Div([ui.score_badge(h['score']),
                                               ui.history_card(h, show_task=True, actions=False)], className='mb-1')
                                     for h in similar]))
     items = []
     for d in sim_docs:
         items.append(dbc.ListGroupItem([
-            _score_badge(d['score']),
+            ui.score_badge(d['score']),
             html.A([html.I(className=f"bi {doc_ui._icon(d['filename'])} me-1"), d['filename']],
                    href=f"/mail-files/{d['id']}", className='text-break me-2'),
             dcc.Link(f"{d['mail_date']} · {d['mail_subject'][:50]}", href=f"/inbox?mail={d['mail_id']}",
@@ -169,7 +164,7 @@ def _similar_section(similar: list[dict], sim_docs: list[dict], sim_refs: list[d
         ], className='small'))
     for r in sim_refs:
         items.append(dbc.ListGroupItem([
-            html.Div([_score_badge(r['score']), html.Span(r['title'], className='fw-semibold me-2'),
+            html.Div([ui.score_badge(r['score']), html.Span(r['title'], className='fw-semibold me-2'),
                       html.Span(['업무: ', ui.task_link(r['task'])], className='text-muted') if r['task'] else None]),
             ui.ref_target(r),
             html.Div(r['summary'] or r['content_summary'], className='text-muted mt-1')
