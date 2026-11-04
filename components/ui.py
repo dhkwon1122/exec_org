@@ -19,6 +19,19 @@ def status_badge(status: str):
     return dbc.Badge(status, color=STATUS_COLOR.get(status, 'secondary'), className='me-1')
 
 
+# 사이드바 '검색·자료' 메뉴 하나로 묶은 화면들 — 화면 위 탭으로 오간다 (app.py _NAV)
+FIND_TABS = [('이력 검색', '/search', 'bi-search'), ('참고자료', '/references', 'bi-folder2'),
+             ('컨플루언스', '/confluence', 'bi-journal-text')]
+FIND_PATHS = tuple(href for _, href, _ in FIND_TABS)
+
+
+def find_tabs(active: str):
+    """'검색·자료' 화면 위의 탭 — active 는 지금 화면 주소."""
+    return dbc.Nav([dbc.NavItem(dbc.NavLink([html.I(className=f'bi {icon} me-1'), label], href=href,
+                                            active=href == active))
+                    for label, href, icon in FIND_TABS], pills=True, className='find-tabs mb-3')
+
+
 def score_badge(score: float):
     """의미 검색 유사도 배지 (이력 검색·참고자료 화면)."""
     return dbc.Badge(f'비슷함 {round(score * 100)}%', color='info', className='me-2',

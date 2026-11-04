@@ -22,7 +22,7 @@ import components.todo_ui  # noqa: F401  업무 체크/삭제 공용 콜백 등�
 from services import mailbox
 from components.history_actions import history_edit_modal, history_link_modal, todo_review_modal  # 이력 수정·삭제·AI 할 일 등록 공용 콜백
 from components.mail_ui import compose_modal  # 메일 보내기 창 (화면은 'mail-draft' 에 초안을 넣어 연다)
-from components import doc_ui  # 문서 합치기·나누기 창 (문서 카드의 단추가 연다)
+from components import doc_ui, ui  # doc_ui: 문서 합치기·나누기 창 (문서 카드의 단추가 연다), ui: 검색·자료 탭
 from services import auth, confluence_watch, doc_versions, doc_worker, embed, sso, store, users
 from services.db import DATA_DIR
 
@@ -107,6 +107,12 @@ _PUBLIC_PREFIXES = ('/login', '/auth/sso', '/healthz', '/_dash-component-suites/
 def healthz():
     # 컨테이너 헬스체크용 — 내용 없이 상태만
     return 'ok'
+
+
+@server.route('/todos')
+def todos_moved():
+    # 예전 '내 업무' 화면 — 업무 화면의 '내 업무' 보기로 옮겼다 (즐겨찾기용)
+    return flask.redirect('/?view=mine')
 
 
 @server.before_request
@@ -304,15 +310,12 @@ def download_mail_file(att_id: int):
     return flask.send_file(path, as_attachment=True, download_name=att['filename'])
 
 
-_NAV = [  # (이름, 주소, 아이콘, 주소 맞춤)
+_NAV = [  # (이름, 주소, 아이콘, 주소 맞춤 — 'find' 는 ui.FIND_PATHS 중 어디든, _mark_find_nav)
     ('업무', '/', 'bi-check2-square', 'exact'),
-    ('내 업무', '/todos', 'bi-person-check', 'exact'),
     ('캘린더', '/calendar', 'bi-calendar3', 'exact'),
     ('받은 메일', '/inbox', 'bi-inbox', 'exact'),
     ('임원', '/people', 'bi-people', 'partial'),
-    ('이력 검색', '/search', 'bi-search', 'exact'),
-    ('참고자료', '/references', 'bi-folder2', 'exact'),
-    ('컨플루언스', '/confluence', 'bi-journal-text', 'exact'),
+    ('검색·자료', '/search', 'bi-search', 'find'),  # 이력 검색·참고자료·컨플루언스 (화면 위 탭 — ui.find_tabs)
     ('용어집', '/glossary', 'bi-book', 'exact'),
 ]
 
@@ -341,12 +344,13 @@ def _sidebar():
     for label, href, icon, active in _NAV:
         count = html.Span(review or '', id='nav-inbox-count', className='nav-count hot' if review else 'nav-count',
                           title='확인할 메일') if href == '/inbox' else None
-        if href == '/confluence':
+        if active == 'find':  # 컨플루언스가 이 메뉴 안에 있으므로 안 본 변경 수를 여기에
             n = _confluence_count()
             count = html.Span(n or '', id='nav-conf-count', className='nav-count hot' if n else 'nav-count',
                               title='안 본 컨플루언스 변경')
         links.append(dbc.NavLink([html.I(className=f'bi {icon}'), html.Span(label), count], href=href,
-                                 active=active))
+                                 active=False if active == 'find' else active,
+                                 **({'id': 'nav-find'} if active == 'find' else {})))
     return html.Aside([
         html.A([html.Span(html.I(className='bi bi-check2'), className='app-brand-mark'), html.Span('업무 기록')],
                href='/', className='app-brand'),
@@ -390,6 +394,12 @@ def _refresh_inbox_count(*_):
     """사이드바 '받은 메일'의 확인 필요 건수 — 화면을 옮길 때, 메일을 처리할 때, 1분마다."""
     n = _review_count()
     return (n or ''), 'nav-count hot' if n else 'nav-count'
+
+
+@app.callback(dash.Output('nav-find', 'active'), dash.Input('app-url', 'pathname'))
+def _mark_find_nav(pathname):
+    """'검색·자료' 메뉴는 이력 검색·참고자료·컨플루언스 어느 화면에서든 켜져 있다."""
+    return (pathname or '') in ui.FIND_PATHS
 
 
 @app.callback(dash.Output('nav-conf-count', 'children'), dash.Output('nav-conf-count', 'className'),

@@ -363,3 +363,7 @@ body {
 .gantt-dot-key { display: inline-block; width: 8px; height: 8px; border-radius: 50%; border: 2px solid var(--bs-dark);
                  margin-right: 4px; vertical-align: middle; }
 .gantt-label a.task-title { cursor: pointer; }
+
+/* '검색·자료' 화면 위 탭 (components/ui.py find_tabs) */
+.find-tabs .nav-link { padding: 4px 12px; font-size: .9rem; color: #3f4450; }
+.find-tabs .nav-link.active { background: var(--app-accent); color: #fff; }
