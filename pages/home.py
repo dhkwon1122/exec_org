@@ -1,4 +1,5 @@
-"""업무 목록: 검색·필터, 새 업무 등록, 전체 최근 이력."""
+"""업무 목록: 검색·필터, 새 업무 등록, 전체 최근 이력.
+보기는 목록·간트·내 업무(내가 담당인 업무를 마감일별로 — 예전 /todos 화면, /?view=mine)."""
 import dash
 import dash_bootstrap_components as dbc
 from dash import ALL, Input, Output, State, callback, ctx, dcc, html, no_update
@@ -43,7 +44,7 @@ def _today_label() -> str:
     return f"{d.month}월 {d.day}일 {'월화수목금토일'[d.weekday()]}요일"
 
 
-def layout(**_):
+def layout(view: str = '', **_):
     return html.Div([
         dcc.Store(id='home-refresh', data=0),
         dcc.Location(id='home-redirect', refresh='callback-nav'),
@@ -56,18 +57,21 @@ def layout(**_):
                                       type='search'), md=5),
                     dbc.Col(dcc.Dropdown(id='f-status', multi=True, placeholder='상태 (전체)',
                                          options=store.STATUSES, value=[]), md=3),
-                    dbc.Col(dcc.Dropdown(id='f-tag', placeholder='태그'), md=2),
+                    dbc.Col(dcc.Dropdown(id='f-tag', placeholder='태그'), md=2, id='f-tag-col'),
                     dbc.Col(dbc.Button([html.I(className='bi bi-plus-lg me-1'), '새 업무'], id='new-open',
                                        color='primary', className='w-100'), md=2),
                 ], className='g-2 mb-2'),
                 html.Div([
-                    dbc.RadioItems(id='home-view', value='list', inline=True, className='d-flex me-3',
+                    dbc.RadioItems(id='home-view', value='mine' if view == 'mine' else 'list', inline=True,
+                                   className='d-flex me-3',
                                    inputClassName='btn-check', labelClassName='btn btn-sm btn-outline-primary me-1',
                                    labelCheckedClassName='active', persistence=True, persistence_type='local',
                                    options=[{'label': html.Span([html.I(className='bi bi-list-ul me-1'), '목록']),
                                              'value': 'list'},
                                             {'label': html.Span([html.I(className='bi bi-bar-chart-steps me-1'), '간트']),
-                                             'value': 'gantt'}]),
+                                             'value': 'gantt'},
+                                            {'label': html.Span([html.I(className='bi bi-person-check me-1'), '내 업무']),
+                                             'value': 'mine'}]),
                     html.Div([
                         dbc.RadioItems(id='gantt-scale', value='month', inline=True, className='d-flex me-1',
                                        inputClassName='btn-check',
@@ -83,25 +87,34 @@ def layout(**_):
                         ], id='gantt-nav', className='me-3'),
                         dcc.Store(id='gantt-offset', data=0),
                     ], id='gantt-controls', className='d-flex align-items-center', style={'display': 'none'}),
-                    html.Span('하위 업무 펼치기', className='small text-muted me-2'),
-                    dbc.RadioItems(id='home-depth', value=1, inline=True, className='d-flex',
-                                   inputClassName='btn-check', labelClassName='btn btn-sm btn-outline-secondary me-1',
-                                   labelCheckedClassName='active', persistence=True, persistence_type='local',
-                                   options=[{'label': '최상위만', 'value': 0}, {'label': '1단계', 'value': 1},
-                                            {'label': '2단계', 'value': 2}, {'label': '3단계', 'value': 3},
-                                            {'label': '전체', 'value': 99}]),
+                    html.Div([
+                        html.Span('하위 업무 펼치기', className='small text-muted me-2'),
+                        dbc.RadioItems(id='home-depth', value=1, inline=True, className='d-flex',
+                                       inputClassName='btn-check',
+                                       labelClassName='btn btn-sm btn-outline-secondary me-1',
+                                       labelCheckedClassName='active', persistence=True, persistence_type='local',
+                                       options=[{'label': '최상위만', 'value': 0}, {'label': '1단계', 'value': 1},
+                                                {'label': '2단계', 'value': 2}, {'label': '3단계', 'value': 3},
+                                                {'label': '전체', 'value': 99}]),
+                    ], id='home-depth-box', className='d-flex align-items-center'),
                     dbc.Switch(id='home-show-done', label='완료 업무 표시', value=True, persistence=True,
                                persistence_type='local', className='small ms-auto mb-0 me-3'),
+                    dbc.Checkbox(id='tp-show-done', label='최근 7일 완료 보기', value=False,
+                                 className='small ms-auto me-3', style={'display': 'none'}),
                     html.Span('체크 = 완료', className='small text-muted'),
                 ], className='d-flex align-items-center flex-wrap mb-2'),
                 html.Div(id='task-list'),
+                html.Div([  # 내 업무 보기 — 내가 담당인 업무·하위 업무를 마감일별로
+                    dbc.Card(dbc.CardBody(todo_ui.add_form('tp')), className='mb-2'),
+                    html.Div(id='tp-groups'),
+                ], id='home-mine', style={'display': 'none'}),
                 dbc.Offcanvas(id='gantt-panel', placement='end', is_open=False, scrollable=True,
                               style={'width': 'min(560px, 100vw)'}),  # 간트에서 업무를 누르면 AI 요약
             ], lg=8, id='home-main-col'),
             dbc.Col(id='home-side-col', lg=4, children=[
-                dbc.Card([
+                dbc.Card(id='home-todos-card', children=[
                     dbc.CardHeader(html.Div([html.I(className='bi bi-list-check me-1'), '내 업무 (7일 이내·지난 마감)',
-                                             dcc.Link('전체', href='/todos', className='ms-auto small')],
+                                             dcc.Link('전체', href='/?view=mine', className='ms-auto small')],
                                             className='d-flex'), className='small'),
                     html.Div(id='home-todos'),
                 ], className='mb-3'),
@@ -162,6 +175,8 @@ def _task_row(t: dict, level: int = 0, n_children: int = 0, n_done: int = 0, n_h
           Input('home-depth', 'value'), Input('todo-changed', 'data'), Input('home-show-done', 'value'),
           Input('home-view', 'value'), Input('gantt-scale', 'value'), Input('gantt-offset', 'data'))
 def render_list(q, statuses, tag, _, depth, _t, show_done=True, view='list', scale='month', offset=0):
+    if view == 'mine':  # 내 업무 보기는 render_mine 이 그린다 — 최근 이력·태그 목록만
+        return None, _recent_view(), store.all_tags()
     hide_done = not show_done and '완료' not in (statuses or [])  # 상태에서 '완료'를 고르면 그대로 보인다
     if q or tag:  # 검색·태그는 하위 업무까지 찾아 평평하게
         tasks = store.list_tasks(query=q or '', status=statuses or None, tag=tag or '')
@@ -183,8 +198,12 @@ def render_list(q, statuses, tag, _, depth, _t, show_done=True, view='list', sca
         task_view = dbc.ListGroup(rows) if rows else \
             dbc.Alert('조건에 맞는 업무가 없습니다. 오른쪽 위 "새 업무"로 등록하세요.', color='light')
 
+    return task_view, _recent_view(), store.all_tags()
+
+
+def _recent_view():
     recent = store.recent_history(15)
-    history_view = dbc.ListGroup([
+    return dbc.ListGroup([
         dbc.ListGroupItem([
             html.Div([html.I(className=f"bi {ui.ENTRY_ICON.get(h['entry_type'], 'bi-dot')} me-1"),
                       html.Span(h['entry_type'], className='fw-semibold me-2'),
@@ -194,7 +213,53 @@ def render_list(q, statuses, tag, _, depth, _t, show_done=True, view='list', sca
         ], className='py-2') for h in recent
     ], flush=True) if recent else html.Div('아직 이력이 없습니다.', className='small text-muted')
 
-    return task_view, history_view, store.all_tags()
+
+todo_ui.register_add_callback('tp')
+
+_MINE_GROUPS = [  # (이름, 글자 색, 고르는 조건(업무, 오늘, 7일 뒤))
+    ('지난 마감', 'text-danger', lambda t, d, w: not t['done'] and t['overdue']),
+    ('오늘', 'text-warning-emphasis', lambda t, d, w: not t['done'] and t['due_date'] == d),
+    ('7일 이내', '', lambda t, d, w: not t['done'] and d < t['due_date'] <= w),
+    ('이후', '', lambda t, d, w: not t['done'] and t['due_date'] > w),
+    ('마감 없음', 'text-muted', lambda t, d, w: not t['done'] and not t['due_date']),
+    ('최근 완료', 'text-success', lambda t, d, w: t['done']),
+]
+
+
+@callback(Output('tp-groups', 'children'), Output('tp-assignee', 'options'),
+          Output('tp-task', 'options'), Output('tp-assignee', 'value'),
+          Input('home-view', 'value'), Input('tp-show-done', 'value'), Input('todo-changed', 'data'),
+          Input('home-refresh', 'data'), Input('q', 'value'), Input('f-status', 'value'))
+def render_mine(view, show_done, _, _r, q, statuses):
+    """내 업무 보기 — 내가 담당인 업무·하위 업무를 마감일별로. 검색어(제목·상위 업무)와 상태 고르기를 따른다."""
+    if view != 'mine':
+        return no_update, no_update, no_update, no_update
+    me = (auth.current_user() or {}).get('user_id', '')
+    today = date.today()
+    d, w = today.isoformat(), (today + timedelta(days=7)).isoformat()
+    todos = store.list_todos(assignee_id=me, assignee_name=auth.current_name(),
+                             done=None if show_done else False,
+                             done_since=(today - timedelta(days=7)).isoformat() if show_done else '')
+    if (q or '').strip():
+        words = q.lower().split()
+        todos = [t for t in todos if all(x in f"{t['title']} {t['task_title']}".lower() for x in words)]
+    if statuses:
+        todos = [t for t in todos if t['status'] in statuses or (t['done'] and show_done)]
+    sections = []
+    for label, cls, pred in _MINE_GROUPS:
+        items = [t for t in todos if pred(t, d, w)]
+        if items:
+            sections.append(html.Div([
+                html.H6([label, html.Span(f' {len(items)}', className='text-muted fw-normal')],
+                        className=f'mt-3 {cls}'),
+                todo_ui.todo_list(items),
+            ]))
+    if not sections:
+        sections = [html.Div('내가 담당인 업무가 없습니다.', className='text-muted small mt-2')]
+    task_opts = [{'label': f"#{t['id']} {t['title']}", 'value': t['id']}
+                 for t in store.list_tasks(status=['예정', '진행중', '보류'])]
+    # 새 업무의 담당자 기본값은 나
+    return sections, todo_ui.assignee_options(), task_opts, [f'u:{me}'] if me else []
 
 
 @callback(Output('home-todos', 'children'), Input('todo-changed', 'data'), Input('home-refresh', 'data'))
@@ -309,10 +374,18 @@ def change_status(_d, _s, n):
 
 
 @callback(Output('home-main-col', 'lg'), Output('home-side-col', 'style'), Output('gantt-controls', 'style'),
+          Output('task-list', 'style'), Output('home-mine', 'style'), Output('home-depth-box', 'style'),
+          Output('home-show-done', 'style'), Output('tp-show-done', 'style'), Output('f-tag-col', 'style'),
+          Output('home-todos-card', 'style'),
           Input('home-view', 'value'))
-def widen_for_gantt(view):
-    """간트는 넓게 — 오른쪽 '내 업무·빠른 기록·최근 이력'을 접고, 주·월·분기·전체와 앞뒤 이동을 보인다."""
-    return (12, {'display': 'none'}, {'display': 'flex'}) if view == 'gantt' else (8, {}, {'display': 'none'})
+def switch_view(view):
+    """간트는 넓게 — 오른쪽 '내 업무·빠른 기록·최근 이력'을 접고, 주·월·분기·전체와 앞뒤 이동을 보인다.
+    내 업무 보기는 하위 업무 펼치기·태그 대신 '최근 7일 완료 보기', 오른쪽 '내 업무' 카드는 겹치므로 접는다."""
+    show, hide = {}, {'display': 'none'}
+    mine, gantt_ = view == 'mine', view == 'gantt'
+    return (12 if gantt_ else 8, hide if gantt_ else show, {'display': 'flex'} if gantt_ else hide,
+            hide if mine else show, show if mine else hide, hide if mine else {'display': 'flex'},
+            hide if mine else show, show if mine else hide, hide if mine else show, hide if mine else show)
 
 
 @callback(Output('gantt-offset', 'data'), Output('gantt-nav', 'style'),

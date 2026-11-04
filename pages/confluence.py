@@ -12,6 +12,7 @@ dash.register_page(__name__, path='/confluence', name='컨플루언스', title='
 
 def layout(**_):
     return html.Div([
+        ui.find_tabs('/confluence'),
         ui.page_head('컨플루언스', '지켜보는 공간·페이지의 변경'),
         dcc.Store(id='cf-refresh', data=0),
         dcc.Interval(id='cf-poll', interval=4000, disabled=True),  # 백그라운드 확인이 도는 동안 다시 그리기

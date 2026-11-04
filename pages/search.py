@@ -36,6 +36,7 @@ def _sem_status():
 
 def layout(q: str = '', person: str = '', **_):
     return html.Div([
+        ui.find_tabs('/search'),
         ui.page_head('이력 검색'),
         dbc.Row([
             dbc.Col([
