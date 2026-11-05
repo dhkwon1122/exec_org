@@ -129,6 +129,20 @@ def _refresh_documents() -> int:
         return 0
 
 
+def _categorize_mails(now: float) -> bool:
+    global _pause_until
+    from services import mail_categories
+    ids = mail_categories.pending()
+    if not ids:
+        return False
+    try:
+        return mail_categories.categorize(ids) > 0
+    except llm.LLMError as e:
+        _pause_until = now + PAUSE_ON_ERROR
+        log.warning('메일 분류 실패: %s', e)
+        return False
+
+
 def _summarize_task(now: float) -> bool | None:
     """요약이 없거나 오래된 업무 하나를 요약한다 — 할 것이 없으면 None, 했으면 True, LLM 오류면 False(잠시 쉼)."""
     global _pause_until
@@ -158,6 +172,8 @@ def step(now: float | None = None) -> bool:
         read_refs = (confluence.read_new_references(limit=3) or confluence.retry_failed_references(limit=2)
                      or confluence_watch.retry_failed_updates(limit=2) or confluence.summarize_missing(limit=3))
     if _fill_texts() or read_refs:  # 예전 첨부 글자 · 아직 안 읽은 컨플루언스 링크
+        return True
+    if _categorize_mails(now):  # 아직 1차 분류하지 않은 메일 (LLM 이 없으면 처리 종류로)
         return True
     if not llm.is_configured():
         _refresh_documents()  # 할 일이 없을 때 — 다 하면 평소처럼 잠시 쉰다

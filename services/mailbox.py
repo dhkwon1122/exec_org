@@ -121,14 +121,20 @@ def _mail_dict(m: InboundMail) -> dict:
             'task_ids': [int(x) for x in (m.task_ids or '').split(',') if x.strip().isdigit()],
             'error': m.error or '', 'received_at': m.received_at.strftime('%Y-%m-%d %H:%M') if m.received_at else '',
             'handled_at': m.handled_at.strftime('%Y-%m-%d %H:%M') if m.handled_at else '',
-            'handled_by': m.handled_by or ''}
+            'handled_by': m.handled_by or '', 'category_id': m.category_id,
+            'category_source': m.category_source or ''}
 
 
-def list_mails(status: list[str] | None = None, limit: int = 200) -> list[dict]:
+def list_mails(status: list[str] | None = None, limit: int = 200, category: int | str | None = None) -> list[dict]:
+    """category: 분류 id, 'none' 이면 미분류만, None 이면 모두 (services/mail_categories.py)."""
     with db.SessionLocal() as s:
         stmt = select(InboundMail).where(InboundMail.status != 'skipped')
         if status:
             stmt = stmt.where(InboundMail.status.in_(status))
+        if category == 'none':
+            stmt = stmt.where(InboundMail.category_id.is_(None))
+        elif category is not None:
+            stmt = stmt.where(InboundMail.category_id == int(category))
         return [_mail_dict(m) for m in s.scalars(stmt.order_by(InboundMail.id.desc()).limit(limit))]
 
 
@@ -991,6 +997,12 @@ def fetch_new(connect=None, process_now: bool = True) -> dict:
     if process_now:
         for mid in new_ids:
             process(mid)
+        if new_ids:  # 1차 분류 — 새 메일을 한 번에 (실패하면 쉬는 시간에 다시)
+            from services import mail_categories
+            try:
+                mail_categories.categorize(new_ids)
+            except Exception as e:  # noqa: BLE001
+                log.warning('메일 분류 실패: %s', e)
     return {'new': len(new_ids), 'skipped': skipped, 'processed': len(new_ids) if process_now else 0}
 
 

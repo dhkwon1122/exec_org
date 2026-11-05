@@ -423,6 +423,8 @@ class InboundMail(Base):
     suggestion = Column(Text, default='')  # JSON — AI 가 뽑은 업무 후보 등
     schedule_import_id = Column(Integer, ForeignKey('schedule_imports.id', ondelete='SET NULL'), nullable=True)
     task_ids = Column(String(500), default='')  # 만든 업무 id (쉼표)
+    category_id = Column(Integer, ForeignKey('mail_categories.id', ondelete='SET NULL'), nullable=True, index=True)
+    category_source = Column(String(10), default='')  # '' 아직 / ai / kind(LLM 없이 종류로) / manual(사람이 고름)
     error = Column(Text, default='')
     received_at = Column(DateTime, default=_now)
     handled_at = Column(DateTime, nullable=True)
@@ -471,6 +473,17 @@ class OutboundMail(Base):
     related_kind = Column(String(20), default='', index=True)
     related_id = Column(String(50), default='', index=True)
     sent_by = Column(String(100), default='')
+    created_at = Column(DateTime, default=_now)
+
+
+class MailCategory(Base):
+    """받은 메일 1차 분류 (services/mail_categories.py) — 이름과 설명(AI 가 고를 때 참고)을 화면에서 관리한다."""
+    __tablename__ = 'mail_categories'
+
+    id = Column(Integer, primary_key=True)
+    name = Column(String(50), nullable=False, unique=True)
+    description = Column(String(500), default='')
+    sort = Column(Integer, default=0)
     created_at = Column(DateTime, default=_now)
 
 
@@ -605,7 +618,10 @@ def make_engine(url: str | None = None):
     # 워커들이 동시에 떠서 같은 테이블을 동시에 만들려다 한쪽이 실패할 수 있어 몇 번 재시도한다
     for attempt in range(5):
         try:
+            fresh = 'mail_categories' not in inspect(engine).get_table_names()
             Base.metadata.create_all(engine)
+            if fresh:
+                _seed_mail_categories(engine)
             _add_missing_columns(engine)
             _relax_not_null(engine)
             _merge_todos_into_tasks(engine)
@@ -619,6 +635,21 @@ def make_engine(url: str | None = None):
                 raise
             time.sleep(0.5 * (attempt + 1))
     return engine
+
+
+def _seed_mail_categories(engine):
+    """메일 분류 표를 처음 만들 때 기본 분류를 넣는다 (그 뒤로는 화면에서 고친 대로)."""
+    from services.mail_categories import DEFAULTS
+    with engine.begin() as conn:
+        if conn.execute(text('SELECT COUNT(*) FROM mail_categories')).scalar():
+            return
+        for i, (name, desc) in enumerate(DEFAULTS):
+            try:
+                with conn.begin_nested():
+                    conn.execute(text('INSERT INTO mail_categories (name, description, sort, created_at) '
+                                      'VALUES (:n, :d, :s, CURRENT_TIMESTAMP)'), {'n': name, 'd': desc, 's': i})
+            except Exception:  # noqa: BLE001 — 다른 워커가 먼저 넣었으면 그대로
+                pass
 
 
 def _add_missing_columns(engine):
