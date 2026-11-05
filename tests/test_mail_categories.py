@@ -92,3 +92,32 @@ def test_idle_worker_categorizes_backlog(monkeypatch):
     monkeypatch.setenv('DOC_SUMMARY_IDLE_MINUTES', '10')
     monkeypatch.setattr(doc_worker, '_pause_until', 0.0)
     assert doc_worker.step(10 ** 10) is True and mail_categories.pending_count() == 0
+
+
+def test_rules_decide_category_for_new_and_existing_mails():
+    by = _fetch([_mail('주간 보고', 'report@team.x', text='보고드립니다', mid='<1@x>'),
+                 _mail('다른 메일', 'a@x', text='안내', mid='<2@x>')])
+    old = by['주간 보고']
+    assert old['category_id'] == _cat('업무 요청')  # 규칙 전 — 처리 종류로
+    with pytest.raises(ValueError, match='분류를 골라야'):
+        mailbox.save_rule({'field': 'sender', 'pattern': 'report@', 'action': 'classify'})
+    mailbox.save_rule({'field': 'sender', 'pattern': 'report@', 'action': 'classify', 'category_id': _cat('보고·자료')})
+    assert mailbox.match_rule('주간 보고', 'report@team.x', '') is None  # '분류만'은 처리를 정하지 않는다
+    mail_categories.set_category(by['다른 메일']['id'], _cat('기타'))
+    assert mail_categories.apply_rules() == 1  # 이미 받은 메일에도
+    m = mailbox.get_mail(old['id'])
+    assert m['category_id'] == _cat('보고·자료') and m['category_source'] == 'rule'
+    assert mail_categories.reset_auto() == 0  # 규칙으로 정한 것은 다시 묻지 않는다
+
+    by = _fetch([_mail('주간 보고', 'report@team.x', text='보고드립니다', mid='<1@x>'),
+                 _mail('다른 메일', 'a@x', text='안내', mid='<2@x>'),
+                 _mail('주간 보고 2', 'report@team.x', text='보고', mid='<3@x>')])
+    new = by['주간 보고 2']
+    assert new['category_id'] == _cat('보고·자료') and new['category_source'] == 'rule'
+    assert new['kind'] == 'task'  # 처리는 평소대로
+    # 처리 규칙에 분류를 붙여도 된다
+    mailbox.save_rule({'field': 'subject', 'pattern': '공지', 'action': 'ignore', 'category_id': _cat('공지·안내')})
+    by = _fetch([*(_mail(f's{i}', 'a@x', text='x', mid=f'<{i}@x>') for i in range(1, 4)),
+                 _mail('[공지] 시스템 점검', 'it@x', text='점검', mid='<4@x>')])
+    n = by['[공지] 시스템 점검']
+    assert n['status'] == 'ignored' and n['category_id'] == _cat('공지·안내')

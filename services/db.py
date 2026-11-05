@@ -498,6 +498,7 @@ class MailRule(Base):
     action = Column(String(20), default='task')  # schedule / task / ignore
     auto = Column(Boolean, nullable=False, default=False)
     parent_task_id = Column(Integer, ForeignKey('tasks.id', ondelete='SET NULL'), nullable=True)  # 업무를 이 아래에
+    category_id = Column(Integer, ForeignKey('mail_categories.id', ondelete='SET NULL'), nullable=True)  # 이 분류로
     sort = Column(Integer, default=0)
     active = Column(Boolean, nullable=False, default=True)
     created_at = Column(DateTime, default=_now)

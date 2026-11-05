@@ -31,7 +31,7 @@ from services.db import InboundMail, MailRule, Task
 
 log = logging.getLogger(__name__)
 ACTIONS = {'schedule': '원장님 일정', 'schedule_people': '피플팀장 일정', 'task': '업무', 'absence': '임원 부재',
-           'ignore': '무시'}
+           'ignore': '무시', 'classify': '분류만 (처리는 AI)'}
 RULE_OWNER = {'schedule': 'director', 'schedule_people': 'people'}  # 일정 규칙 → 누구 일정
 FIELDS = {'sender': '보낸 사람', 'subject': '제목', 'body': '본문'}
 STATUS = {'auto': '자동 처리', 'review': '확인 필요', 'done': '처리 완료', 'ignored': '무시', 'failed': '실패',
@@ -61,7 +61,8 @@ def settings() -> dict:
 
 def _rule_dict(r: MailRule) -> dict:
     return {'id': r.id, 'name': r.name or '', 'field': r.field, 'pattern': r.pattern, 'action': r.action,
-            'auto': bool(r.auto), 'parent_task_id': r.parent_task_id, 'sort': r.sort or 0, 'active': bool(r.active)}
+            'auto': bool(r.auto), 'parent_task_id': r.parent_task_id, 'sort': r.sort or 0, 'active': bool(r.active),
+            'category_id': r.category_id}
 
 
 def list_rules() -> list[dict]:
@@ -75,6 +76,8 @@ def save_rule(data: dict, rule_id: int | None = None) -> dict:
         raise ValueError('찾을 글자를 입력하세요.')
     if data.get('field') not in FIELDS or data.get('action') not in ACTIONS:
         raise ValueError('규칙 항목이 올바르지 않습니다.')
+    if data['action'] == 'classify' and not data.get('category_id'):
+        raise ValueError("'분류만' 규칙은 분류를 골라야 합니다.")
     with db.SessionLocal() as s:
         r = s.get(MailRule, rule_id) if rule_id else MailRule()
         if r is None:
@@ -83,6 +86,7 @@ def save_rule(data: dict, rule_id: int | None = None) -> dict:
         r.field, r.pattern, r.action = data['field'], pattern[:300], data['action']
         r.auto = True if data['action'] == 'ignore' else bool(data.get('auto'))  # 무시는 늘 바로
         r.parent_task_id = data.get('parent_task_id') or None
+        r.category_id = int(data['category_id']) if data.get('category_id') else None
         r.active = bool(data.get('active', True))
         if not rule_id:
             r.sort = len(list(s.scalars(select(MailRule.id))))
@@ -99,13 +103,21 @@ def delete_rule(rule_id: int) -> None:
             s.commit()
 
 
-def match_rule(subject: str, sender: str, body: str) -> dict | None:
-    """위에서부터 처음 맞는 규칙 (대소문자 무시, 글자 포함)."""
+def matching_rules(subject: str, sender: str, body: str, rules: list[dict] | None = None) -> list[dict]:
+    """맞는 규칙 모두 — 위에서부터 (대소문자 무시, 글자 포함)."""
     hay = {'sender': sender or '', 'subject': subject or '', 'body': body or ''}
-    for r in list_rules():
-        if r['active'] and r['pattern'].lower() in hay[r['field']].lower():
-            return r
-    return None
+    return [r for r in (list_rules() if rules is None else rules)
+            if r['active'] and r['pattern'].lower() in hay[r['field']].lower()]
+
+
+def match_rule(subject: str, sender: str, body: str) -> dict | None:
+    """처리를 정하는 규칙 — 위에서부터 처음 맞는 것 ('분류만' 규칙은 빼고)."""
+    return next((r for r in matching_rules(subject, sender, body) if r['action'] != 'classify'), None)
+
+
+def rule_category(subject: str, sender: str, body: str, rules: list[dict] | None = None) -> int | None:
+    """규칙이 정하는 1차 분류 — 분류를 지정한 규칙 중 위에서부터 처음 맞는 것."""
+    return next((r['category_id'] for r in matching_rules(subject, sender, body, rules) if r['category_id']), None)
 
 
 # ── 메일 ──────────────────────────────────────────────────────────────

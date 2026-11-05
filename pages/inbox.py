@@ -260,7 +260,9 @@ def layout(mail=None, **_):
             dbc.ModalHeader(dbc.ModalTitle('메일 분류 규칙')),
             dbc.ModalBody([
                 html.Div('위에서부터 처음 맞는 규칙을 씁니다 (글자 포함, 대소문자 무시). "자동"이면 확인 없이 바로 반영하고, '
-                         '아니면 받은 메일에 추천으로 남깁니다. 맞는 규칙이 없으면 AI 가 추천합니다.',
+                         '아니면 받은 메일에 추천으로 남깁니다. 맞는 규칙이 없으면 AI 가 추천합니다. '
+                         '분류를 고르면 맞는 메일은 그 분류로 모입니다 (이미 받은 메일에도 — 직접 고른 분류는 그대로). '
+                         '"분류만"은 처리는 AI 에게 맡기고 분류만 정합니다.',
                          className='small text-muted mb-2'),
                 html.Div(id='ib-rule-list'),
                 html.Hr(),
@@ -272,9 +274,10 @@ def layout(mail=None, **_):
                         {'label': f'→ {v}', 'value': k} for k, v in mailbox.ACTIONS.items()]), md=4),
                 ], className='g-2 mb-2'),
                 dbc.Row([
-                    dbc.Col(dcc.Dropdown(id='ib-r-parent', placeholder='업무면: 상위 업무 (선택)'), md=6),
+                    dbc.Col(dbc.Select(id='ib-r-cat', value='', options=[]), md=3),
+                    dbc.Col(dcc.Dropdown(id='ib-r-parent', placeholder='업무면: 상위 업무 (선택)'), md=4),
                     dbc.Col(dbc.Input(id='ib-r-name', placeholder='규칙 이름 (선택)'), md=3),
-                    dbc.Col(dbc.Checkbox(id='ib-r-auto', value=True, label='자동 반영'), md=3,
+                    dbc.Col(dbc.Checkbox(id='ib-r-auto', value=True, label='자동 반영'), md=2,
                             className='d-flex align-items-center'),
                 ], className='g-2 mb-2'),
                 dbc.Button('규칙 추가', id='ib-r-add', color='primary', size='sm'),
@@ -838,13 +841,17 @@ def _rules_view():
     if not rules:
         return html.Div('규칙이 없습니다. 예: 보낸 사람에 "비서실" → 원장님 일정(자동), 제목에 "피플팀장" → 피플팀장 일정.', className='small text-muted')
     titles = {t['value']: t['label'] for t in _task_options()}
+    cats = {c['id']: c['name'] for c in mail_categories.list_categories()}
     return dbc.Table(html.Tbody([html.Tr([
         html.Td(r['name']),
         html.Td(f"{mailbox.FIELDS[r['field']]}에 '{r['pattern']}'", className='small'),
         html.Td([f"→ {mailbox.ACTIONS[r['action']]}",
                  html.Div(titles.get(r['parent_task_id'], ''), className='small text-muted')
                  if r['parent_task_id'] else None]),
-        html.Td(dbc.Badge('자동' if r['auto'] else '추천', color='success' if r['auto'] else 'warning')),
+        html.Td(dbc.Badge([html.I(className='bi bi-tags me-1'), cats[r['category_id']]], color='light',
+                          text_color='dark', className='border') if r['category_id'] in cats else None),
+        html.Td(dbc.Badge('자동' if r['auto'] else '추천', color='success' if r['auto'] else 'warning')
+                if r['action'] != 'classify' else None),
         html.Td(dbc.Button(html.I(className='bi bi-trash'), id={'type': 'ib-r-del', 'id': r['id']}, size='sm',
                            color='secondary', outline=True), className='text-end'),
     ]) for r in rules]), size='sm', className='align-middle small')
@@ -853,17 +860,22 @@ def _rules_view():
 @callback(Output('ib-rules-modal', 'is_open'), Output('ib-rule-list', 'children'), Output('ib-r-parent', 'options'),
           Output('ib-r-error', 'children'), Output('ib-r-error', 'is_open'), Output('ib-r-pattern', 'value'),
           Output('ib-r-field', 'value'), Output('ib-r-action', 'value'),
+          Output('ib-r-cat', 'options'), Output('ib-r-cat', 'value'),
+          Output('ib-refresh', 'data', allow_duplicate=True),
           Input('ib-rules-open', 'n_clicks'), Input('ib-mkrule', 'n_clicks'), Input('ib-r-add', 'n_clicks'),
           Input({'type': 'ib-r-del', 'id': ALL}, 'n_clicks'),
           State('ib-sel', 'data'), State('ib-r-field', 'value'), State('ib-r-pattern', 'value'),
           State('ib-r-action', 'value'), State('ib-r-auto', 'value'), State('ib-r-parent', 'value'),
-          State('ib-r-name', 'value'), prevent_initial_call=True)
-def rules(_o, _m, _a, _d, sel, field, pattern, action, auto, parent, name):
+          State('ib-r-name', 'value'), State('ib-r-cat', 'value'), State('ib-refresh', 'data'),
+          prevent_initial_call=True)
+def rules(_o, _m, _a, _d, sel, field, pattern, action, auto, parent, name, cat, n):
     nu = no_update
     trig = ctx.triggered_id
     if trig is None or not ctx.triggered[0]['value']:
-        return (nu,) * 8
-    pat_out, field_out, action_out = nu, nu, nu
+        return (nu,) * 11
+    pat_out, field_out, action_out, cat_out, refresh = nu, nu, nu, nu, nu
+    cat_opts = [{'label': '분류 지정 안 함', 'value': ''}] + [
+        {'label': f"분류: {c['name']}", 'value': str(c['id'])} for c in mail_categories.list_categories()]
     if trig == 'ib-mkrule' and sel:
         m = mailbox.get_mail(sel)
         from email.utils import parseaddr
@@ -872,16 +884,22 @@ def rules(_o, _m, _a, _d, sel, field, pattern, action, auto, parent, name):
         action_out = ('task' if m['kind'] == 'task' else 'ignore' if m['kind'] == 'ignore' else
                       'absence' if m['kind'] == 'absence' else
                       'schedule_people' if imp and imp['owner'] == 'people' else 'schedule')
+        cat_out = str(m['category_id']) if m['category_id'] else ''
     elif trig == 'ib-r-add':
         try:
             mailbox.save_rule({'field': field, 'pattern': pattern, 'action': action, 'auto': auto,
-                               'parent_task_id': parent, 'name': name})
+                               'parent_task_id': parent, 'name': name, 'category_id': cat})
         except ValueError as e:
-            return True, nu, nu, str(e), True, nu, nu, nu
+            return True, nu, nu, str(e), True, nu, nu, nu, cat_opts, nu, nu
         pat_out = ''
+        if cat:  # 이미 받은 메일에도
+            mail_categories.apply_rules()
+            refresh = (n or 0) + 1
     elif isinstance(trig, dict):
         mailbox.delete_rule(trig['id'])
-    return True, _rules_view(), _task_options(), '', False, pat_out, field_out, action_out
+    elif trig == 'ib-rules-open':
+        cat_out = ''
+    return True, _rules_view(), _task_options(), '', False, pat_out, field_out, action_out, cat_opts, cat_out, refresh
 
 
 @callback(Output('mail-draft', 'data', allow_duplicate=True), Input('ib-reply', 'n_clicks'), State('ib-sel', 'data'),

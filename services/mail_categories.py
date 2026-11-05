@@ -20,7 +20,7 @@ DEFAULTS = [
 # LLM 이 없을 때 — 처리 종류 → 같은 뜻의 분류 이름
 KIND_TO_NAME = {'schedule': '일정', 'both': '업무 요청', 'task': '업무 요청', 'absence': '임원 동향', 'ignore': '공지·안내'}
 BATCH = 12  # AI 에게 한 번에 맡길 메일 수
-SOURCES = {'ai': 'AI 분류', 'kind': '처리 종류로', 'manual': '직접 고름'}
+SOURCES = {'ai': 'AI 분류', 'kind': '처리 종류로', 'manual': '직접 고름', 'rule': '규칙'}
 
 SYSTEM = """너는 임원조직 담당자의 받은 메일을 분류하는 비서다. 메일마다 아래 분류 중 가장 맞는 하나를 고른다.
 분류 이름은 목록에 있는 그대로 쓴다. 맞는 것이 없으면 '기타'가 있으면 '기타', 없으면 빈 문자열.
@@ -115,9 +115,18 @@ def categorize(mail_ids: list[int]) -> int:
     if not mail_ids or not cats:
         return 0
     names = _by_name(cats)
+    from services import mailbox
+    rules = mailbox.list_rules()
     with db.SessionLocal() as s:
         mails = [m for m in s.scalars(select(InboundMail).where(InboundMail.id.in_(mail_ids)))
                  if m.category_source in (None, '')]
+        done = 0
+        for m in list(mails):  # 분류를 정한 규칙이 맞으면 그대로 (AI 에게 묻지 않는다)
+            cid = mailbox.rule_category(m.subject, m.sender, m.body, rules)
+            if cid:
+                m.category_id, m.category_source = cid, 'rule'
+                mails.remove(m)
+                done += 1
         picked: dict[int, int] = {}
         if llm.is_configured() and mails:
             listing = '\n'.join(f"- {c['name']}: {c['description']}" for c in cats)
@@ -132,7 +141,6 @@ def categorize(mail_ids: list[int]) -> int:
                 cid = names.get(str(it.get('category') or '').strip().lower())
                 if cid:
                     picked[mid] = cid
-        done = 0
         for m in mails:
             if m.id in picked:
                 m.category_id, m.category_source = picked[m.id], 'ai'
@@ -142,6 +150,25 @@ def categorize(mail_ids: list[int]) -> int:
             done += 1
         s.commit()
     return done
+
+
+def apply_rules() -> int:
+    """분류를 정한 규칙을 이미 받은 메일에 — 사람이 고른 분류는 그대로. 바꾼 수."""
+    from services import mailbox
+    rules = mailbox.list_rules()
+    if not any(r['category_id'] for r in rules if r['active']):
+        return 0
+    n = 0
+    with db.SessionLocal() as s:
+        for m in s.scalars(select(InboundMail).where(InboundMail.status != 'skipped',
+                                                    or_(InboundMail.category_source.is_(None),
+                                                        InboundMail.category_source != 'manual'))):
+            cid = mailbox.rule_category(m.subject, m.sender, m.body, rules)
+            if cid and (m.category_id != cid or m.category_source != 'rule'):
+                m.category_id, m.category_source = cid, 'rule'
+                n += 1
+        s.commit()
+    return n
 
 
 def counts(statuses: list[str] | None = None) -> dict:
