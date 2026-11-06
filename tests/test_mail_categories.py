@@ -90,6 +90,11 @@ def test_classify_first_then_only_that_categorys_ai(monkeypatch):
     assert Counter(k for k, _ in called if k not in ('classify', 'parent')) == {'schedule': 2, 'absence': 1, 'tasks': 1}
     assert ('batch', '') not in called  # 받을 때 이미 분류 — 다시 묻지 않는다
 
+    # 처리가 없는 분류로 옮기면 분류만 — 이미 만든 결과는 그대로
+    sched = by['원장님 주간']
+    mail_categories.set_category(sched['id'], _cat('기타'))
+    assert mailbox.reprocess_category(sched['id']) is False
+    assert mailbox.get_mail(sched['id'])['schedule_import_id'] == sched['schedule_import_id']
     # 사람이 분류를 바꾸면 그 분류의 처리를 다시
     m = by['뉴스레터']
     mail_categories.set_category(m['id'], _cat('업무 이력'))

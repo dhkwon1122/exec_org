@@ -101,7 +101,20 @@ def layout(mail=None, **_):
         _category_modal(),
         dcc.Loading(dbc.Alert(id='ib-msg', is_open=False, dismissable=True, className='py-2 small'), type='dot'),
         dbc.Row([
-            dbc.Col(html.Div(id='ib-list'), lg=5),
+            dbc.Col([
+                dcc.Store(id='ib-checked', data=[]),
+                html.Div([  # 여러 메일을 골라 한 번에 무시·분류
+                    dbc.Checkbox(id='ib-chk-all', value=False, label='모두 선택', className='small me-2 mb-0'),
+                    html.Span(id='ib-bulk-count', className='small text-muted me-auto'),
+                    dbc.Button([html.I(className='bi bi-slash-circle me-1'), '무시'], id='ib-bulk-ignore', size='sm',
+                               color='secondary', outline=True, className='me-1', disabled=True),
+                    dbc.Select(id='ib-bulk-cat', size='sm', options=[], placeholder='분류', style={'width': '130px'},
+                               className='me-1', disabled=True),
+                    dbc.Button('분류 바꾸기', id='ib-bulk-cat-go', size='sm', color='secondary', outline=True,
+                               disabled=True),
+                ], className='d-flex align-items-center flex-wrap gap-1 mb-2 inbox-bulk'),
+                dcc.Loading(html.Div(id='ib-list'), type='dot', delay_show=400),
+            ], lg=5),
             dbc.Col(html.Div([
                 html.Div(id='ib-head'),
                 html.Div(id='ib-ai-box', style={'display': 'none'}, children=[
@@ -312,8 +325,10 @@ def layout(mail=None, **_):
 
 @callback(Output('ib-list', 'children'), Output('ib-filter', 'options'), Output('ib-status', 'children'),
           Output('ib-cat', 'options'), Output('ib-cat-run', 'children'), Output('ib-cat-run', 'style'),
-          Input('ib-filter', 'value'), Input('ib-refresh', 'data'), Input('ib-sel', 'data'), Input('ib-cat', 'value'))
-def render_list(flt, _, sel, cat='all'):
+          Input('ib-filter', 'value'), Input('ib-refresh', 'data'), Input('ib-sel', 'data'), Input('ib-cat', 'value'),
+          State('ib-checked', 'data'))
+def render_list(flt, _, sel, cat='all', checked=None):
+    checked = set(checked or [])
     c = mailbox.counts()
     opts = [{'label': f'{label} {c.get(k, 0)}' if k != 'all' else label, 'value': k} for k, label in FILTERS]
     statuses = None if flt == 'all' else [flt]
@@ -347,16 +362,22 @@ def render_list(flt, _, sel, cat='all'):
 
     def item(m):
         kind = KIND.get(m['kind'])
-        return dbc.ListGroupItem([
+        row = dbc.ListGroupItem([
             html.Div([
                 dbc.Badge(mailbox.STATUS.get(m['status'], m['status']), color=STATUS_COLOR.get(m['status'], 'light'),
                           className='me-1'),
                 dbc.Badge(kind[0], color=kind[1], className='me-1') if kind else None,
-                html.Span(m['mail_date'], className='small text-muted ms-auto'),
+                html.Span(m['received_at'] or m['mail_date'], className='small text-muted ms-auto',
+                          title=f"받은 시각 {m['received_at']} · 메일 날짜 {m['mail_date']}"),
             ], className='d-flex align-items-center mb-1'),
             html.Div(m['subject'], className='fw-semibold text-truncate'),
             html.Div(mailbox.sender_name(m['sender']), className='small text-muted text-truncate'),
-        ], id={'type': 'ib-mail', 'id': m['id']}, n_clicks=0, action=True, active=m['id'] == sel, className='py-2')
+        ], id={'type': 'ib-mail', 'id': m['id']}, n_clicks=0, action=True, active=m['id'] == sel,
+            className='py-2 flex-grow-1 min-w-0 border-0')
+        # 체크박스는 메일 줄 밖에 — 누를 때 메일이 열리지 않게
+        return html.Div([dbc.Checkbox(id={'type': 'ib-chk', 'id': m['id']}, value=m['id'] in checked,
+                                      className='ms-2 mt-2'), row],
+                        className='list-group-item p-0 d-flex align-items-start inbox-row')
 
     if cat != 'all':
         return dbc.ListGroup([item(m) for m in mails]), opts, st, cat_opts, *run
@@ -371,6 +392,56 @@ def render_list(flt, _, sel, cat='all'):
         dbc.ListGroup([item(m) for m in groups[k]], className='mb-2'),
     ], open=True) for k in order]
     return html.Div(view), opts, st, cat_opts, *run
+
+
+# ── 여러 메일 한 번에 (무시·분류) ──────────────────────────────────────
+
+@callback(Output('ib-checked', 'data'), Output('ib-bulk-count', 'children'), Output('ib-bulk-ignore', 'disabled'),
+          Output('ib-bulk-cat', 'disabled'), Output('ib-bulk-cat-go', 'disabled'), Output('ib-bulk-cat', 'options'),
+          Input({'type': 'ib-chk', 'id': ALL}, 'value'), State({'type': 'ib-chk', 'id': ALL}, 'id'))
+def checked_mails(values, ids):
+    picked = [i['id'] for i, v in zip(ids or [], values or []) if v]
+    opts = [{'label': '미분류', 'value': ''}] + [{'label': c['name'], 'value': str(c['id'])}
+                                                for c in mail_categories.list_categories()]
+    none = not picked
+    return picked, f'{len(picked)}통 선택' if picked else '', none, none, none, opts
+
+
+@callback(Output({'type': 'ib-chk', 'id': ALL}, 'value'), Input('ib-chk-all', 'value'),
+          State({'type': 'ib-chk', 'id': ALL}, 'id'), prevent_initial_call=True)
+def check_all(on, ids):
+    return [bool(on)] * len(ids or [])
+
+
+@callback(Output('ib-refresh', 'data', allow_duplicate=True), Output('ib-msg', 'children', allow_duplicate=True),
+          Output('ib-msg', 'is_open', allow_duplicate=True), Output('ib-msg', 'color', allow_duplicate=True),
+          Output('ib-checked', 'data', allow_duplicate=True), Output('ib-chk-all', 'value'),
+          Input('ib-bulk-ignore', 'n_clicks'), Input('ib-bulk-cat-go', 'n_clicks'),
+          State('ib-checked', 'data'), State('ib-bulk-cat', 'value'), State('ib-refresh', 'data'),
+          prevent_initial_call=True)
+def bulk_action(_i, _c, picked, cat, n):
+    """고른 메일을 한 번에 — 무시, 또는 분류 바꾸기 (아직 확인 전인 메일은 그 분류의 처리를 다시)."""
+    nu = no_update
+    if not picked or not (ctx.triggered and ctx.triggered[0]['value']):
+        return nu, nu, nu, nu, nu, nu
+    by = auth.current_name() or ''
+    if ctx.triggered_id == 'ib-bulk-ignore':
+        for mid in picked:
+            mailbox.ignore(mid, by)
+        return (n or 0) + 1, f'{len(picked)}통을 무시했습니다.', True, 'secondary', [], False
+    if cat is None:
+        return nu, '바꿀 분류를 고르세요.', True, 'warning', nu, nu
+    redone = failed = 0
+    for mid in picked:
+        mail_categories.set_category(mid, int(cat) if cat else None, 'manual')
+        try:
+            redone += mailbox.reprocess_category(mid)
+        except Exception:  # noqa: BLE001 — 분류는 바뀌었다. 처리는 'AI 에게 맡기기'로 다시 할 수 있다
+            failed += 1
+    name = next((c['name'] for c in mail_categories.list_categories() if str(c['id']) == cat), '미분류')
+    msg = f"{len(picked)}통을 '{name}'(으)로 옮겼습니다" + (f' — {redone}통은 그 분류에 맞게 다시 처리했습니다' if redone else '') \
+        + (f' ({failed}통은 처리 실패 — 메일에서 다시 하세요)' if failed else '') + '.'
+    return (n or 0) + 1, msg, True, 'success' if not failed else 'warning', [], False
 
 
 @callback(Output('ib-sel', 'data'), Input({'type': 'ib-mail', 'id': ALL}, 'n_clicks'), prevent_initial_call=True)

@@ -374,3 +374,8 @@ body {
 .summary-sec { display: contents; }
 .summary-sec-name { color: var(--bs-secondary-color); font-weight: 600; white-space: nowrap; }
 .summary-sec-text { white-space: pre-wrap; }
+
+/* 받은 메일 목록 — 체크박스 + 메일 줄 */
+.inbox-row .list-group-item-action { border-radius: 0; }
+.inbox-row + .inbox-row { border-top-width: 0; }
+.min-w-0 { min-width: 0; }

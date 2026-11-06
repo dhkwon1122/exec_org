@@ -505,14 +505,14 @@ def process_as_category(m: dict, cat: dict, reason: str = '', source: str = 'ai'
 
 
 def reprocess_category(mail_id: int) -> bool:
-    """사람이 분류를 바꾸면 그 분류에 맞는 처리를 다시 — 아직 확인 전('확인 필요'·'실패')이고 처리한 항목이 없을 때만.
-    했으면 True."""
+    """사람이 분류를 바꾸면 그 분류에 맞는 처리를 다시 — 아직 확인 전('확인 필요'·'실패')이고 처리한 항목이 없고,
+    분류에 처리가 있을 때만. 했으면 True."""
     from services import mail_categories
     m = get_mail(mail_id)
     if m is None or m['status'] not in ('review', 'failed') or (m['suggestion'].get('done') or {}):
         return False
     cat = mail_categories.get_category(m['category_id'])
-    if cat is None:
+    if cat is None or not cat['action']:  # 처리가 없는 분류(기타 등)로 옮기면 분류만 — 이미 만든 결과는 그대로
         return False
     process_as_category(m, cat, '직접 고름', 'manual')
     return True
