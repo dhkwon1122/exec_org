@@ -5,7 +5,7 @@ import dash_bootstrap_components as dbc
 from dash import ALL, Input, Output, State, callback, ctx, dash_table, dcc, html, no_update
 
 from components import absence_ui, doc_ui, sched_edit, ui
-from services import absences, auth, doc_versions, doc_worker, llm, mailbox, outbox, schedules, store
+from services import absences, auth, doc_versions, doc_worker, llm, mail_categories, mailbox, outbox, schedules, store
 
 dash.register_page(__name__, path='/inbox', name='받은 메일', title='업무 기록 · 받은 메일')
 
@@ -18,6 +18,31 @@ FILTERS = [('review', '확인 필요'), ('auto', '자동 처리'), ('done', '처
 def _task_options():
     return [{'label': f"#{t['id']} {t['title']}", 'value': t['id']}
             for t in store.list_tasks(status=['예정', '진행중', '보류'])]
+
+
+def _category_modal():
+    cell = {'textAlign': 'left', 'fontSize': '0.85rem', 'fontFamily': 'inherit', 'whiteSpace': 'normal', 'height': 'auto'}
+    return dbc.Modal([
+        dbc.ModalHeader(dbc.ModalTitle([html.I(className='bi bi-tags me-2'), '메일 분류 관리'])),
+        dbc.ModalBody([
+            html.Div('받은 메일을 이 분류로 1차 분류해 같은 분류끼리 모아 봅니다. 설명은 AI 가 분류를 고를 때 참고하니 어떤 메일이 '
+                     '들어오는지 구체적으로 적어 주세요 (보내는 곳·제목 말머리 등). 표 순서가 화면의 분류 순서입니다. '
+                     '분류를 지우면 그 메일은 다시 분류됩니다.', className='small text-muted mb-2'),
+            dash_table.DataTable(id='ib-cat-table', editable=True, row_deletable=True, data=[],
+                                 columns=[{'name': '분류', 'id': 'name'}, {'name': '설명 (AI 가 참고)', 'id': 'description'}],
+                                 style_cell=cell, style_cell_conditional=[{'if': {'column_id': 'name'}, 'width': '26%',
+                                                                           'fontWeight': 600}]),
+            html.Div([
+                dbc.Button([html.I(className='bi bi-plus-lg me-1'), '분류 추가'], id='ib-cat-add', size='sm',
+                           color='secondary', outline=True, className='me-2'),
+                dbc.Button([html.I(className='bi bi-arrow-repeat me-1'), '저장하고 AI 분류 다시'], id='ib-cat-redo',
+                           size='sm', color='secondary', outline=True, className='me-auto',
+                           title='사람이 고른 분류는 그대로 두고, AI·종류로 정한 분류를 비워 다시 분류합니다 (쉬는 시간에 차례로)'),
+                dbc.Button('저장', id='ib-cat-save', size='sm', color='primary'),
+            ], className='d-flex align-items-center mt-2'),
+            dbc.Alert(id='ib-cat-msg', is_open=False, className='small py-2 mt-2 mb-0'),
+        ]),
+    ], id='ib-cat-modal', is_open=False, size='lg')
 
 
 def layout(mail=None, **_):
@@ -43,6 +68,16 @@ def layout(mail=None, **_):
             dbc.Button([html.I(className='bi bi-funnel me-1'), '분류 규칙'], id='ib-rules-open', size='sm',
                        color='secondary', outline=True),
         ], className='d-flex align-items-center flex-wrap gap-1 mb-3'),
+        html.Div([
+            html.Span([html.I(className='bi bi-tags me-1'), '분류'], className='small text-muted me-2'),
+            dbc.RadioItems(id='ib-cat', value='all', inline=True, className='d-flex flex-wrap',
+                           inputClassName='btn-check', labelClassName='btn btn-sm btn-outline-primary me-1 mb-1',
+                           labelCheckedClassName='active', options=[], persistence=True, persistence_type='local'),
+            dbc.Button(id='ib-cat-run', size='sm', color='link', className='ms-1 p-0 small', style={'display': 'none'}),
+            dbc.Button([html.I(className='bi bi-gear me-1'), '분류 관리'], id='ib-cat-open', size='sm', color='link',
+                       className='ms-auto p-0 small text-muted text-decoration-none'),
+        ], className='d-flex align-items-center flex-wrap mb-2'),
+        _category_modal(),
         dcc.Loading(dbc.Alert(id='ib-msg', is_open=False, dismissable=True, className='py-2 small'), type='dot'),
         dbc.Row([
             dbc.Col(html.Div(id='ib-list'), lg=5),
@@ -225,7 +260,9 @@ def layout(mail=None, **_):
             dbc.ModalHeader(dbc.ModalTitle('메일 분류 규칙')),
             dbc.ModalBody([
                 html.Div('위에서부터 처음 맞는 규칙을 씁니다 (글자 포함, 대소문자 무시). "자동"이면 확인 없이 바로 반영하고, '
-                         '아니면 받은 메일에 추천으로 남깁니다. 맞는 규칙이 없으면 AI 가 추천합니다.',
+                         '아니면 받은 메일에 추천으로 남깁니다. 맞는 규칙이 없으면 AI 가 추천합니다. '
+                         '분류를 고르면 맞는 메일은 그 분류로 모입니다 (이미 받은 메일에도 — 직접 고른 분류는 그대로). '
+                         '"분류만"은 처리는 AI 에게 맡기고 분류만 정합니다.',
                          className='small text-muted mb-2'),
                 html.Div(id='ib-rule-list'),
                 html.Hr(),
@@ -237,9 +274,10 @@ def layout(mail=None, **_):
                         {'label': f'→ {v}', 'value': k} for k, v in mailbox.ACTIONS.items()]), md=4),
                 ], className='g-2 mb-2'),
                 dbc.Row([
-                    dbc.Col(dcc.Dropdown(id='ib-r-parent', placeholder='업무면: 상위 업무 (선택)'), md=6),
+                    dbc.Col(dbc.Select(id='ib-r-cat', value='', options=[]), md=3),
+                    dbc.Col(dcc.Dropdown(id='ib-r-parent', placeholder='업무면: 상위 업무 (선택)'), md=4),
                     dbc.Col(dbc.Input(id='ib-r-name', placeholder='규칙 이름 (선택)'), md=3),
-                    dbc.Col(dbc.Checkbox(id='ib-r-auto', value=True, label='자동 반영'), md=3,
+                    dbc.Col(dbc.Checkbox(id='ib-r-auto', value=True, label='자동 반영'), md=2,
                             className='d-flex align-items-center'),
                 ], className='g-2 mb-2'),
                 dbc.Button('규칙 추가', id='ib-r-add', color='primary', size='sm'),
@@ -252,11 +290,23 @@ def layout(mail=None, **_):
 # ── 목록 ──────────────────────────────────────────────────────────────
 
 @callback(Output('ib-list', 'children'), Output('ib-filter', 'options'), Output('ib-status', 'children'),
-          Input('ib-filter', 'value'), Input('ib-refresh', 'data'), Input('ib-sel', 'data'))
-def render_list(flt, _, sel):
+          Output('ib-cat', 'options'), Output('ib-cat-run', 'children'), Output('ib-cat-run', 'style'),
+          Input('ib-filter', 'value'), Input('ib-refresh', 'data'), Input('ib-sel', 'data'), Input('ib-cat', 'value'))
+def render_list(flt, _, sel, cat='all'):
     c = mailbox.counts()
     opts = [{'label': f'{label} {c.get(k, 0)}' if k != 'all' else label, 'value': k} for k, label in FILTERS]
-    mails = mailbox.list_mails(None if flt == 'all' else [flt])
+    statuses = None if flt == 'all' else [flt]
+    cats = mail_categories.list_categories()
+    names = {x['id']: x['name'] for x in cats}
+    cc = mail_categories.counts(statuses)
+    cat_opts = [{'label': f"전체 {sum(cc.values())}", 'value': 'all'}] + \
+        [{'label': f"{x['name']} {cc.get(x['id'], 0)}", 'value': str(x['id'])} for x in cats] + \
+        ([{'label': f"미분류 {cc[None]}", 'value': 'none'}] if cc.get(None) else [])
+    if cat not in [o['value'] for o in cat_opts]:
+        cat = 'all'
+    waiting = mail_categories.pending_count()
+    run = (f'미분류 {waiting}통 지금 분류', {}) if waiting else ('', {'display': 'none'})
+    mails = mailbox.list_mails(statuses, category=None if cat == 'all' else (cat if cat == 'none' else int(cat)))
     if mailbox.is_configured():
         lr = mailbox.last_run()
         st = (f"POP3 {mailbox.settings()['user']} · {mailbox.settings()['minutes']}분마다"
@@ -272,11 +322,11 @@ def render_list(flt, _, sel):
               + (f" · 마지막 {last['at']} " + (last.get('filename', '') if last.get('ok') else f"(실패: {last.get('error', '')[:60]})")
                  if last else '')]
     if not mails:
-        return html.Div('메일이 없습니다.', className='small text-muted'), opts, st
-    items = []
-    for m in mails:
+        return html.Div('메일이 없습니다.', className='small text-muted'), opts, st, cat_opts, *run
+
+    def item(m):
         kind = KIND.get(m['kind'])
-        items.append(dbc.ListGroupItem([
+        return dbc.ListGroupItem([
             html.Div([
                 dbc.Badge(mailbox.STATUS.get(m['status'], m['status']), color=STATUS_COLOR.get(m['status'], 'light'),
                           className='me-1'),
@@ -285,8 +335,21 @@ def render_list(flt, _, sel):
             ], className='d-flex align-items-center mb-1'),
             html.Div(m['subject'], className='fw-semibold text-truncate'),
             html.Div(mailbox.sender_name(m['sender']), className='small text-muted text-truncate'),
-        ], id={'type': 'ib-mail', 'id': m['id']}, n_clicks=0, action=True, active=m['id'] == sel, className='py-2'))
-    return dbc.ListGroup(items), opts, st
+        ], id={'type': 'ib-mail', 'id': m['id']}, n_clicks=0, action=True, active=m['id'] == sel, className='py-2')
+
+    if cat != 'all':
+        return dbc.ListGroup([item(m) for m in mails]), opts, st, cat_opts, *run
+    groups: dict = {}  # 전체 — 분류별로 모아서 (분류 순서대로, 미분류는 끝에)
+    for m in mails:
+        groups.setdefault(m['category_id'] if m['category_id'] in names else None, []).append(m)
+    order = [x['id'] for x in cats if x['id'] in groups] + ([None] if None in groups else [])
+    view = [html.Details([
+        html.Summary([html.Span(names.get(k, '미분류'), className='fw-semibold me-2'),
+                      dbc.Badge(len(groups[k]), color='light', text_color='dark', className='border')],
+                     className='small mb-1'),
+        dbc.ListGroup([item(m) for m in groups[k]], className='mb-2'),
+    ], open=True) for k in order]
+    return html.Div(view), opts, st, cat_opts, *run
 
 
 @callback(Output('ib-sel', 'data'), Input({'type': 'ib-mail', 'id': ALL}, 'n_clicks'), prevent_initial_call=True)
@@ -322,6 +385,14 @@ def render_detail(sel, _):
                   dbc.Badge(kind[0], color=kind[1], className='me-2') if kind else None,
                   html.Span(m['reason'], className='small')]),
         html.Div(['연결된 업무: ', *links], className='small mt-1') if links else None,
+        html.Div([
+            html.Span([html.I(className='bi bi-tags me-1'), '분류'], className='small text-muted me-2'),
+            dbc.Select(id={'type': 'ib-cat-sel', 'id': m['id']}, size='sm', style={'width': '160px'},
+                       value=str(m['category_id']) if m['category_id'] else '',
+                       options=[{'label': '미분류', 'value': ''}] + [{'label': c['name'], 'value': str(c['id'])}
+                                                                    for c in mail_categories.list_categories()]),
+            html.Span(mail_categories.SOURCES.get(m['category_source'], ''), className='small text-muted ms-2'),
+        ], className='d-flex align-items-center mt-2'),
         html.Div('이 메일로 이미 등록한 업무는 그대로 두고 새 제목의 업무만 추가합니다. 기존 업무 수정은 업무 화면에서 합니다.',
                  className='small text-muted mt-1') if links and open_ else None,
         html.Div(f"처리: {m['handled_by']} {m['handled_at']}", className='small text-muted mt-1')
@@ -494,6 +565,67 @@ def link_actions(_l, _ld, _m, _u, sel, task_id, title, parent, due, n):
 # 일정 표 고치기 (일정 추가·✎ 편집 칸·고치면 다시 대조하고 저장) — components/sched_edit.py
 sched_edit.register('ib-sched', (State('ib-sel', 'data'),
                                  lambda sel: (mailbox.get_mail(sel) or {}).get('schedule_import_id')))
+
+
+# ── 메일 1차 분류 (services/mail_categories.py) ─────────────────────────
+
+@callback(Output('ib-refresh', 'data', allow_duplicate=True), Input({'type': 'ib-cat-sel', 'id': ALL}, 'value'),
+          State('ib-refresh', 'data'), prevent_initial_call=True)
+def change_category(_, n):
+    """메일 하나의 분류를 직접 고른다 (화면이 다시 그려지며 같은 값이 들어올 때는 그대로)."""
+    trig = ctx.triggered_id
+    if not isinstance(trig, dict) or not ctx.triggered:
+        return no_update
+    value = ctx.triggered[0]['value']
+    m = mailbox.get_mail(trig['id'])
+    if m is None or str(m['category_id'] or '') == (value or ''):
+        return no_update
+    mail_categories.set_category(m['id'], int(value) if value else None, 'manual')
+    return (n or 0) + 1
+
+
+@callback(Output('ib-refresh', 'data', allow_duplicate=True), Output('ib-msg', 'children', allow_duplicate=True),
+          Output('ib-msg', 'is_open', allow_duplicate=True), Output('ib-msg', 'color', allow_duplicate=True),
+          Input('ib-cat-run', 'n_clicks'), State('ib-refresh', 'data'), prevent_initial_call=True)
+def run_categorize(n_clicks, n):
+    """미분류 메일을 지금 분류 (몇 번에 나눠 — 나머지는 쉬는 시간에)."""
+    if not n_clicks:
+        return no_update, no_update, no_update, no_update
+    done = 0
+    try:
+        for _ in range(4):
+            ids = mail_categories.pending()
+            if not ids:
+                break
+            done += mail_categories.categorize(ids)
+    except llm.LLMError as e:
+        return (n or 0) + 1, f'분류하다 멈췄습니다 ({done}통 분류) — {e}', True, 'warning'
+    left = mail_categories.pending_count()
+    return (n or 0) + 1, f'{done}통을 분류했습니다' + (f' — 남은 {left}통은 쉬는 시간에 이어서 분류합니다.' if left else '.'), \
+        True, 'success'
+
+
+@callback(Output('ib-cat-modal', 'is_open'), Output('ib-cat-table', 'data'), Output('ib-cat-msg', 'children'),
+          Output('ib-cat-msg', 'is_open'), Output('ib-cat-msg', 'color'),
+          Output('ib-refresh', 'data', allow_duplicate=True),
+          Input('ib-cat-open', 'n_clicks'), Input('ib-cat-add', 'n_clicks'), Input('ib-cat-save', 'n_clicks'),
+          Input('ib-cat-redo', 'n_clicks'), State('ib-cat-table', 'data'), State('ib-refresh', 'data'),
+          prevent_initial_call=True)
+def manage_categories(_o, _a, _s, _r, rows, n):
+    trig = ctx.triggered_id
+    nu = no_update
+    if trig == 'ib-cat-open':
+        return True, mail_categories.list_categories(), '', False, nu, nu
+    if trig == 'ib-cat-add':
+        return nu, (rows or []) + [{'id': None, 'name': '', 'description': ''}], nu, nu, nu, nu
+    try:
+        r = mail_categories.save_all(rows or [])
+    except ValueError as e:
+        return nu, nu, str(e), True, 'danger', nu
+    msg = f"분류 {r['saved']}개를 저장했습니다" + (f", {r['deleted']}개를 지웠습니다" if r['deleted'] else '') + '.'
+    if trig == 'ib-cat-redo':
+        msg += f" AI·종류로 정한 분류 {mail_categories.reset_auto()}통을 비웠습니다 — 쉬는 시간에(또는 '지금 분류'로) 다시 분류합니다."
+    return nu, mail_categories.list_categories(), msg, True, 'success', (n or 0) + 1
 
 
 # ── 임원 부재 ─────────────────────────────────────────────────────────
@@ -709,13 +841,17 @@ def _rules_view():
     if not rules:
         return html.Div('규칙이 없습니다. 예: 보낸 사람에 "비서실" → 원장님 일정(자동), 제목에 "피플팀장" → 피플팀장 일정.', className='small text-muted')
     titles = {t['value']: t['label'] for t in _task_options()}
+    cats = {c['id']: c['name'] for c in mail_categories.list_categories()}
     return dbc.Table(html.Tbody([html.Tr([
         html.Td(r['name']),
         html.Td(f"{mailbox.FIELDS[r['field']]}에 '{r['pattern']}'", className='small'),
         html.Td([f"→ {mailbox.ACTIONS[r['action']]}",
                  html.Div(titles.get(r['parent_task_id'], ''), className='small text-muted')
                  if r['parent_task_id'] else None]),
-        html.Td(dbc.Badge('자동' if r['auto'] else '추천', color='success' if r['auto'] else 'warning')),
+        html.Td(dbc.Badge([html.I(className='bi bi-tags me-1'), cats[r['category_id']]], color='light',
+                          text_color='dark', className='border') if r['category_id'] in cats else None),
+        html.Td(dbc.Badge('자동' if r['auto'] else '추천', color='success' if r['auto'] else 'warning')
+                if r['action'] != 'classify' else None),
         html.Td(dbc.Button(html.I(className='bi bi-trash'), id={'type': 'ib-r-del', 'id': r['id']}, size='sm',
                            color='secondary', outline=True), className='text-end'),
     ]) for r in rules]), size='sm', className='align-middle small')
@@ -724,17 +860,22 @@ def _rules_view():
 @callback(Output('ib-rules-modal', 'is_open'), Output('ib-rule-list', 'children'), Output('ib-r-parent', 'options'),
           Output('ib-r-error', 'children'), Output('ib-r-error', 'is_open'), Output('ib-r-pattern', 'value'),
           Output('ib-r-field', 'value'), Output('ib-r-action', 'value'),
+          Output('ib-r-cat', 'options'), Output('ib-r-cat', 'value'),
+          Output('ib-refresh', 'data', allow_duplicate=True),
           Input('ib-rules-open', 'n_clicks'), Input('ib-mkrule', 'n_clicks'), Input('ib-r-add', 'n_clicks'),
           Input({'type': 'ib-r-del', 'id': ALL}, 'n_clicks'),
           State('ib-sel', 'data'), State('ib-r-field', 'value'), State('ib-r-pattern', 'value'),
           State('ib-r-action', 'value'), State('ib-r-auto', 'value'), State('ib-r-parent', 'value'),
-          State('ib-r-name', 'value'), prevent_initial_call=True)
-def rules(_o, _m, _a, _d, sel, field, pattern, action, auto, parent, name):
+          State('ib-r-name', 'value'), State('ib-r-cat', 'value'), State('ib-refresh', 'data'),
+          prevent_initial_call=True)
+def rules(_o, _m, _a, _d, sel, field, pattern, action, auto, parent, name, cat, n):
     nu = no_update
     trig = ctx.triggered_id
     if trig is None or not ctx.triggered[0]['value']:
-        return (nu,) * 8
-    pat_out, field_out, action_out = nu, nu, nu
+        return (nu,) * 11
+    pat_out, field_out, action_out, cat_out, refresh = nu, nu, nu, nu, nu
+    cat_opts = [{'label': '분류 지정 안 함', 'value': ''}] + [
+        {'label': f"분류: {c['name']}", 'value': str(c['id'])} for c in mail_categories.list_categories()]
     if trig == 'ib-mkrule' and sel:
         m = mailbox.get_mail(sel)
         from email.utils import parseaddr
@@ -743,16 +884,22 @@ def rules(_o, _m, _a, _d, sel, field, pattern, action, auto, parent, name):
         action_out = ('task' if m['kind'] == 'task' else 'ignore' if m['kind'] == 'ignore' else
                       'absence' if m['kind'] == 'absence' else
                       'schedule_people' if imp and imp['owner'] == 'people' else 'schedule')
+        cat_out = str(m['category_id']) if m['category_id'] else ''
     elif trig == 'ib-r-add':
         try:
             mailbox.save_rule({'field': field, 'pattern': pattern, 'action': action, 'auto': auto,
-                               'parent_task_id': parent, 'name': name})
+                               'parent_task_id': parent, 'name': name, 'category_id': cat})
         except ValueError as e:
-            return True, nu, nu, str(e), True, nu, nu, nu
+            return True, nu, nu, str(e), True, nu, nu, nu, cat_opts, nu, nu
         pat_out = ''
+        if cat:  # 이미 받은 메일에도
+            mail_categories.apply_rules()
+            refresh = (n or 0) + 1
     elif isinstance(trig, dict):
         mailbox.delete_rule(trig['id'])
-    return True, _rules_view(), _task_options(), '', False, pat_out, field_out, action_out
+    elif trig == 'ib-rules-open':
+        cat_out = ''
+    return True, _rules_view(), _task_options(), '', False, pat_out, field_out, action_out, cat_opts, cat_out, refresh
 
 
 @callback(Output('mail-draft', 'data', allow_duplicate=True), Input('ib-reply', 'n_clicks'), State('ib-sel', 'data'),

@@ -27,6 +27,9 @@ BATCH = 500
 DEFERRED = {'tasks': ['parent_id', 'source_history_id']}
 
 
+SEEDED = ('mail_categories',)  # make_engine 이 빈 DB 에 넣는 기본값 표
+
+
 class MigrateError(RuntimeError):
     pass
 
@@ -45,6 +48,9 @@ def migrate(source_url: str, target_url: str) -> dict[str, int]:
     src = db.make_engine(source_url)
     dst = db.make_engine(target_url)
     try:
+        with dst.begin() as d:  # 새 DB 를 만들 때 자동으로 넣은 기본값(메일 분류)은 원본 것으로 바꾼다
+            for name in SEEDED:
+                d.execute(db.Base.metadata.tables[name].delete())
         filled = {k: n for k, n in _counts(dst).items() if n}
         if filled:
             raise MigrateError('대상 DB 에 이미 기록이 있어 멈춥니다: '
