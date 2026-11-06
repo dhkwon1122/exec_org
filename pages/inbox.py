@@ -2,10 +2,11 @@
 추천 항목(업무 후보·일정(원장님·피플팀장)·임원 부재·임원 정보 변경)은 항목마다 따로 처리하고, 다 봤으면 '처리 완료'."""
 import dash
 import dash_bootstrap_components as dbc
-from dash import ALL, Input, Output, State, callback, ctx, dash_table, dcc, html, no_update
+from dash import ALL, Input, Output, State, callback, clientside_callback, ctx, dash_table, dcc, html, no_update
 
 from components import absence_ui, doc_ui, sched_edit, ui
-from services import absences, auth, doc_versions, doc_worker, llm, mail_categories, mailbox, outbox, schedules, store
+from services import (absences, auth, db, doc_versions, doc_worker, llm, mail_categories, mail_threads, mailbox,
+                      outbox, schedules, store)
 
 dash.register_page(__name__, path='/inbox', name='받은 메일', title='업무 기록 · 받은 메일')
 
@@ -95,8 +96,11 @@ def layout(mail=None, **_):
                            inputClassName='btn-check', labelClassName='btn btn-sm btn-outline-primary me-1 mb-1',
                            labelCheckedClassName='active', options=[], persistence=True, persistence_type='local'),
             dbc.Button(id='ib-cat-run', size='sm', color='link', className='ms-1 p-0 small', style={'display': 'none'}),
+            html.Span(dbc.Switch(id='ib-thread-view', value=True, label='스레드로 묶기', persistence=True,
+                                 persistence_type='local', className='small mb-0'),
+                      title='RE:/FW: 로 이어진 메일을 한 줄로 모아 봅니다', className='ms-auto me-3'),
             dbc.Button([html.I(className='bi bi-gear me-1'), '분류 관리'], id='ib-cat-open', size='sm', color='link',
-                       className='ms-auto p-0 small text-muted text-decoration-none'),
+                       className='p-0 small text-muted text-decoration-none'),
         ], className='d-flex align-items-center flex-wrap mb-2'),
         _category_modal(),
         dcc.Loading(dbc.Alert(id='ib-msg', is_open=False, dismissable=True, className='py-2 small'), type='dot'),
@@ -113,10 +117,14 @@ def layout(mail=None, **_):
                     dbc.Button('분류 바꾸기', id='ib-bulk-cat-go', size='sm', color='secondary', outline=True,
                                disabled=True),
                 ], className='d-flex align-items-center flex-wrap gap-1 mb-2 inbox-bulk'),
+                dcc.Store(id='ib-limit', data=PAGE),
                 dcc.Loading(html.Div(id='ib-list'), type='dot', delay_show=400),
+                dbc.Button(id='ib-more', size='sm', color='secondary', outline=True, className='w-100 mt-1',
+                           style={'display': 'none'}),
             ], lg=5),
             dbc.Col(html.Div([
                 html.Div(id='ib-head'),
+                html.Div(id='ib-thread'),
                 html.Div(id='ib-ai-box', style={'display': 'none'}, children=[
                     dbc.Card(dbc.CardBody([
                         html.Div([html.I(className='bi bi-stars me-1 text-warning'), 'AI 에게 맡기기'],
@@ -323,12 +331,34 @@ def layout(mail=None, **_):
 
 # ── 목록 ──────────────────────────────────────────────────────────────
 
+PAGE = 50  # 목록은 한 번에 이만큼 — 많이 그리면 화면(Dash)이 느려진다. 나머지는 '더 보기'
+
+
+@callback(Output('ib-limit', 'data'), Input('ib-filter', 'value'), Input('ib-cat', 'value'),
+          Input('ib-more', 'n_clicks'), State('ib-limit', 'data'), prevent_initial_call=True)
+def page_limit(_f, _c, _m, limit):
+    return (limit or PAGE) + PAGE if ctx.triggered_id == 'ib-more' else PAGE
+
+
+# 메일을 고르면 목록은 다시 그리지 않고 강조 표시만 브라우저에서 옮긴다
+clientside_callback(
+    """function(sel, ids) { return ids.map(function(i) { return i.id === sel; }); }""",
+    Output({'type': 'ib-mail', 'id': ALL}, 'active'), Input('ib-sel', 'data'), State({'type': 'ib-mail', 'id': ALL}, 'id'))
+
+
 @callback(Output('ib-list', 'children'), Output('ib-filter', 'options'), Output('ib-status', 'children'),
           Output('ib-cat', 'options'), Output('ib-cat-run', 'children'), Output('ib-cat-run', 'style'),
-          Input('ib-filter', 'value'), Input('ib-refresh', 'data'), Input('ib-sel', 'data'), Input('ib-cat', 'value'),
+          Output('ib-more', 'children'), Output('ib-more', 'style'),
+          Input('ib-filter', 'value'), Input('ib-refresh', 'data'), Input('ib-cat', 'value'),
+          Input('ib-thread-view', 'value'), Input('ib-limit', 'data'), State('ib-sel', 'data'),
           State('ib-checked', 'data'))
-def render_list(flt, _, sel, cat='all', checked=None):
+def render_list(flt, _, cat='all', threaded=True, limit=PAGE, sel=None, checked=None):
     checked = set(checked or [])
+    if threaded:
+        try:  # 이전 버전에서 받은 메일도 스레드로 — 다른 화면 갱신이 하고 있으면 기다리지 않는다
+            mail_threads.ensure_all(wait=False)
+        except Exception:  # noqa: BLE001 — 스레드 없이도 목록은 보여 준다
+            pass
     c = mailbox.counts()
     opts = [{'label': f'{label} {c.get(k, 0)}' if k != 'all' else label, 'value': k} for k, label in FILTERS]
     statuses = None if flt == 'all' else [flt]
@@ -342,7 +372,11 @@ def render_list(flt, _, sel, cat='all', checked=None):
         cat = 'all'
     waiting = mail_categories.pending_count()
     run = (f'미분류 {waiting}통 지금 분류', {}) if waiting else ('', {'display': 'none'})
-    mails = mailbox.list_mails(statuses, category=None if cat == 'all' else (cat if cat == 'none' else int(cat)))
+    limit = limit or PAGE
+    mails = mailbox.list_mails(statuses, limit=limit + 1,
+                               category=None if cat == 'all' else (cat if cat == 'none' else int(cat)))
+    more = ([html.I(className='bi bi-chevron-down me-1'), f'더 보기 ({PAGE}통 더)'], {}) if len(mails) > limit else ('', {'display': 'none'})
+    mails = mails[:limit]
     if mailbox.is_configured():
         lr = mailbox.last_run()
         st = (f"POP3 {mailbox.settings()['user']} · {mailbox.settings()['minutes']}분마다"
@@ -358,15 +392,19 @@ def render_list(flt, _, sel, cat='all', checked=None):
               + (f" · 마지막 {last['at']} " + (last.get('filename', '') if last.get('ok') else f"(실패: {last.get('error', '')[:60]})")
                  if last else '')]
     if not mails:
-        return html.Div('메일이 없습니다.', className='small text-muted'), opts, st, cat_opts, *run
+        return html.Div('메일이 없습니다.', className='small text-muted'), opts, st, cat_opts, *run, *more
 
-    def item(m):
+    sizes = mail_threads.sizes([m['thread_key'] for m in mails]) if threaded else {}
+
+    def item(m, n=0):
         kind = KIND.get(m['kind'])
         row = dbc.ListGroupItem([
             html.Div([
                 dbc.Badge(mailbox.STATUS.get(m['status'], m['status']), color=STATUS_COLOR.get(m['status'], 'light'),
                           className='me-1'),
                 dbc.Badge(kind[0], color=kind[1], className='me-1') if kind else None,
+                html.Span([html.I(className='bi bi-chat-left-text me-1'), n], className='small text-muted me-1',
+                          title=f'같은 스레드의 메일 {n}통') if n > 1 else None,
                 html.Span(m['received_at'] or m['mail_date'], className='small text-muted ms-auto',
                           title=f"받은 시각 {m['received_at']} · 메일 날짜 {m['mail_date']}"),
             ], className='d-flex align-items-center mb-1'),
@@ -379,8 +417,22 @@ def render_list(flt, _, sel, cat='all', checked=None):
                                       className='ms-2 mt-2'), row],
                         className='list-group-item p-0 d-flex align-items-start inbox-row')
 
+    def items(ms):
+        if not threaded:
+            return [item(m) for m in ms]
+        out = []
+        for g in mail_threads.group(ms):  # 스레드의 가장 최근 메일 한 줄 + 나머지는 펼쳐 보기
+            out.append(item(g[0], sizes.get(g[0]['thread_key'], len(g))))
+            if len(g) > 1:
+                open_ = any(m['id'] == sel for m in g[1:])
+                out.append(html.Details([
+                    html.Summary(f'이 스레드의 이전 메일 {len(g) - 1}통', className='small text-muted ps-5 py-1'),
+                    html.Div([item(m) for m in g[1:]], className='inbox-thread'),
+                ], open=open_, className='list-group-item p-0 inbox-thread-more'))
+        return out
+
     if cat != 'all':
-        return dbc.ListGroup([item(m) for m in mails]), opts, st, cat_opts, *run
+        return dbc.ListGroup(items(mails)), opts, st, cat_opts, *run, *more
     groups: dict = {}  # 전체 — 분류별로 모아서 (분류 순서대로, 미분류는 끝에)
     for m in mails:
         groups.setdefault(m['category_id'] if m['category_id'] in names else None, []).append(m)
@@ -389,9 +441,9 @@ def render_list(flt, _, sel, cat='all', checked=None):
         html.Summary([html.Span(names.get(k, '미분류'), className='fw-semibold me-2'),
                       dbc.Badge(len(groups[k]), color='light', text_color='dark', className='border')],
                      className='small mb-1'),
-        dbc.ListGroup([item(m) for m in groups[k]], className='mb-2'),
+        dbc.ListGroup(items(groups[k]), className='mb-2'),
     ], open=True) for k in order]
-    return html.Div(view), opts, st, cat_opts, *run
+    return html.Div(view), opts, st, cat_opts, *run, *more
 
 
 # ── 여러 메일 한 번에 (무시·분류) ──────────────────────────────────────
@@ -444,8 +496,9 @@ def bulk_action(_i, _c, picked, cat, n):
     return (n or 0) + 1, msg, True, 'success' if not failed else 'warning', [], False
 
 
-@callback(Output('ib-sel', 'data'), Input({'type': 'ib-mail', 'id': ALL}, 'n_clicks'), prevent_initial_call=True)
-def pick(_):
+@callback(Output('ib-sel', 'data'), Input({'type': 'ib-mail', 'id': ALL}, 'n_clicks'),
+          Input({'type': 'ib-th', 'id': ALL}, 'n_clicks'), prevent_initial_call=True)
+def pick(_, _th):
     if not isinstance(ctx.triggered_id, dict) or not ctx.triggered[0]['value']:
         return no_update
     return ctx.triggered_id['id']
@@ -587,11 +640,12 @@ def act(_a, _i, _r, _f, sel, n):
 @callback(Output('ib-link-box', 'style'), Output('ib-linked', 'children'), Output('ib-link-task', 'options'),
           Output('ib-link-task', 'value'), Output('ib-new-title', 'value'), Output('ib-new-parent', 'options'),
           Output('ib-new-parent', 'value'), Output('ib-new-due', 'value'), Output('ib-attach', 'children'),
+          Output('ib-thread', 'children'),
           Input('ib-sel', 'data'), Input('ib-refresh', 'data'))
 def render_links(sel, _):
     m = mailbox.get_mail(sel) if sel else None
     if m is None:
-        return {'display': 'none'}, None, [], None, '', [], None, None, None
+        return {'display': 'none'}, None, [], None, '', [], None, None, None, None
     tasks = {t['id']: t for t in store.list_tasks()}
     linked = [tasks[t] for t in m['task_ids'] if t in tasks]
     view = html.Div([
@@ -616,7 +670,53 @@ def render_links(sel, _):
                  className='small text-muted mt-2'),
     ]), className='mt-2') if docs else None
     return ({}, view, opts, None, mailbox.clean_subject(m['subject']), parent_opts,
-            suggested if suggested in tasks else None, None, attach)
+            suggested if suggested in tasks else None, None, attach, _thread_card(m['id'], tasks))
+
+
+def _thread_note(mail_id: int) -> str:
+    with db.SessionLocal() as s:
+        n = len(mail_threads.mail_ids(s, mail_id)) - 1
+        s.commit()
+    return f' (같은 스레드 메일 {n}통도 함께)' if n > 0 else ''
+
+
+def _thread_card(mail_id: int, tasks: dict):
+    """같은 스레드(RE:/FW:)의 메일 — 받은 메일과 이 시스템에서 보낸 회신을 시간 순으로."""
+    th = mail_threads.thread(mail_id)
+    if len(th) < 2:
+        return None
+
+    def row(x):
+        mine = x['dir'] == 'in' and x['id'] == mail_id
+        icon = 'bi-envelope' if x['dir'] == 'in' else 'bi-send'
+        who = mailbox.sender_name(x['who']) if x['dir'] == 'in' else f"보냄 → {x['who'][:40]}"
+        body = [
+            html.Div([html.I(className=f'bi {icon} me-1'), html.Span(who, className='fw-semibold me-2'),
+                      html.Span(x['date'], className='text-muted me-2'),
+                      *[dcc.Link(f'#{t}', href=f'/task/{t}', className='me-1') for t in x['task_ids'] if t in tasks],
+                      html.Span(mailbox.STATUS.get(x['status'], x['status']) if x['dir'] == 'in' else
+                                ('보냄' if x['status'] == 'sent' else '실패'), className='text-muted ms-auto')],
+                     className='d-flex align-items-center'),
+            html.Div(x['subject'], className='text-truncate'),
+            html.Div(x['snippet'], className='text-muted text-truncate'),
+        ]
+        cls = 'small py-1 px-2 border-start border-3 mb-1 ' + ('border-primary bg-body-tertiary' if mine else
+                                                               'border-secondary' if x['dir'] == 'in' else
+                                                               'border-success ms-4')
+        if x['dir'] == 'in' and not mine:  # 누르면 그 메일로 (pick)
+            return html.Div(body, id={'type': 'ib-th', 'id': x['id']}, n_clicks=0, className=cls + ' inbox-thread-row',
+                            role='button')
+        return html.Div(body, className=cls)
+
+    n_in = sum(x['dir'] == 'in' for x in th)
+    return dbc.Card(dbc.CardBody([
+        html.Div([html.I(className='bi bi-chat-left-text me-1'), f'메일 스레드 {len(th)}통',
+                  html.Span(f' (받은 {n_in} · 보낸 {len(th) - n_in})' if len(th) > n_in else '',
+                            className='text-muted fw-normal')], className='fw-semibold small mb-2'),
+        html.Div([row(x) for x in th], style={'maxHeight': '320px', 'overflowY': 'auto'}),
+        html.Div('업무에 연결하면 이 스레드의 메일이 모두 함께 연결되고, 나중에 오는 답장·전달도 자동으로 연결됩니다.',
+                 className='small text-muted mt-1'),
+    ]), className='mt-2')
 
 
 @callback(Output('ib-refresh', 'data', allow_duplicate=True), Output('ib-msg', 'children', allow_duplicate=True),
@@ -633,8 +733,9 @@ def link_actions(_l, _ld, _m, _u, sel, task_id, title, parent, due, n):
     by = auth.current_name()
     try:
         if isinstance(trig, dict):
-            mailbox.unlink_task(sel, trig['id'])
-            return (n or 0) + 1, f"#{trig['id']} 업무와 연결을 끊었습니다 (업무와 기록은 그대로).", True, 'secondary'
+            cnt = mailbox.unlink_task(sel, trig['id'])
+            return ((n or 0) + 1, f"#{trig['id']} 업무와 연결을 끊었습니다" + (f' (같은 스레드 메일 {cnt}통)' if cnt > 1 else '')
+                    + ' — 업무와 기록은 그대로.', True, 'secondary')
         if trig in ('ib-link', 'ib-link-done'):
             if not task_id:
                 return no_update, '연결할 업무를 고르세요.', True, 'warning'
@@ -643,12 +744,13 @@ def link_actions(_l, _ld, _m, _u, sel, task_id, title, parent, due, n):
                 mailbox.complete(sel, by)
                 return ((n or 0) + 1, ['업무에 연결하고 처리 완료했습니다. ',
                                        dcc.Link('업무 열기', href=f'/task/{task_id}')], True, 'success')
-            return ((n or 0) + 1, ['연결했습니다 — 메일 원문을 업무 기록으로 남겼습니다. ',
+            return ((n or 0) + 1, ['연결했습니다 — 메일 원문을 업무 기록으로 남겼습니다'
+                                   + _thread_note(sel) + '. ',
                                    dcc.Link('업무 열기', href=f'/task/{task_id}')] if done else '이미 연결된 업무입니다.',
                     True, 'success' if done else 'info')
         if trig == 'ib-new-make':
             tid = mailbox.create_task_from_mail(sel, title or '', int(parent) if parent else None, by, due or '')
-            return (n or 0) + 1, ['업무를 만들었습니다. ', dcc.Link(f'#{tid} 열기', href=f'/task/{tid}')], True, 'success'
+            return (n or 0) + 1, ['업무를 만들었습니다' + _thread_note(sel) + '. ', dcc.Link(f'#{tid} 열기', href=f'/task/{tid}')], True, 'success'
     except ValueError as e:
         return no_update, str(e), True, 'danger'
     return no_update, no_update, no_update, no_update
