@@ -25,6 +25,11 @@ def _file_link(f: dict):
                   href=f"/mail-files/{f['id']}", className='text-break')
 
 
+def ui_sections(sections):
+    from components.ui import sections_view
+    return sections_view(sections or [])
+
+
 def insight_view(ins: dict):
     """요약 블록 — 문서 종류·태그·요약·앞 판과 달라진 점·주요 날짜. 요약 전이면 못 읽은 이유만."""
     from components.ui import search_href
@@ -38,6 +43,7 @@ def insight_view(ins: dict):
               for t in ins['tags']],
         ], className='mb-1') if ins['doc_type'] or ins['tags'] else None,
         html.Div(ins['summary'], style={'whiteSpace': 'pre-wrap'}),
+        ui_sections(ins.get('sections')),
         html.Div([html.I(className='bi bi-arrow-left-right me-1'), html.B('앞 판과 달라진 점 '), ins['changes']],
                  className='mt-1 doc-changes') if ins['changes'] else None,
         html.Ul([html.Li([html.Span(d['date'], className='fw-semibold me-1'), d['what']]) for d in ins['key_dates']],

@@ -95,7 +95,13 @@ def _history_dict(h: HistoryEntry) -> dict:
         'ai_status': h.ai_status or '', 'ai_error': h.ai_error or '', 'ai_todos': _load_json_list(h.ai_todos),
         'ai_token': h.ai_token or '',
         'ai_reference_date': h.ai_reference_date or '',
+        'sections': _sections(h.sections),
     }
+
+
+def _sections(raw: str) -> list[dict]:
+    from services import summary_formats
+    return summary_formats.loads(raw)
 
 
 def _load_json_list(v: str) -> list:
@@ -589,7 +595,8 @@ def begin_history_ai(entry_id: int, status: str = 'pending') -> str | None:
 
 def set_history_ai(entry_id: int, status: str, title: str | None = None, summary: str | None = None,
                    keywords: list[str] | None = None, error: str = '', todos: list[dict] | None = None,
-                   *, token: str | None = None, reference_date: str | None = None) -> None:
+                   *, token: str | None = None, reference_date: str | None = None,
+                   sections: list[dict] | None = None) -> None:
     """AI 정리 상태/결과 저장. None 인 필드는 기존 값을 유지한다(재생성 중에도 이전 결과가 보이도록)."""
     with db.transaction() as s:
         values = {'ai_status': status, 'ai_error': error or ''}
@@ -601,6 +608,8 @@ def set_history_ai(entry_id: int, status: str, title: str | None = None, summary
             values['keywords'] = _join_keywords(keywords)
         if todos is not None:
             values['ai_todos'] = json.dumps(todos, ensure_ascii=False)
+        if sections is not None:  # 요약 형식의 칸 (services/summary_formats.py)
+            values['sections'] = json.dumps(sections, ensure_ascii=False)
         if reference_date is not None:
             values['ai_reference_date'] = reference_date
         stmt = update(HistoryEntry).where(HistoryEntry.id == entry_id)

@@ -46,8 +46,10 @@ def test_analyze_record_parses_thinking_and_codefence(monkeypatch):
                    'keywords': ['예산', '장비', '감액', '비용 절감'],
                    'todos': [{'title': '예산안 수정', 'due': '2026-10-24', 'assignee': '권대현'},
                              {'title': 'B사 견적 요청', 'due': '', 'assignee': ''},
-                             {'title': '회의록 공유', 'due': '', 'assignee': ''}]}
+                             {'title': '회의록 공유', 'due': '', 'assignee': ''}],
+                   'sections': []}  # '피드백' 기본 형식의 칸을 AI 가 안 채웠으면 빈 목록
     prompt = calls[0]['messages'][1]['content']
+    assert "기록 유형('피드백')은 정해진 형식" in prompt and '지적·요청' in prompt
     assert '장비 도입' in prompt and '기록 기준일:' in prompt
 
 

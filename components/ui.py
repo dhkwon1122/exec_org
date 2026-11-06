@@ -38,6 +38,15 @@ def score_badge(score: float):
                      title='의미 검색 유사도 (검색어 글자가 그대로 들어 있지 않아도 뜻이 가까운 것)')
 
 
+def sections_view(sections: list[dict]):
+    """요약 형식대로 채운 칸 [{name, text}] — 칸 이름과 내용 (services/summary_formats.py)."""
+    if not sections:
+        return None
+    return html.Div([html.Div([html.Div(x['name'], className='summary-sec-name'),
+                               html.Div(x['text'], className='summary-sec-text')], className='summary-sec')
+                     for x in sections], className='summary-sections small mt-1')
+
+
 def page_head(title: str, sub=None):
     """화면 맨 위 큰 제목 (assets/style.css 의 .page-head)."""
     return html.Div([html.H3(title), html.Span(sub, className='page-sub') if sub else None], className='page-head')
@@ -240,6 +249,8 @@ def history_card(h: dict, terms: list[str] | None = None, show_task: bool = Fals
         body.append(html.Div(highlight(h['title'], terms), className='fw-semibold'))
     if h['summary']:
         body.append(html.Div(highlight(h['summary'], terms, True), className='small'))
+    if h.get('sections'):  # 기록 유형별 요약 형식의 칸
+        body.append(sections_view(h['sections']))
     if h['keywords']:
         body.append(keyword_chips(h['keywords'], terms))
     if h['ai_todos']:

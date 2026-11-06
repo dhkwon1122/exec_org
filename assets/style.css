@@ -367,3 +367,10 @@ body {
 /* '검색·자료' 화면 위 탭 (components/ui.py find_tabs) */
 .find-tabs .nav-link { padding: 4px 12px; font-size: .9rem; color: #3f4450; }
 .find-tabs .nav-link.active { background: var(--app-accent); color: #fff; }
+
+/* ── 요약 형식의 칸 (components/ui.py sections_view) ── */
+.summary-sections { display: grid; grid-template-columns: max-content 1fr; gap: 2px 10px;
+                    border-left: 2px solid var(--app-border); padding-left: 8px; }
+.summary-sec { display: contents; }
+.summary-sec-name { color: var(--bs-secondary-color); font-weight: 600; white-space: nowrap; }
+.summary-sec-text { white-space: pre-wrap; }
