@@ -9,16 +9,7 @@ from sqlalchemy import func, or_, select, update
 from services import db, llm
 from services.db import InboundMail, MailCategory
 
-DEFAULTS = [
-    ('일정', '원장님·피플팀장 일정, 회의·행사 일시 안내·변경'),
-    ('업무 요청', '자료 제출·검토·회신·보고 요청 등 해야 할 일이 있는 메일'),
-    ('임원 동향', '임원의 휴가·출장·부재, 인사·근황 소식'),
-    ('보고·자료', '보고서·회의자료·문서를 보내 주는 메일 (참고용)'),
-    ('공지·안내', '전사 공지, 제도·시스템 안내, 행사 홍보, 뉴스레터'),
-    ('기타', '어느 분류에도 맞지 않는 메일'),
-]
-# LLM 이 없을 때 — 처리 종류 → 같은 뜻의 분류 이름
-KIND_TO_NAME = {'schedule': '일정', 'both': '업무 요청', 'task': '업무 요청', 'absence': '임원 동향', 'ignore': '공지·안내'}
+from services.mail_category_defaults import CATEGORY_ACTIONS, DEFAULTS  # noqa: E402,F401 — 여기서도 쓴다
 BATCH = 12  # AI 에게 한 번에 맡길 메일 수
 SOURCES = {'ai': 'AI 분류', 'kind': '처리 종류로', 'manual': '직접 고름', 'rule': '규칙'}
 
@@ -27,10 +18,23 @@ SYSTEM = """너는 임원조직 담당자의 받은 메일을 분류하는 비�
 반드시 JSON 만 출력: {"items": [{"id": 메일번호, "category": "분류 이름"}]}"""
 
 
+ONE_SYSTEM = """너는 임원조직 담당자의 받은 메일을 분류하는 비서다. 메일을 읽고 아래 분류 중 가장 맞는 하나를 고른다.
+분류 이름은 목록에 있는 그대로 쓴다. 원장님·피플팀장 본인의 일정과 임원들의 부재(휴가·출장 등)를 헷갈리지 않는다.
+맞는 것이 없으면 '기타'가 있으면 '기타'.
+반드시 JSON 만 출력: {"category": "분류 이름", "reason": "한 줄 근거"}"""
+
+
 def list_categories() -> list[dict]:
     with db.SessionLocal() as s:
-        return [{'id': c.id, 'name': c.name, 'description': c.description or '', 'sort': c.sort or 0}
+        return [{'id': c.id, 'name': c.name, 'description': c.description or '', 'action': c.action or '',
+                 'sort': c.sort or 0}
                 for c in s.scalars(select(MailCategory).order_by(MailCategory.sort, MailCategory.id))]
+
+
+def get_category(category_id: int | None) -> dict | None:
+    return next((c for c in list_categories() if c['id'] == category_id), None) if category_id else None
+
+
 
 
 def save_all(rows: list[dict]) -> dict:
@@ -46,7 +50,9 @@ def save_all(rows: list[dict]) -> dict:
         if name.lower() in seen:
             raise ValueError(f"'{name}' 분류가 두 번 있습니다.")
         seen.add(name.lower())
-        items.append({'id': r.get('id'), 'name': name, 'description': desc})
+        action = r.get('action') or ''
+        items.append({'id': r.get('id'), 'name': name, 'description': desc,
+                      'action': action if action in CATEGORY_ACTIONS else ''})
     with db.SessionLocal() as s:
         have = {c.id: c for c in s.scalars(select(MailCategory))}
         keep = {it['id'] for it in items if it['id'] in have}
@@ -62,7 +68,7 @@ def save_all(rows: list[dict]) -> dict:
         s.flush()
         for i, it in enumerate(items):
             c = have.get(it['id']) if it['id'] in keep else MailCategory()
-            c.name, c.description, c.sort = it['name'], it['description'], i
+            c.name, c.description, c.action, c.sort = it['name'], it['description'], it['action'], i
             s.add(c)
         s.commit()
     return {'saved': len(items), 'deleted': len(gone)}
@@ -102,6 +108,35 @@ def pending(limit: int = BATCH) -> list[int]:
 def pending_count() -> int:
     with db.SessionLocal() as s:
         return s.scalar(select(func.count()).select_from(InboundMail).where(*_uncategorized())) or 0
+
+
+def _by_kind(cats: list[dict], m) -> int | None:
+    """이미 처리한 메일의 종류(일정·부재·업무, 일정이면 누구 일정인지) → 같은 처리의 분류."""
+    action = {'task': 'task', 'both': 'task', 'absence': 'absence'}.get(m.kind or '')
+    if m.kind in ('schedule', 'both') and m.schedule_import_id:
+        from services import schedules
+        imp = schedules.get_import(m.schedule_import_id)
+        action = 'schedule_people' if imp and imp['owner'] == 'people' else 'schedule'
+    return next((c['id'] for c in cats if action and c['action'] == action), None)
+
+
+def classify_one(subject: str, sender: str, body: str) -> tuple[dict | None, str]:
+    """메일 한 통의 1차 분류 — 분류를 정한 규칙, 아니면 AI. (분류, 근거). 정하지 못하면 (None, '').
+    AI 오류는 그대로 올린다."""
+    from services import mailbox
+    cats = list_categories()
+    if not cats:
+        return None, ''
+    cid = mailbox.rule_category(subject, sender, body)
+    if cid:
+        return get_category(cid), '규칙'
+    if not llm.is_configured():
+        return None, ''
+    listing = '\n'.join(f"- {c['name']}: {c['description']}" for c in cats)
+    data = llm._extract_json(llm.chat(ONE_SYSTEM, f'분류 목록:\n{listing}\n\n보낸 사람: {sender}\n제목: {subject}\n\n'
+                                                   f'본문:\n{(body or "")[:llm.MAX_INPUT_CHARS]}'))
+    cid = _by_name(cats).get(str(data.get('category') or '').strip().lower())
+    return (get_category(cid), str(data.get('reason') or '')[:200]) if cid else (None, '')
 
 
 def _by_name(cats: list[dict]) -> dict[str, int]:
@@ -145,7 +180,7 @@ def categorize(mail_ids: list[int]) -> int:
             if m.id in picked:
                 m.category_id, m.category_source = picked[m.id], 'ai'
             else:  # AI 가 못 골랐거나 LLM 이 없으면 처리 종류로 (그것도 없으면 '기타'·미분류로 두고 다시 묻지 않음)
-                cid = names.get(KIND_TO_NAME.get(m.kind or '', '').lower()) or names.get('기타')
+                cid = _by_kind(cats, m) or names.get('기타')
                 m.category_id, m.category_source = cid, 'kind'
             done += 1
         s.commit()

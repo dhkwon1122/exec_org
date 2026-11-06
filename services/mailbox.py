@@ -480,8 +480,48 @@ def unlink_task(mail_id: int, task_id: int) -> None:
         store.clear_source_mail(task_id, mail_id, session=s)
 
 
+def process_as_category(m: dict, cat: dict, reason: str = '', source: str = 'ai') -> None:
+    """1차 분류에 맞는 일만 AI 에게 — 원장님·피플팀장 일정이면 일정 정리, 임원 부재면 부재 추출, 업무 이력이면 할 일
+    추출 + 상위 업무 추천, 처리가 없는 분류면 분류만. 결과는 '확인 필요' 추천으로 (화면에서 확인 후 반영)."""
+    from services import mail_categories
+    action = cat.get('action') or ''
+    sug = {k: v for k, v in m['suggestion'].items() if k in ('done', 'feedback', 'confluence')}
+    iid, kind = None, ''
+    why = f"분류: {cat['name']}" + (f' ({reason})' if reason else '')
+    if action in RULE_OWNER:
+        iid = _make_schedule_import(m, RULE_OWNER[action])
+        kind = 'schedule'
+    elif action == 'absence':
+        sug['absences'], sug['absence_note'] = absences.extract(m['body'], m['mail_date'], m['subject'])
+        kind = 'absence'
+    elif action == 'task':
+        sug['tasks'] = task_candidates(m['subject'], m['mail_date'], m['body'])
+        sug.update(suggest_parent(m['subject'], m['body'], sug['tasks'], m['id']))
+        kind = 'task'
+    if action:
+        why += f" → {mail_categories.CATEGORY_ACTIONS[action]}"
+    _update(m['id'], status='review', kind=kind, reason=why[:500], suggestion=sug, schedule_import_id=iid,
+            category_id=cat['id'], category_source=source)
+
+
+def reprocess_category(mail_id: int) -> bool:
+    """사람이 분류를 바꾸면 그 분류에 맞는 처리를 다시 — 아직 확인 전('확인 필요'·'실패')이고 처리한 항목이 없을 때만.
+    했으면 True."""
+    from services import mail_categories
+    m = get_mail(mail_id)
+    if m is None or m['status'] not in ('review', 'failed') or (m['suggestion'].get('done') or {}):
+        return False
+    cat = mail_categories.get_category(m['category_id'])
+    if cat is None:
+        return False
+    process_as_category(m, cat, '직접 고름', 'manual')
+    return True
+
+
 def process(mail_id: int) -> None:
-    """새 메일 한 통 처리 — 규칙 → (자동 반영 | 추천), 규칙이 없으면 AI 추천. 예외는 failed 로 남긴다."""
+    """새 메일 한 통 처리 — 처리 규칙 → (자동 반영 | 추천). 규칙이 없으면 1차 분류(분류 규칙·AI)를 정하고
+    그 분류에 맞는 일만 AI 에게 맡긴다. 분류를 못 정하면(LLM 없음 등) 예전처럼 종류를 추정. 예외는 failed 로 남긴다."""
+    from services import mail_categories
     m = get_mail(mail_id)
     if m is None:
         return
@@ -489,6 +529,14 @@ def process(mail_id: int) -> None:
         rule = match_rule(m['subject'], m['sender'], m['body'])
         if rule:
             _apply_rule(m, rule)
+            return
+        try:
+            cat, why = mail_categories.classify_one(m['subject'], m['sender'], m['body'])
+        except Exception as e:  # noqa: BLE001 — 분류 실패면 아래 예전 방식으로
+            log.warning('메일 1차 분류 실패 %s: %s', mail_id, e)
+            cat, why = None, ''
+        if cat is not None:
+            process_as_category(m, cat, why, 'rule' if why == '규칙' else 'ai')
             return
         try:
             c = ai_classify(m['subject'], m['sender'], m['mail_date'], m['body']) if llm.is_configured() else \

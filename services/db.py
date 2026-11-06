@@ -486,6 +486,7 @@ class MailCategory(Base):
     id = Column(Integer, primary_key=True)
     name = Column(String(50), nullable=False, unique=True)
     description = Column(String(500), default='')
+    action = Column(String(20), default='')  # 이 분류면 할 AI 처리 — schedule / schedule_people / absence / task / ''
     sort = Column(Integer, default=0)
     created_at = Column(DateTime, default=_now)
 
@@ -641,6 +642,7 @@ def make_engine(url: str | None = None):
             if 'summary_formats' not in existing:
                 _seed_summary_formats(engine)
             _add_missing_columns(engine)
+            _upgrade_mail_categories(engine)
             _relax_not_null(engine)
             _merge_todos_into_tasks(engine)
             _backfill_assignees(engine)
@@ -657,23 +659,34 @@ def make_engine(url: str | None = None):
 
 def _seed_mail_categories(engine):
     """메일 분류 표를 처음 만들 때 기본 분류를 넣는다 (그 뒤로는 화면에서 고친 대로)."""
-    from services.mail_categories import DEFAULTS
+    from services.mail_category_defaults import DEFAULTS
     with engine.begin() as conn:
         if conn.execute(text('SELECT COUNT(*) FROM mail_categories')).scalar():
             return
-        for i, (name, desc) in enumerate(DEFAULTS):
+        for i, (name, desc, action) in enumerate(DEFAULTS):
             try:
                 with conn.begin_nested():
-                    conn.execute(text('INSERT INTO mail_categories (name, description, sort, created_at) '
-                                      'VALUES (:n, :d, :s, CURRENT_TIMESTAMP)'), {'n': name, 'd': desc, 's': i})
+                    conn.execute(text('INSERT INTO mail_categories (name, description, action, sort, created_at) '
+                                      'VALUES (:n, :d, :a, :s, CURRENT_TIMESTAMP)'),
+                                 {'n': name, 'd': desc, 'a': action, 's': i})
             except Exception:  # noqa: BLE001 — 다른 워커가 먼저 넣었으면 그대로
                 pass
+
+
+def _upgrade_mail_categories(engine):
+    """예전 기본 분류(일정·업무 요청·임원 동향·보고·자료·공지·안내·기타, 처리 없음)를 처리와 묶인 새 기본 분류로
+    (원장님 일정·피플팀장 일정·임원 부재·업무 이력·기타). 처리가 정해진 분류가 하나라도 있으면 이미 바꾼 것 — 그대로."""
+    from services.mail_category_defaults import upgrade_defaults
+    from sqlalchemy.orm import Session
+    with Session(engine) as s:
+        if upgrade_defaults(s, MailCategory, InboundMail):
+            s.commit()
 
 
 def _seed_summary_formats(engine):
     """요약 형식 표를 처음 만들 때 기본 형식을 넣는다 (그 뒤로는 화면에서 고친 대로)."""
     import json
-    from services.summary_formats import DEFAULTS
+    from services.summary_format_defaults import DEFAULTS
     with engine.begin() as conn:
         if conn.execute(text('SELECT COUNT(*) FROM summary_formats')).scalar():
             return
