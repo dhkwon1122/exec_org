@@ -26,7 +26,7 @@ from email.utils import parseaddr
 from sqlalchemy import func, or_, select, update
 from sqlalchemy.exc import IntegrityError
 
-from services import absences, confluence, db, doc_summary, doc_versions, llm, mail_text, schedules, store
+from services import absences, confluence, db, doc_summary, doc_versions, llm, mail_text, mail_threads, schedules, store
 from services.db import InboundMail, MailRule, Task
 
 log = logging.getLogger(__name__)
@@ -134,7 +134,7 @@ def _mail_dict(m: InboundMail) -> dict:
             'error': m.error or '', 'received_at': m.received_at.strftime('%Y-%m-%d %H:%M') if m.received_at else '',
             'handled_at': m.handled_at.strftime('%Y-%m-%d %H:%M') if m.handled_at else '',
             'handled_by': m.handled_by or '', 'category_id': m.category_id,
-            'category_source': m.category_source or ''}
+            'category_source': m.category_source or '', 'thread_key': m.thread_key or ''}
 
 
 def list_mails(status: list[str] | None = None, limit: int = 200, category: int | str | None = None) -> list[dict]:
@@ -283,7 +283,7 @@ def task_candidates(subject: str, mail_date: str, body: str) -> list[dict]:
 #   1) 같은 메일 스레드(RE:/FW:)로 전에 만든 업무가 있으면 그 업무의 상위 업무 (가장 확실)
 #   2) 진행 중인 업무의 제목·태그·설명·기록 키워드가 메일 제목/본문에 얼마나 나오는지 점수
 #   3) LLM 이 있으면 점수 상위 후보 중에서 AI 가 고른다 (근거 포함)
-_SUBJ_PREFIX = re.compile(r'^\s*((re|fw|fwd|회신|전달|답장)\s*[:：]\s*|\[[^\]]{0,20}\]\s*)+', re.I)
+_SUBJ_PREFIX = mail_threads.SUBJ_PREFIX
 _STOP = {'요청', '관련', '자료', '회신', '검토', '부탁', '드립니다', '합니다', '안내', '공유', '확인', '송부', '제출', '건의',
          '업무', '진행', '보고', '협조', '문의', '전달', '참고', '사항', '내용', '일정', '회의', '이번', '다음', '해당', '대한'}
 
@@ -302,15 +302,19 @@ def _tokens(text: str) -> set[str]:
 
 
 def _thread_parent(subject: str, exclude_id: int | None = None) -> tuple[int | None, str]:
-    """같은 제목(RE:/FW: 등 머리 뺀)의 이전 메일로 만든 업무 → 그 상위 업무(없으면 그 업무)."""
+    """같은 스레드(services/mail_threads.py) 또는 같은 제목(RE:/FW: 등 머리 뺀)의 이전 메일로 만든 업무
+    → 그 상위 업무(없으면 그 업무)."""
     key = norm_subject(subject)
-    if not key:
-        return None, ''
     with db.SessionLocal() as s:
+        same = set(mail_threads.mail_ids(s, exclude_id)) if exclude_id else set()
+        s.commit()
+        if not key and not same:
+            return None, ''
         rows = list(s.scalars(select(InboundMail).where(InboundMail.task_ids != '', InboundMail.task_ids.is_not(None))
                               .order_by(InboundMail.id.desc())))
+    rows.sort(key=lambda m: m.id not in same)  # 같은 스레드 먼저
     for m in rows:
-        if m.id == exclude_id or norm_subject(m.subject) != key:
+        if m.id == exclude_id or (m.id not in same and (not key or norm_subject(m.subject) != key)):
             continue
         t = store.get_task(int(m.task_ids.split(',')[0]))
         if t is None:
@@ -445,11 +449,57 @@ def link_task(mail_id: int, task_id: int, by: str) -> bool:
         m = _mail_dict(_lock_mail(s, mail_id))
         if s.get(Task, task_id) is None:
             raise ValueError('업무를 찾을 수 없습니다.')
+        _spread_to_thread(s, mail_id, [task_id], by)  # 같은 스레드의 메일도 같은 업무에
         if task_id in m['task_ids']:
             return False
         _mail_history(m, task_id, by, session=s)
         _update(mail_id, task_ids=','.join(map(str, m['task_ids'] + [task_id])), session=s, **_manual_done(m, by))
         return True
+
+
+def _spread_to_thread(s, mail_id: int, task_ids: list[int], by: str) -> int:
+    """같은 스레드(RE:/FW:)의 다른 메일도 task_ids 업무에 연결 — 아직 안 걸린 메일만 원문을 업무 기록으로.
+    → 새로 연결한 메일 수."""
+    n = 0
+    for other in mail_threads.mail_ids(s, mail_id):
+        if other == mail_id:
+            continue
+        o = _mail_dict(s.get(InboundMail, other))
+        new = [t for t in task_ids if t not in o['task_ids']]
+        for t in new:
+            _mail_history(o, t, by, session=s)
+        if new:
+            _update(other, task_ids=','.join(map(str, o['task_ids'] + new)), session=s)
+            n += 1
+    return n
+
+
+def thread_task_ids(mail_id: int) -> list[int]:
+    """같은 스레드의 다른 메일에 걸린 업무 (메일 순서대로)."""
+    with db.SessionLocal() as s:
+        ids = mail_threads.mail_ids(s, mail_id)
+        s.commit()
+        out: list[int] = []
+        for other in ids:
+            if other != mail_id:
+                out += _mail_dict(s.get(InboundMail, other))['task_ids']
+    return [t for t in dict.fromkeys(out) if store.get_task(t) is not None]
+
+
+def inherit_thread_tasks(mail_id: int, by: str = MAIL_AUTHOR) -> list[int]:
+    """새로 받은 메일 — 같은 스레드의 메일이 이미 업무에 연결돼 있으면 이 메일도 그 업무에 (원문을 업무 기록으로).
+    → 새로 연결한 업무 id."""
+    tids = thread_task_ids(mail_id)
+    if not tids:
+        return []
+    with db.transaction() as s:
+        m = _mail_dict(_lock_mail(s, mail_id))
+        new = [t for t in tids if t not in m['task_ids']]
+        for t in new:
+            _mail_history(m, t, by, session=s)
+        if new:
+            _update(mail_id, task_ids=','.join(map(str, m['task_ids'] + new)), session=s)
+    return new
 
 
 def create_task_from_mail(mail_id: int, title: str, parent_id: int | None, by: str, due: str = '',
@@ -465,19 +515,27 @@ def create_task_from_mail(mail_id: int, title: str, parent_id: int | None, by: s
         ids = create_tasks(m, [{'title': title, 'due': due or '', 'assignee': assignee or ''}], parent_id, by, session=s)
         _update(mail_id, session=s, **_manual_done(m, by))
         if ids:
-            return ids[0]
-        existing = s.scalars(select(Task).where(or_(Task.source_mail_id == mail_id, Task.id.in_(m['task_ids']))))
-        return next(t.id for t in existing if (t.source_mail_key or _task_key(t.title)) == _task_key(title))
+            tid = ids[0]
+        else:
+            existing = s.scalars(select(Task).where(or_(Task.source_mail_id == mail_id, Task.id.in_(m['task_ids']))))
+            tid = next(t.id for t in existing if (t.source_mail_key or _task_key(t.title)) == _task_key(title))
+        _spread_to_thread(s, mail_id, [tid], by)  # 같은 스레드의 메일도 이 업무에
+        return tid
 
 
-def unlink_task(mail_id: int, task_id: int) -> None:
-    """메일과 업무의 연결만 끊는다 — 업무와 거기 남긴 기록은 그대로."""
+def unlink_task(mail_id: int, task_id: int) -> int:
+    """메일과 업무의 연결만 끊는다 — 같은 스레드의 메일 모두. 업무와 거기 남긴 기록은 그대로. → 끊은 메일 수."""
+    n = 0
     with db.transaction() as s:
         if s.get(InboundMail, mail_id) is None:
-            return
-        m = _mail_dict(_lock_mail(s, mail_id))
-        _update(mail_id, task_ids=','.join(str(t) for t in m['task_ids'] if t != task_id), session=s)
-        store.clear_source_mail(task_id, mail_id, session=s)
+            return 0
+        for mid in mail_threads.mail_ids(s, mail_id):
+            m = _mail_dict(_lock_mail(s, mid))
+            if task_id in m['task_ids']:
+                _update(mid, task_ids=','.join(str(t) for t in m['task_ids'] if t != task_id), session=s)
+                n += 1
+            store.clear_source_mail(task_id, mid, session=s)
+    return n
 
 
 def process_as_category(m: dict, cat: dict, reason: str = '', source: str = 'ai') -> None:
@@ -1017,6 +1075,8 @@ def fetch_new(connect=None, process_now: bool = True) -> dict:
             old = since and parsed['mail_date'] and parsed['mail_date'] < since
             with db.SessionLocal() as s:
                 fields = dict(message_id=parsed['message_id'][:300], subject=parsed['name'][:500],
+                              in_reply_to=' '.join(mail_threads.parse_ids(parsed.get('in_reply_to', '')))[:1000],
+                              references_hdr=' '.join(mail_threads.parse_ids(parsed.get('references', ''))),
                               sender=parsed['sender'][:300], mail_date=parsed['mail_date'],
                               body='' if old else parsed['text'], status='skipped' if old else 'review')
                 if uid in deferred:
@@ -1054,6 +1114,13 @@ def fetch_new(connect=None, process_now: bool = True) -> dict:
             conn.quit()
         except Exception:  # noqa: BLE001
             pass
+    if new_ids:  # 스레드 정하기 → 같은 스레드가 이미 업무에 걸려 있으면 새 메일도 그 업무에
+        try:
+            mail_threads.ensure_all()
+            for mid in new_ids:
+                inherit_thread_tasks(mid)
+        except Exception:  # noqa: BLE001 — 스레드 때문에 메일 처리를 멈추지 않게
+            log.exception('메일 스레드 연결 실패')
     if process_now:
         for mid in new_ids:
             process(mid)

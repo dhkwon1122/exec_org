@@ -230,7 +230,8 @@ def _eml(data: bytes) -> dict:
             return ''
     # Date 머리가 없으면(저장 방식에 따라) 본문에 붙은 '보낸 날짜:' 줄로
     return {'name': subject, 'mail_date': _date_of(msg.get('date')) or _header_date(body), 'text': body,
-            'sender': header('from'), 'message_id': header('message-id')}
+            'sender': header('from'), 'message_id': header('message-id'),
+            'in_reply_to': header('in-reply-to'), 'references': header('references')}
 
 
 def attachments(data: bytes, max_bytes: int = 30 * 1024 * 1024) -> list[tuple[str, bytes]]:
@@ -259,7 +260,8 @@ def attachments(data: bytes, max_bytes: int = 30 * 1024 * 1024) -> list[tuple[st
 
 
 def from_bytes(data: bytes) -> dict:
-    """메일 원본(RFC 822, POP3 로 받은 그대로) → {'name','mail_date','text','sender','message_id'}."""
+    """메일 원본(RFC 822, POP3 로 받은 그대로) → {'name','mail_date','text','sender','message_id',
+    'in_reply_to','references'}."""
     return _eml(data)
 
 

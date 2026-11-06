@@ -379,3 +379,9 @@ body {
 .inbox-row .list-group-item-action { border-radius: 0; }
 .inbox-row + .inbox-row { border-top-width: 0; }
 .min-w-0 { min-width: 0; }
+
+/* 받은 메일 — 스레드 묶음 (pages/inbox.py) */
+.inbox-thread-more { border-top-width: 0; }
+.inbox-thread-more > summary { cursor: pointer; list-style-position: inside; }
+.inbox-thread .inbox-row { border-left: 3px solid var(--bs-border-color); margin-left: 1.25rem; }
+.inbox-thread-row:hover { background: var(--bs-tertiary-bg); }

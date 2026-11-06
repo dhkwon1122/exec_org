@@ -413,6 +413,10 @@ class InboundMail(Base):
     id = Column(Integer, primary_key=True)
     uidl = Column(String(200), nullable=False, unique=True)
     message_id = Column(String(300), default='')
+    # 메일 스레드 (services/mail_threads.py) — 머리글은 <id> 들을 소문자로 띄어 써서
+    in_reply_to = Column(String(1000), default='')
+    references_hdr = Column(Text, default='')
+    thread_key = Column(String(300), default='', index=True)
     subject = Column(String(500), default='')
     sender = Column(String(300), default='')
     mail_date = Column(String(10), default='')
@@ -719,6 +723,9 @@ def _add_missing_columns(engine):
                 else:
                     default = ''
                 conn.execute(text(f'ALTER TABLE {table.name} ADD COLUMN {col.name} {coltype}{default}'))
+                if col.index:  # 나중에 붙인 칸의 색인도 (create_all 과 같은 이름)
+                    conn.execute(text(f'CREATE INDEX IF NOT EXISTS ix_{table.name}_{col.name} '
+                                      f'ON {table.name} ({col.name})'))
 
 
 
