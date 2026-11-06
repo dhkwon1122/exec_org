@@ -27,7 +27,7 @@ BATCH = 500
 DEFERRED = {'tasks': ['parent_id', 'source_history_id']}
 
 
-SEEDED = ('mail_categories',)  # make_engine 이 빈 DB 에 넣는 기본값 표
+SEEDED = ('mail_categories', 'summary_formats')  # make_engine 이 빈 DB 에 넣는 기본값 표
 
 
 class MigrateError(RuntimeError):

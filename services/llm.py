@@ -169,9 +169,15 @@ def analyze_record(text: str, task_title: str = '', entry_type: str = '', people
     if len(text) > MAX_INPUT_CHARS:
         text = text[:MAX_INPUT_CHARS] + '\n…(이하 생략)'
     today = date.fromisoformat(reference_date[:10]) if isinstance(reference_date, str) else reference_date or date.today()
+    from services import summary_formats  # 기록 유형별 요약 형식 (있으면 그 칸도 채운다)
+    try:
+        fmt = summary_formats.get('history', entry_type)
+    except Exception:  # noqa: BLE001 — 형식 때문에 정리가 실패하면 안 된다
+        fmt = []
     data = _extract_json(chat(ANALYZE_SYSTEM, ANALYZE_USER.format(
         today=today.isoformat(), weekday='월화수목금토일'[today.weekday()] + '요일',
-        task=task_title or '-', people=', '.join(people or []) or '-', entry_type=entry_type or '-', text=text)))
+        task=task_title or '-', people=', '.join(people or []) or '-', entry_type=entry_type or '-', text=text)
+        + (summary_formats.history_prompt(entry_type) if fmt else '')))
     kws = data.get('keywords') or []
     if isinstance(kws, str):
         kws = re.split(r'[,\n]', kws)
@@ -186,6 +192,7 @@ def analyze_record(text: str, task_title: str = '', entry_type: str = '', people
         'summary': str(data.get('summary') or '').strip(),
         'keywords': _canonical(keywords)[:12],
         'todos': _clean_todos(data.get('todos')),
+        'sections': summary_formats.clean(data.get('sections'), fmt),
     }
 
 

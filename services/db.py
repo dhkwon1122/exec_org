@@ -106,6 +106,7 @@ class HistoryEntry(Base):
     # 검색용 정리본 — LLM 이 채우고 사용자가 고칠 수 있다
     title = Column(String(300), default='')
     summary = Column(Text, default='')
+    sections = Column(Text, default='')  # 요약 형식(services/summary_formats.py)대로 채운 칸 — JSON [{name, text}]
     keywords = Column(String(1000), default='')  # 쉼표 구분
     ai_status = Column(String(10), default='')  # '' (요청 안 함) / pending / done / failed
     ai_error = Column(Text, default='')
@@ -145,6 +146,7 @@ class Reference(Base):
     text_at = Column(DateTime)
     doc_type = Column(String(50), default='')
     summary = Column(Text, default='')
+    sections = Column(Text, default='')  # 문서 종류별 요약 형식의 칸 — JSON [{name, text}]
     tags = Column(String(500), default='')
     key_dates = Column(Text, default='')
     changes = Column(Text, default='')  # 같은 문서의 바로 앞 판(메일 첨부든 올린 파일이든)과 달라진 점
@@ -450,6 +452,7 @@ class MailAttachment(Base):
     text_at = Column(DateTime)
     doc_type = Column(String(50), default='')
     summary = Column(Text, default='')
+    sections = Column(Text, default='')  # 문서 종류별 요약 형식의 칸 — JSON [{name, text}]
     tags = Column(String(500), default='')  # 쉼표로
     key_dates = Column(Text, default='')  # JSON [{'date','what'}]
     changes = Column(Text, default='')  # 앞 판과 달라진 점
@@ -483,8 +486,21 @@ class MailCategory(Base):
     id = Column(Integer, primary_key=True)
     name = Column(String(50), nullable=False, unique=True)
     description = Column(String(500), default='')
+    action = Column(String(20), default='')  # 이 분류면 할 AI 처리 — schedule / schedule_people / absence / task / ''
     sort = Column(Integer, default=0)
     created_at = Column(DateTime, default=_now)
+
+
+class SummaryFormat(Base):
+    """AI 요약 형식 (services/summary_formats.py) — 기록 유형·문서 종류마다 AI 가 채울 칸(이름·무엇을 쓰는지)."""
+    __tablename__ = 'summary_formats'
+    __table_args__ = (UniqueConstraint('target', 'kind', name='uq_summary_format'),)
+
+    id = Column(Integer, primary_key=True)
+    target = Column(String(20), nullable=False)  # history(기록 유형별) / document(문서 종류별)
+    kind = Column(String(50), nullable=False)  # 기록 유형('회의') 또는 문서 종류('회의록')
+    sections = Column(Text, default='')  # JSON [{name, hint}]
+    updated_at = Column(DateTime, default=_now, onupdate=_now)
 
 
 class MailRule(Base):
@@ -619,11 +635,14 @@ def make_engine(url: str | None = None):
     # 워커들이 동시에 떠서 같은 테이블을 동시에 만들려다 한쪽이 실패할 수 있어 몇 번 재시도한다
     for attempt in range(5):
         try:
-            fresh = 'mail_categories' not in inspect(engine).get_table_names()
+            existing = set(inspect(engine).get_table_names())
             Base.metadata.create_all(engine)
-            if fresh:
+            if 'mail_categories' not in existing:
                 _seed_mail_categories(engine)
+            if 'summary_formats' not in existing:
+                _seed_summary_formats(engine)
             _add_missing_columns(engine)
+            _upgrade_mail_categories(engine)
             _relax_not_null(engine)
             _merge_todos_into_tasks(engine)
             _backfill_assignees(engine)
@@ -640,15 +659,44 @@ def make_engine(url: str | None = None):
 
 def _seed_mail_categories(engine):
     """메일 분류 표를 처음 만들 때 기본 분류를 넣는다 (그 뒤로는 화면에서 고친 대로)."""
-    from services.mail_categories import DEFAULTS
+    from services.mail_category_defaults import DEFAULTS
     with engine.begin() as conn:
         if conn.execute(text('SELECT COUNT(*) FROM mail_categories')).scalar():
             return
-        for i, (name, desc) in enumerate(DEFAULTS):
+        for i, (name, desc, action) in enumerate(DEFAULTS):
             try:
                 with conn.begin_nested():
-                    conn.execute(text('INSERT INTO mail_categories (name, description, sort, created_at) '
-                                      'VALUES (:n, :d, :s, CURRENT_TIMESTAMP)'), {'n': name, 'd': desc, 's': i})
+                    conn.execute(text('INSERT INTO mail_categories (name, description, action, sort, created_at) '
+                                      'VALUES (:n, :d, :a, :s, CURRENT_TIMESTAMP)'),
+                                 {'n': name, 'd': desc, 'a': action, 's': i})
+            except Exception:  # noqa: BLE001 — 다른 워커가 먼저 넣었으면 그대로
+                pass
+
+
+def _upgrade_mail_categories(engine):
+    """예전 기본 분류(일정·업무 요청·임원 동향·보고·자료·공지·안내·기타, 처리 없음)를 처리와 묶인 새 기본 분류로
+    (원장님 일정·피플팀장 일정·임원 부재·업무 이력·기타). 처리가 정해진 분류가 하나라도 있으면 이미 바꾼 것 — 그대로."""
+    from services.mail_category_defaults import upgrade_defaults
+    from sqlalchemy.orm import Session
+    with Session(engine) as s:
+        if upgrade_defaults(s, MailCategory, InboundMail):
+            s.commit()
+
+
+def _seed_summary_formats(engine):
+    """요약 형식 표를 처음 만들 때 기본 형식을 넣는다 (그 뒤로는 화면에서 고친 대로)."""
+    import json
+    from services.summary_format_defaults import DEFAULTS
+    with engine.begin() as conn:
+        if conn.execute(text('SELECT COUNT(*) FROM summary_formats')).scalar():
+            return
+        for target, kind, sections in DEFAULTS:
+            try:
+                with conn.begin_nested():
+                    conn.execute(text('INSERT INTO summary_formats (target, kind, sections, updated_at) '
+                                      'VALUES (:t, :k, :s, CURRENT_TIMESTAMP)'),
+                                 {'t': target, 'k': kind, 's': json.dumps(
+                                     [{'name': n, 'hint': h} for n, h in sections], ensure_ascii=False)})
             except Exception:  # noqa: BLE001 — 다른 워커가 먼저 넣었으면 그대로
                 pass
 

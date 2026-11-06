@@ -14,7 +14,7 @@ from datetime import datetime
 
 from sqlalchemy import or_, select
 
-from services import db, doc_text, doc_versions, llm
+from services import db, doc_text, doc_versions, llm, summary_formats
 from services.db import DocExclusion, HistoryEntry, InboundMail, MailAttachment, Reference, Task
 
 DOC_TYPES = ['보고서', '회의자료', '회의록', '계획서', '공문', '안내문', '명단', '일정표', '예산·집계표', '발표자료',
@@ -208,9 +208,12 @@ def _ask(s, a) -> None:
         diff=(f"\n같은 문서의 앞 판({_name(prev)})과 달라진 줄 (- 앞 판, + 이번 판):\n<<<\n{diff}\n>>>\n"
               if diff else ''),
         types='·'.join(DOC_TYPES),
-        changes_hint='앞 판과 달라진 점을 1~3문장으로 (앞 판 정보가 없으면 빈 문자열)' if diff else '빈 문자열')))
+        changes_hint='앞 판과 달라진 점을 1~3문장으로 (앞 판 정보가 없으면 빈 문자열)' if diff else '빈 문자열')
+        + summary_formats.document_prompt()))  # 문서 종류별 요약 형식 (있으면 그 칸도)
     doc_type = str(data.get('doc_type') or '').strip()
     a.doc_type = doc_type if doc_type in DOC_TYPES else ('기타' if doc_type else '')
+    a.sections = json.dumps(summary_formats.clean(data.get('sections'), summary_formats.get('document', a.doc_type)),
+                            ensure_ascii=False)
     a.summary = str(data.get('summary') or '').strip()[:3000]
     a.tags = ', '.join(_tags(data.get('tags')))[:500]
     a.key_dates = json.dumps(_dates(data.get('key_dates')), ensure_ascii=False)
@@ -243,6 +246,7 @@ def _analyze(model, item_id: int, force: bool) -> dict:
         twin = None if force else _twin(s, a, 'analyzed_at')
         if twin is not None:  # 같은 파일을 다시 보낸 것 — 앞 판과 비교한 결과는 그 파일 것이므로 빼고 복사
             a.doc_type, a.summary, a.tags, a.key_dates = twin.doc_type, twin.summary, twin.tags, twin.key_dates
+            a.sections = twin.sections
             a.changes, a.analyzed_at = '', datetime.now().replace(microsecond=0)
         else:
             if not llm.is_configured():
@@ -300,6 +304,7 @@ def insight(a, text_len: int | None = None) -> dict:
             'doc_type': a.doc_type or '', 'summary': a.summary or '',
             'tags': [t.strip() for t in (a.tags or '').split(',') if t.strip()], 'key_dates': dates,
             'changes': a.changes or '', 'note': a.text_note or '', 'readable': doc_text.supported(_name(a)),
+            'sections': summary_formats.loads(a.sections),
             'text_len': len(a.text or '') if text_len is None else text_len}
 
 

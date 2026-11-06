@@ -25,13 +25,19 @@ def _category_modal():
     return dbc.Modal([
         dbc.ModalHeader(dbc.ModalTitle([html.I(className='bi bi-tags me-2'), '메일 분류 관리'])),
         dbc.ModalBody([
-            html.Div('받은 메일을 이 분류로 1차 분류해 같은 분류끼리 모아 봅니다. 설명은 AI 가 분류를 고를 때 참고하니 어떤 메일이 '
+            html.Div('받은 메일을 먼저 이 분류로 1차 분류하고, 분류의 "처리"에 맞는 일만 AI 에게 맡깁니다 (원장님 일정 → 일정 정리, '
+                     '임원 부재 → 부재 추출, 업무 이력 → 할 일 추출 …). 설명은 AI 가 분류를 고를 때 참고하니 어떤 메일이 '
                      '들어오는지 구체적으로 적어 주세요 (보내는 곳·제목 말머리 등). 표 순서가 화면의 분류 순서입니다. '
                      '분류를 지우면 그 메일은 다시 분류됩니다.', className='small text-muted mb-2'),
             dash_table.DataTable(id='ib-cat-table', editable=True, row_deletable=True, data=[],
-                                 columns=[{'name': '분류', 'id': 'name'}, {'name': '설명 (AI 가 참고)', 'id': 'description'}],
-                                 style_cell=cell, style_cell_conditional=[{'if': {'column_id': 'name'}, 'width': '26%',
-                                                                           'fontWeight': 600}]),
+                                 columns=[{'name': '분류', 'id': 'name'}, {'name': '설명 (AI 가 참고)', 'id': 'description'},
+                                          {'name': '처리', 'id': 'action', 'presentation': 'dropdown'}],
+                                 dropdown={'action': {'clearable': False, 'options': [
+                                     {'label': v, 'value': k} for k, v in mail_categories.CATEGORY_ACTIONS.items()]}},
+                                 css=[{'selector': '.Select-menu-outer', 'rule': 'display: block !important'}],
+                                 style_cell=cell, style_cell_conditional=[
+                                     {'if': {'column_id': 'name'}, 'width': '20%', 'fontWeight': 600},
+                                     {'if': {'column_id': 'action'}, 'width': '22%'}]),
             html.Div([
                 dbc.Button([html.I(className='bi bi-plus-lg me-1'), '분류 추가'], id='ib-cat-add', size='sm',
                            color='secondary', outline=True, className='me-2'),
@@ -596,6 +602,10 @@ def change_category(_, n):
     if m is None or str(m['category_id'] or '') == (value or ''):
         return no_update
     mail_categories.set_category(m['id'], int(value) if value else None, 'manual')
+    try:  # 아직 확인 전이면 그 분류에 맞는 처리를 다시 (원장님 일정 → 일정 정리 등)
+        mailbox.reprocess_category(m['id'])
+    except Exception:  # noqa: BLE001 — 분류는 바뀌었다. 처리는 'AI 에게 맡기기'로 다시 할 수 있다
+        pass
     return (n or 0) + 1
 
 
@@ -632,7 +642,7 @@ def manage_categories(_o, _a, _s, _r, rows, n):
     if trig == 'ib-cat-open':
         return True, mail_categories.list_categories(), '', False, nu, nu
     if trig == 'ib-cat-add':
-        return nu, (rows or []) + [{'id': None, 'name': '', 'description': ''}], nu, nu, nu, nu
+        return nu, (rows or []) + [{'id': None, 'name': '', 'description': '', 'action': ''}], nu, nu, nu, nu
     try:
         r = mail_categories.save_all(rows or [])
     except ValueError as e:

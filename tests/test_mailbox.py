@@ -338,9 +338,10 @@ def test_parent_from_same_thread_beats_keywords():
 
 def test_parent_picked_by_ai_and_bad_answer_ignored(monkeypatch):
     a, b = _tasks()
-    answers = iter([json.dumps({'kind': 'task', 'reason': '요청', 'tasks': [{'title': '개편안 검토하기'}]}),
+    cat = json.dumps({'category': '업무 이력', 'reason': '요청'}, ensure_ascii=False)  # 1차 분류 → 할 일 추출 → 상위 업무
+    answers = iter([cat, json.dumps({'kind': 'task', 'reason': '요청', 'tasks': [{'title': '개편안 검토하기'}]}),
                     json.dumps({'parent_id': b['id'], 'reason': '조직 개편 관련 요청'}),
-                    json.dumps({'kind': 'task', 'reason': '요청', 'tasks': [{'title': '평가 자료 보내기'}]}),
+                    cat, json.dumps({'kind': 'task', 'reason': '요청', 'tasks': [{'title': '평가 자료 보내기'}]}),
                     json.dumps({'parent_id': 9999, 'reason': '없는 번호'})])
     monkeypatch.setattr(llm, 'is_configured', lambda: True)
     monkeypatch.setattr(llm, 'chat', lambda *a, **k: next(answers))
