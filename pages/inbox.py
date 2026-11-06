@@ -2,7 +2,7 @@
 추천 항목(업무 후보·일정(원장님·피플팀장)·임원 부재·임원 정보 변경)은 항목마다 따로 처리하고, 다 봤으면 '처리 완료'."""
 import dash
 import dash_bootstrap_components as dbc
-from dash import ALL, Input, Output, State, callback, ctx, dash_table, dcc, html, no_update
+from dash import ALL, Input, Output, State, callback, clientside_callback, ctx, dash_table, dcc, html, no_update
 
 from components import absence_ui, doc_ui, sched_edit, ui
 from services import (absences, auth, db, doc_versions, doc_worker, llm, mail_categories, mail_threads, mailbox,
@@ -117,7 +117,10 @@ def layout(mail=None, **_):
                     dbc.Button('분류 바꾸기', id='ib-bulk-cat-go', size='sm', color='secondary', outline=True,
                                disabled=True),
                 ], className='d-flex align-items-center flex-wrap gap-1 mb-2 inbox-bulk'),
+                dcc.Store(id='ib-limit', data=PAGE),
                 dcc.Loading(html.Div(id='ib-list'), type='dot', delay_show=400),
+                dbc.Button(id='ib-more', size='sm', color='secondary', outline=True, className='w-100 mt-1',
+                           style={'display': 'none'}),
             ], lg=5),
             dbc.Col(html.Div([
                 html.Div(id='ib-head'),
@@ -328,16 +331,34 @@ def layout(mail=None, **_):
 
 # ── 목록 ──────────────────────────────────────────────────────────────
 
+PAGE = 50  # 목록은 한 번에 이만큼 — 많이 그리면 화면(Dash)이 느려진다. 나머지는 '더 보기'
+
+
+@callback(Output('ib-limit', 'data'), Input('ib-filter', 'value'), Input('ib-cat', 'value'),
+          Input('ib-more', 'n_clicks'), State('ib-limit', 'data'), prevent_initial_call=True)
+def page_limit(_f, _c, _m, limit):
+    return (limit or PAGE) + PAGE if ctx.triggered_id == 'ib-more' else PAGE
+
+
+# 메일을 고르면 목록은 다시 그리지 않고 강조 표시만 브라우저에서 옮긴다
+clientside_callback(
+    """function(sel, ids) { return ids.map(function(i) { return i.id === sel; }); }""",
+    Output({'type': 'ib-mail', 'id': ALL}, 'active'), Input('ib-sel', 'data'), State({'type': 'ib-mail', 'id': ALL}, 'id'))
+
+
 @callback(Output('ib-list', 'children'), Output('ib-filter', 'options'), Output('ib-status', 'children'),
           Output('ib-cat', 'options'), Output('ib-cat-run', 'children'), Output('ib-cat-run', 'style'),
-          Input('ib-filter', 'value'), Input('ib-refresh', 'data'), Input('ib-sel', 'data'), Input('ib-cat', 'value'),
-          Input('ib-thread-view', 'value'), State('ib-checked', 'data'))
-def render_list(flt, _, sel, cat='all', threaded=True, checked=None):
+          Output('ib-more', 'children'), Output('ib-more', 'style'),
+          Input('ib-filter', 'value'), Input('ib-refresh', 'data'), Input('ib-cat', 'value'),
+          Input('ib-thread-view', 'value'), Input('ib-limit', 'data'), State('ib-sel', 'data'),
+          State('ib-checked', 'data'))
+def render_list(flt, _, cat='all', threaded=True, limit=PAGE, sel=None, checked=None):
     checked = set(checked or [])
-    try:
-        mail_threads.ensure_all()  # 이전 버전에서 받은 메일도 스레드로
-    except Exception:  # noqa: BLE001 — 목록은 그대로 보여 준다
-        pass
+    if threaded:
+        try:  # 이전 버전에서 받은 메일도 스레드로 — 다른 화면 갱신이 하고 있으면 기다리지 않는다
+            mail_threads.ensure_all(wait=False)
+        except Exception:  # noqa: BLE001 — 스레드 없이도 목록은 보여 준다
+            pass
     c = mailbox.counts()
     opts = [{'label': f'{label} {c.get(k, 0)}' if k != 'all' else label, 'value': k} for k, label in FILTERS]
     statuses = None if flt == 'all' else [flt]
@@ -351,7 +372,11 @@ def render_list(flt, _, sel, cat='all', threaded=True, checked=None):
         cat = 'all'
     waiting = mail_categories.pending_count()
     run = (f'미분류 {waiting}통 지금 분류', {}) if waiting else ('', {'display': 'none'})
-    mails = mailbox.list_mails(statuses, category=None if cat == 'all' else (cat if cat == 'none' else int(cat)))
+    limit = limit or PAGE
+    mails = mailbox.list_mails(statuses, limit=limit + 1,
+                               category=None if cat == 'all' else (cat if cat == 'none' else int(cat)))
+    more = ([html.I(className='bi bi-chevron-down me-1'), f'더 보기 ({PAGE}통 더)'], {}) if len(mails) > limit else ('', {'display': 'none'})
+    mails = mails[:limit]
     if mailbox.is_configured():
         lr = mailbox.last_run()
         st = (f"POP3 {mailbox.settings()['user']} · {mailbox.settings()['minutes']}분마다"
@@ -367,7 +392,7 @@ def render_list(flt, _, sel, cat='all', threaded=True, checked=None):
               + (f" · 마지막 {last['at']} " + (last.get('filename', '') if last.get('ok') else f"(실패: {last.get('error', '')[:60]})")
                  if last else '')]
     if not mails:
-        return html.Div('메일이 없습니다.', className='small text-muted'), opts, st, cat_opts, *run
+        return html.Div('메일이 없습니다.', className='small text-muted'), opts, st, cat_opts, *run, *more
 
     sizes = mail_threads.sizes([m['thread_key'] for m in mails]) if threaded else {}
 
@@ -407,7 +432,7 @@ def render_list(flt, _, sel, cat='all', threaded=True, checked=None):
         return out
 
     if cat != 'all':
-        return dbc.ListGroup(items(mails)), opts, st, cat_opts, *run
+        return dbc.ListGroup(items(mails)), opts, st, cat_opts, *run, *more
     groups: dict = {}  # 전체 — 분류별로 모아서 (분류 순서대로, 미분류는 끝에)
     for m in mails:
         groups.setdefault(m['category_id'] if m['category_id'] in names else None, []).append(m)
@@ -418,7 +443,7 @@ def render_list(flt, _, sel, cat='all', threaded=True, checked=None):
                      className='small mb-1'),
         dbc.ListGroup(items(groups[k]), className='mb-2'),
     ], open=True) for k in order]
-    return html.Div(view), opts, st, cat_opts, *run
+    return html.Div(view), opts, st, cat_opts, *run, *more
 
 
 # ── 여러 메일 한 번에 (무시·분류) ──────────────────────────────────────

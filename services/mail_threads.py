@@ -8,10 +8,12 @@
 제목만 같은 새 메일(머리말·머리글 없음 — 예: 매주 오는 '주간 보고')은 따로 둔다.
 보낸 메일 중 받은 메일에 회신한 것(outbound_mails.related_kind='mail')도 스레드에 함께 보인다.
 """
+import logging
 import re
+import threading
 from datetime import date
 
-from sqlalchemy import func, or_, select
+from sqlalchemy import func, select, update
 
 from services import db
 from services.db import InboundMail, OutboundMail
@@ -20,6 +22,7 @@ SUBJ_PREFIX = re.compile(r'^\s*((re|fw|fwd|회신|전달|답장)\s*[:：]\s*|\[[
 _REPLY = re.compile(r'^\s*(\[[^\]]{0,20}\]\s*)*(re|fw|fwd|회신|전달|답장)\s*[:：]', re.I)
 _ID = re.compile(r'<[^<>\s]+>')
 SUBJECT_DAYS = 120  # 제목으로 묶을 때 이 날수보다 멀리 떨어진 메일은 다른 스레드로
+log = logging.getLogger(__name__)
 
 
 def norm_subject(subject: str) -> str:
@@ -47,55 +50,109 @@ def _near(a: str, b: str) -> bool:
         return True  # 날짜를 모르면 제목만으로
 
 
+_COLS = (InboundMail.id, InboundMail.message_id, InboundMail.references_hdr, InboundMail.in_reply_to,
+         InboundMail.subject, InboundMail.mail_date, InboundMail.thread_key)
+
+
+class _Index:
+    """스레드가 정해진 메일들로 만든 찾아보기 — 메일마다 DB 를 다시 뒤지지 않게 한 번에 읽어 메모리에서."""
+
+    def __init__(self):
+        self.by_mid: dict[str, str] = {}   # 메일 id → 스레드
+        self.by_ref: dict[str, str] = {}   # 머리글에 적힌 메일 id → 그 머리글을 가진 메일의 스레드
+        self.by_subj: dict[str, list[tuple[str, str]]] = {}  # 머리말 뗀 제목 → [(메일 날짜, 스레드)] 받은 순
+
+    def add(self, r, key: str) -> None:
+        own = parse_ids(r.message_id or '')
+        if own:
+            self.by_mid.setdefault(own[0], key)
+        for x in parse_ids(f'{r.references_hdr or ""} {r.in_reply_to or ""}'):
+            self.by_ref.setdefault(x, key)
+        core = norm_subject(r.subject)
+        if core:
+            self.by_subj.setdefault(core, []).append((r.mail_date or '', key))
+
+    def decide(self, r) -> str:
+        refs, irt = parse_ids(r.references_hdr or ''), parse_ids(r.in_reply_to or '')
+        linked = list(dict.fromkeys(refs + irt))
+        for x in linked:  # 1) 가리키는 메일이 와 있음 — 스레드 맨 처음에 가까운 것부터
+            if x in self.by_mid:
+                return self.by_mid[x]
+        own = parse_ids(r.message_id or '')
+        own = own[0] if own else ''
+        if own and own in self.by_ref:  # 2) 답장이 먼저 와 있음
+            return self.by_ref[own]
+        core = norm_subject(r.subject)
+        if core and (linked or is_reply(r.subject)):  # 3) 답장·전달 — 같은 제목의 가장 최근 메일
+            for d, key in reversed(self.by_subj.get(core, [])):
+                if _near(d, r.mail_date or ''):
+                    return key
+        if linked:  # 4)
+            return 'mid:' + (refs[0] if refs else irt[0])
+        return ('mid:' + own if own else f'mail:{r.id}')[:300]
+
+
+def _index(s, exclude_id: int | None = None) -> tuple[_Index, list]:
+    """→ (스레드가 정해진 메일의 찾아보기, 아직 안 정해진 메일 목록 — 오래된 것부터)."""
+    idx, todo = _Index(), []
+    for r in s.execute(select(*_COLS).where(InboundMail.status != 'skipped').order_by(InboundMail.id)):
+        if r.id == exclude_id:
+            continue
+        if r.thread_key:
+            idx.add(r, r.thread_key)
+        else:
+            todo.append(r)
+    return idx, todo
+
+
 def compute_key(s, m: InboundMail) -> str:
-    refs, irt = parse_ids(m.references_hdr or ''), parse_ids(m.in_reply_to or '')
-    linked = list(dict.fromkeys(refs + irt))
-    others = s.query(InboundMail).filter(InboundMail.id != m.id, func.coalesce(InboundMail.thread_key, '') != '')
-    if linked:  # 1) 가리키는 메일이 와 있음 — 스레드 맨 처음에 가까운 것부터
-        found = {(r.message_id or '').strip().lower(): r.thread_key
-                 for r in others.filter(func.lower(func.trim(InboundMail.message_id)).in_(linked))}
-        for mid in linked:
-            if mid in found:
-                return found[mid]
-    own = _own_id(m)
-    if own:  # 2) 답장이 먼저 와 있음
-        # references_hdr / in_reply_to 는 parse_ids 로 소문자로 저장해 둔다 (services/mailbox.py fetch_new)
-        child = others.filter(or_(InboundMail.references_hdr.contains(own), InboundMail.in_reply_to.contains(own)),
-                              ).order_by(InboundMail.id).first()
-        if child is not None:
-            return child.thread_key
-    core = norm_subject(m.subject)
-    if core and (linked or is_reply(m.subject)):  # 3) 답장·전달 — 같은 제목
-        word = max(core.split(), key=len)  # 띄어쓰기가 달라도 찾게 가장 긴 낱말로 추리고 아래에서 다시 비교
-        rows = others.filter(func.lower(InboundMail.subject).contains(word))
-        for r in rows.order_by(InboundMail.id.desc()).limit(50):
-            if norm_subject(r.subject) == core and _near(r.mail_date or '', m.mail_date or ''):
-                return r.thread_key
-    if linked:  # 4)
-        return 'mid:' + (refs[0] if refs else irt[0])
-    return 'mid:' + own if own else f'mail:{m.id}'
+    idx, _ = _index(s, m.id)
+    return idx.decide(m)[:300]
 
 
 def assign(s, m: InboundMail) -> str:
     """스레드가 비어 있으면 정해 둔다 → thread_key."""
     if not m.thread_key:
-        m.thread_key = compute_key(s, m)[:300]
+        m.thread_key = compute_key(s, m)
         s.flush()
     return m.thread_key
 
 
-def ensure_all(limit: int = 2000) -> int:
-    """아직 스레드가 없는 메일(새 메일·이전 버전에서 받은 메일)에 스레드를 정한다 — 오래된 것부터."""
-    n = 0
+_lock = threading.Lock()
+
+
+def ensure_all(wait: bool = True) -> int:
+    """아직 스레드가 없는 메일(새 메일·이전 버전에서 받은 메일)에 스레드를 정한다 — 오래된 것부터, 한 번에.
+    wait=False 면 다른 곳에서 이미 하고 있을 때 기다리지 않고 0 (화면 그리기용)."""
+    if not pending():
+        return 0
+    if not _lock.acquire(blocking=wait):
+        return 0
+    try:
+        return _ensure_all()
+    finally:
+        _lock.release()
+
+
+def _ensure_all() -> int:
     with db.SessionLocal() as s:
-        for m in s.scalars(select(InboundMail).where(func.coalesce(InboundMail.thread_key, '') == '',
-                                                     InboundMail.status != 'skipped')
-                           .order_by(InboundMail.id).limit(limit)):
-            assign(s, m)
-            n += 1
-        if n:
+        idx, todo = _index(s)
+        rows = []
+        for r in todo:
+            key = idx.decide(r)[:300]
+            idx.add(r, key)
+            rows.append({'id': r.id, 'thread_key': key})
+        if rows:
+            s.execute(update(InboundMail), rows)
             s.commit()
-    return n
+        return len(rows)
+
+
+def pending() -> bool:
+    """스레드가 아직 없는 메일이 있나."""
+    with db.SessionLocal() as s:
+        return s.scalar(select(InboundMail.id).where(func.coalesce(InboundMail.thread_key, '') == '',
+                                                     InboundMail.status != 'skipped').limit(1)) is not None
 
 
 def mail_ids(s, mail_id: int) -> list[int]:
