@@ -41,6 +41,21 @@ def _category_modal():
                 dbc.Button('저장', id='ib-cat-save', size='sm', color='primary'),
             ], className='d-flex align-items-center mt-2'),
             dbc.Alert(id='ib-cat-msg', is_open=False, className='small py-2 mt-2 mb-0'),
+            html.Hr(),
+            html.H6([html.I(className='bi bi-funnel me-1'), '분류 규칙'], className='mb-1'),
+            html.Div('보낸 사람이나 제목에 이 글자가 있으면 그 분류로 넣습니다 (대소문자 무시, 위에서부터 처음 맞는 규칙). '
+                     'AI 에게 묻지 않고, 이미 받은 메일에도 바로 적용합니다 (직접 고른 분류는 그대로). '
+                     '일정·업무 같은 처리는 평소대로 AI 가 정합니다.', className='small text-muted mb-2'),
+            html.Div(id='ib-cr-list'),
+            dbc.Row([
+                dbc.Col(dbc.Select(id='ib-cr-field', value='sender', size='sm',
+                                   options=[{'label': v, 'value': k} for k, v in mailbox.FIELDS.items()]), md=3),
+                dbc.Col(dbc.Input(id='ib-cr-pattern', size='sm', placeholder='에 이 글자가 있으면 (예: report@, [주간보고])'),
+                        md=5),
+                dbc.Col(dbc.Select(id='ib-cr-cat', size='sm', options=[]), md=3),
+                dbc.Col(dbc.Button('추가', id='ib-cr-add', size='sm', color='primary', className='w-100'), md=1),
+            ], className='g-2 mt-1'),
+            dbc.Alert(id='ib-cr-msg', is_open=False, className='small py-2 mt-2 mb-0'),
         ]),
     ], id='ib-cat-modal', is_open=False, size='lg')
 
@@ -626,6 +641,52 @@ def manage_categories(_o, _a, _s, _r, rows, n):
     if trig == 'ib-cat-redo':
         msg += f" AI·종류로 정한 분류 {mail_categories.reset_auto()}통을 비웠습니다 — 쉬는 시간에(또는 '지금 분류'로) 다시 분류합니다."
     return nu, mail_categories.list_categories(), msg, True, 'success', (n or 0) + 1
+
+
+def _category_rules_view():
+    cats = {c['id']: c['name'] for c in mail_categories.list_categories()}
+    rules = [r for r in mailbox.list_rules() if r['category_id']]
+    if not rules:
+        return html.Div('아직 분류 규칙이 없습니다.', className='small text-muted')
+    return dbc.Table(html.Tbody([html.Tr([
+        html.Td(f"{mailbox.FIELDS[r['field']]}에 '{r['pattern']}'", className='small'),
+        html.Td(['→ ', dbc.Badge(cats.get(r['category_id'], '?'), color='light', text_color='dark', className='border')]),
+        html.Td(html.Span('처리 규칙에 붙은 분류 — 분류 규칙 창에서 고칩니다', className='small text-muted')
+                if r['action'] != 'classify' else None),
+        html.Td(dbc.Button(html.I(className='bi bi-trash'), id={'type': 'ib-cr-del', 'id': r['id']}, size='sm',
+                           color='secondary', outline=True) if r['action'] == 'classify' else None, className='text-end'),
+    ]) for r in rules]), size='sm', className='align-middle small mb-0')
+
+
+@callback(Output('ib-cr-list', 'children'), Output('ib-cr-cat', 'options'), Output('ib-cr-cat', 'value'),
+          Output('ib-cr-pattern', 'value'), Output('ib-cr-msg', 'children'), Output('ib-cr-msg', 'is_open'),
+          Output('ib-cr-msg', 'color'), Output('ib-refresh', 'data', allow_duplicate=True),
+          Input('ib-cat-modal', 'is_open'), Input('ib-cr-add', 'n_clicks'), Input({'type': 'ib-cr-del', 'id': ALL}, 'n_clicks'),
+          State('ib-cr-field', 'value'), State('ib-cr-pattern', 'value'), State('ib-cr-cat', 'value'),
+          State('ib-refresh', 'data'), prevent_initial_call=True)
+def category_rules(is_open, _a, _d, field, pattern, cat, n):
+    """분류 관리 창의 분류 규칙 — 보낸 사람·제목·본문 글자 → 분류 ('분류만' 규칙)."""
+    nu = no_update
+    trig = ctx.triggered_id
+    cats = mail_categories.list_categories()
+    opts = [{'label': c['name'], 'value': str(c['id'])} for c in cats]
+    if trig == 'ib-cat-modal':
+        if not is_open:
+            return (nu,) * 8
+        return _category_rules_view(), opts, cat if cat in [o['value'] for o in opts] else (opts[0]['value'] if opts else None), \
+            nu, '', False, nu, nu
+    if isinstance(trig, dict):
+        if not (ctx.triggered and ctx.triggered[0]['value']):
+            return (nu,) * 8
+        mailbox.delete_rule(trig['id'])
+        return _category_rules_view(), opts, nu, nu, '규칙을 지웠습니다 — 이미 분류된 메일은 그대로입니다.', True, 'secondary', nu
+    try:
+        mailbox.save_rule({'field': field, 'pattern': pattern, 'action': 'classify', 'category_id': cat})
+    except ValueError as e:
+        return nu, opts, nu, nu, str(e), True, 'danger', nu
+    moved = mail_categories.apply_rules()
+    return _category_rules_view(), opts, nu, '', f'규칙을 추가했습니다 — 이미 받은 메일 {moved}통을 옮겼습니다.', True, 'success', \
+        (n or 0) + 1
 
 
 # ── 임원 부재 ─────────────────────────────────────────────────────────
