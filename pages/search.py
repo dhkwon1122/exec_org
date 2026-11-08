@@ -6,7 +6,7 @@
 """
 import dash
 import dash_bootstrap_components as dbc
-from dash import Input, Output, callback, dcc, html
+from dash import Input, Output, State, callback, dcc, html
 
 from components import doc_ui, ui
 from components.history_form import people_options
@@ -64,6 +64,8 @@ def layout(q: str = '', person: str = '', **_):
                 ], className='g-2 mb-3'),
                 html.Div(id='s-count', className='small text-muted mb-2'),
                 html.Div(id='s-results'),
+                ui.pager('s-page'),
+                html.Div(id='s-similar'),
             ], lg=9),
             dbc.Col([
                 html.H6('자주 나온 키워드', className='text-muted'),
@@ -83,10 +85,24 @@ def layout(q: str = '', person: str = '', **_):
     ])
 
 
-@callback(Output('s-results', 'children'), Output('s-count', 'children'),
-          Input('s-q', 'value'), Input('s-types', 'value'), Input('s-person', 'value'), Input('s-author', 'value'),
-          Input('s-from', 'value'), Input('s-to', 'value'), Input('s-auto', 'value'), Input('s-sem', 'value'))
-def search(q, types, person_id, author, date_from, date_to, include_auto, semantic=True):
+_FILTERS = [Input('s-q', 'value'), Input('s-types', 'value'), Input('s-person', 'value'), Input('s-author', 'value'),
+            Input('s-from', 'value'), Input('s-to', 'value'), Input('s-auto', 'value'), Input('s-sem', 'value')]
+
+
+@callback(Output('s-page', 'active_page'), *_FILTERS, prevent_initial_call=True)
+def first_page(*_):
+    """조건이 바뀌면 첫 쪽부터."""
+    return 1
+
+
+ui.scroll_to_top_on_page('s-page', 's-count')
+
+
+@callback(Output('s-results', 'children'), Output('s-count', 'children'), Output('s-page', 'max_value'),
+          Output('s-page', 'style'), Output('s-similar', 'children'),
+          *[State(i.component_id, i.component_property) for i in _FILTERS], Input('s-page', 'active_page'))
+def search(q, types, person_id, author, date_from, date_to, include_auto, semantic=True, page=1):
+    """조건이 바뀌면 first_page 가 쪽을 1로 돌려 여기로 온다 (첫 화면은 쪽의 처음 값으로). 한 쪽에 30건."""
     terms = store.search_terms(q or '')
     groups = [glossary.expand(t) for t in terms]  # 용어집의 같은 말
     extra = [w for g in groups for w in g[1:]]
@@ -103,8 +119,9 @@ def search(q, types, person_id, author, date_from, date_to, include_auto, semant
         except embed.EmbedError as e:
             sem_note = dbc.Alert(f'의미 검색을 하지 못했습니다 — {e}', color='warning', className='small py-1 px-2')
     if not rows and not docs and not similar and not sim_docs and not sim_refs:
-        return [sem_note, dbc.Alert('조건에 맞는 이력이 없습니다.', color='light')], ''
-    label = f'{len(rows)}건' + (' (최대 200건까지 표시)' if len(rows) >= 200 else '')
+        return [sem_note, dbc.Alert('조건에 맞는 이력이 없습니다.', color='light')], '', *ui.pager_state(0), None
+    shown, page = ui.page_of(rows, page)
+    label = f'{len(rows)}건' + (' (최대 200건까지)' if len(rows) >= 200 else '') + ui.page_note(len(rows), page)
     if docs:
         label += f' · 첨부 문서 {len(docs)}건'
     if extra:
@@ -115,10 +132,9 @@ def search(q, types, person_id, author, date_from, date_to, include_auto, semant
     if similar or sim_docs or sim_refs:
         label += f' · 뜻이 비슷한 이력 {len(similar)}건' + (f', 문서·자료 {len(sim_docs) + len(sim_refs)}건'
                                                        if sim_docs or sim_refs else '')
-    return [sem_note,
-            _docs_card(docs) if docs else None,
-            dbc.ListGroup([ui.history_card(h, terms=terms, show_task=True, actions=False) for h in rows]),
-            _similar_section(similar, sim_docs, sim_refs)], label
+    cards = dbc.ListGroup([ui.history_card(h, terms=terms, show_task=True, actions=False) for h in shown])
+    return ([sem_note, _docs_card(docs) if docs else None, cards], label, *ui.pager_state(len(rows)),
+            _similar_section(similar, sim_docs, sim_refs))
 
 
 def _semantic(q: str, filters: dict, shown: set[int], docs: list[dict]):

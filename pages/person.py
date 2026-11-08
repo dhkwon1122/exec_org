@@ -94,6 +94,7 @@ def layout(person_id=None, **_):
                 ]), className='mb-3'),
                 html.Div(id='pp-count', className='small text-muted mb-2'),
                 html.Div(id='pp-history'),
+                ui.pager('pp-hist-page'),
             ], lg=8),
             dbc.Col(html.Div(id='pp-side'), lg=4),
         ]),
@@ -103,15 +104,35 @@ def layout(person_id=None, **_):
 register_form_callbacks('pp')
 
 
-@callback(Output('pp-header', 'children'), Output('pp-history', 'children'), Output('pp-count', 'children'),
-          Output('pp-side', 'children'), Output('pp-task', 'options'), Output('pp-pending', 'data'),
-          Output('pp-poll', 'disabled'),
+@callback(Output('pp-history', 'children'), Output('pp-count', 'children'), Output('pp-hist-page', 'max_value'),
+          Output('pp-hist-page', 'style'),
+          Input('pp-refresh', 'data'), Input('history-changed', 'data'), Input('todo-changed', 'data'),
+          Input('pp-hist-page', 'active_page'), State('pp-id', 'data'))
+def render_history(_, _h, _t, page, pid):
+    """기록 목록만 따로 — 쪽을 바꿔도 임원 화면 전체를 다시 그리지 않게. 최근 것부터 한 쪽(30건)씩."""
+    if store.get_person(pid) is None:
+        return None, '', *ui.pager_state(0)
+    hist = store.search_history('', person_id=pid, limit=500)
+    rows, page = ui.page_of(hist, page)
+    timeline = dbc.ListGroup([
+        ui.history_card(h, show_task=True, added_todos=store.todos_for_history(h['id']) if h['ai_todos'] else None)
+        for h in rows]) if hist else html.Div('이 임원과 연결된 기록이 없습니다.', className='text-muted small')
+    n_trend = sum(h['entry_type'] == '동향' for h in hist)
+    count = f'기록 {len(hist)}건 (동향 {n_trend}건)' + ui.page_note(len(hist), page) if hist else ''
+    return timeline, count, *ui.pager_state(len(hist))
+
+
+ui.scroll_to_top_on_page('pp-hist-page', 'pp-count')
+
+
+@callback(Output('pp-header', 'children'), Output('pp-side', 'children'), Output('pp-task', 'options'),
+          Output('pp-pending', 'data'), Output('pp-poll', 'disabled'),
           Input('pp-refresh', 'data'), Input('history-changed', 'data'), Input('todo-changed', 'data'),
           State('pp-id', 'data'))
 def render(_, _h, _t, pid):
     p = store.get_person(pid)
     if p is None:
-        return dbc.Alert('삭제된 임원입니다.', color='warning'), None, '', None, [], [], True
+        return dbc.Alert('삭제된 임원입니다.', color='warning'), None, [], [], True
     header = dbc.Card(dbc.CardBody([
         html.Div([
             html.H4([html.I(className='bi bi-person-badge me-2'), p['name'],
@@ -134,11 +155,6 @@ def render(_, _h, _t, pid):
     ]))
 
     hist = store.search_history('', person_id=pid, limit=500)
-    timeline = dbc.ListGroup([
-        ui.history_card(h, show_task=True, added_todos=store.todos_for_history(h['id']) if h['ai_todos'] else None)
-        for h in hist]) if hist else html.Div('이 임원과 연결된 기록이 없습니다.', className='text-muted small')
-    n_trend = sum(h['entry_type'] == '동향' for h in hist)
-    count = f'기록 {len(hist)}건 (동향 {n_trend}건)' if hist else ''
 
     tasks = {}
     for h in hist:
@@ -164,7 +180,7 @@ def render(_, _h, _t, pid):
     ]
     task_opts = [{'label': f"#{t['id']} {t['title']}", 'value': t['id']} for t in store.list_tasks()]
     pending = sorted(h['id'] for h in hist if h['ai_status'] == 'pending')
-    return header, timeline, count, side, task_opts, pending, not pending
+    return header, side, task_opts, pending, not pending
 
 
 def _absence_card(pid: int):
