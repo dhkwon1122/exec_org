@@ -137,12 +137,12 @@ def test_search_page_adds_similar_records(fresh_db, monkeypatch):
     store.add_history(t['id'], '보직 변경 통보', title='보직 변경')
     store.add_history(t['id'], '인사 발령 회의 메모')
     _index_all()
-    out, label = page.search('인사 발령', None, None, None, None, None, False, True)
+    out, label, _more, _style, similar = page.search('인사 발령', None, None, None, None, None, False, True)
     assert label == '1건 · 뜻이 비슷한 이력 1건'
-    text = json.dumps(out, default=lambda o: o.to_plurality_json() if hasattr(o, 'to_plurality_json') else str(o),
+    text = json.dumps([out, similar], default=lambda o: o.to_plurality_json() if hasattr(o, 'to_plurality_json') else str(o),
                       ensure_ascii=False)
     assert '보직 변경' in text and '비슷함' in text
-    out, label = page.search('인사 발령', None, None, None, None, None, False, False)
+    out, label, *_ = page.search('인사 발령', None, None, None, None, None, False, False)
     assert label == '1건'
 
 
