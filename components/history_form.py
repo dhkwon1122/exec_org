@@ -44,8 +44,13 @@ def task_options(exclude: int | None = None) -> list[dict]:
 
 
 def people_options() -> list[dict]:
-    return [{'label': f"{p['name']} {p['position']}".strip() + (f" · {p['org']}" if p['org'] else ''),
-             'value': p['id']} for p in sorted(store.list_people(), key=lambda p: p['name'])]
+    """임원과 리더(services/leaders.py) — 리더는 '· 리더 직책' 표시."""
+    def label(p):
+        if p['role'] == 'leader':
+            return f"{p['name']} · 리더 {p['assignment']}".strip() + (f" · {p['org']}" if p['org'] else '')
+        return f"{p['name']} {p['position']}".strip() + (f" · {p['org']}" if p['org'] else '')
+    return [{'label': label(p), 'value': p['id']}
+            for p in sorted(store.list_people(role='all'), key=lambda p: (p['role'] == 'leader', p['name']))]
 
 
 def history_form(prefix: str = 'h', compact: bool = False, people_value: list[int] | None = None,

@@ -71,7 +71,7 @@ def open_compose(draft, _close):
     hide = {'display': 'none'}
     return (True, book, to, '', '', draft.get('subject', ''), draft.get('text', ''),
             f'<html><body style="font-family:sans-serif;margin:8px">{table}</body></html>' if table else '',
-            {} if table else hide, atts, [], {} if atts else hide,
+            {} if table else hide, atts, draft.get('attach_value') or [], {} if atts else hide,
             {'table_html': table, 'related_kind': draft.get('related_kind', ''),
              'related_id': draft.get('related_id', '')}, _config_note(), False)
 

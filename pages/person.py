@@ -8,7 +8,7 @@ from dash import Input, Output, State, callback, ctx, dash_table, dcc, html, no_
 from components import absence_ui, ui
 from components.history_form import decode_text_upload, history_form, register_form_callbacks, save_history
 from pages.people import person_form
-from services import absences, auth, llm, profile, store
+from services import absences, auth, leader_sync, leaders, llm, profile, store
 
 dash.register_page(__name__, path_template='/people/<person_id>', name='임원 상세', title='업무 기록 · 임원')
 
@@ -19,7 +19,8 @@ def layout(person_id=None, **_):
     except (TypeError, ValueError):
         pid = None
     if pid is None or store.get_person(pid) is None:
-        return dbc.Alert(['임원을 찾을 수 없습니다. ', dcc.Link('임원 목록으로', href='/people')], color='warning')
+        return dbc.Alert(['사람을 찾을 수 없습니다. ', dcc.Link('임원 목록으로', href='/people'), ' · ',
+                          dcc.Link('리더 목록으로', href='/leaders')], color='warning')
 
     form = history_form('pp', people_value=[pid], default_type='동향')
     return html.Div([
@@ -30,7 +31,9 @@ def layout(person_id=None, **_):
         dcc.Location(id='pp-redirect', refresh='callback-nav'),
         dbc.Modal([
             dbc.ModalHeader(dbc.ModalTitle('임원 정보 수정')),
-            dbc.ModalBody(person_form('pe')),
+            dbc.ModalBody([dbc.Row([dbc.Col([dbc.Label('직책 (리더)'),
+                                             dbc.Input(id='pe-assignment', placeholder='예: 팀장')], md=4)],
+                                   className='mb-2'), *person_form('pe')]),
             dbc.ModalFooter([
                 dbc.Button('삭제', id='pe-delete', color='danger', outline=True, className='me-auto'),
                 dbc.Button('취소', id='pe-cancel', color='secondary', outline=True),
@@ -86,7 +89,8 @@ def layout(person_id=None, **_):
         dbc.Row([
             dbc.Col([
                 dbc.Card(dbc.CardBody([
-                    html.Div([html.I(className='bi bi-binoculars me-1'), '이 임원에 대해 기록'],
+                    html.Div([html.I(className='bi bi-binoculars me-1'),
+                              '이 리더에 대해 기록' if leaders.is_leader(pid) else '이 임원에 대해 기록'],
                              className='fw-semibold mb-2'),
                     dcc.Dropdown(id='pp-task', multi=True, className='mb-2',
                                  placeholder='관련 업무 — 여러 업무에 걸치면 모두 (동향이면 비워 두세요)'),
@@ -116,7 +120,7 @@ def render_history(_, _h, _t, page, pid):
     rows, page = ui.page_of(hist, page)
     timeline = dbc.ListGroup([
         ui.history_card(h, show_task=True, added_todos=store.todos_for_history(h['id']) if h['ai_todos'] else None)
-        for h in rows]) if hist else html.Div('이 임원과 연결된 기록이 없습니다.', className='text-muted small')
+        for h in rows]) if hist else html.Div('이 사람과 연결된 기록이 없습니다.', className='text-muted small')
     n_trend = sum(h['entry_type'] == '동향' for h in hist)
     count = f'기록 {len(hist)}건 (동향 {n_trend}건)' + ui.page_note(len(hist), page) if hist else ''
     return timeline, count, *ui.pager_state(len(hist))
@@ -133,10 +137,16 @@ def render(_, _h, _t, pid):
     p = store.get_person(pid)
     if p is None:
         return dbc.Alert('삭제된 임원입니다.', color='warning'), None, [], [], True
+    leader = p['role'] == 'leader'
     header = dbc.Card(dbc.CardBody([
         html.Div([
             html.H4([html.I(className='bi bi-person-badge me-2'), p['name'],
+                     html.Span(f" {p['assignment']}" if leader and p['assignment'] else '', className='ms-1'),
                      html.Span(f" {p['position']}", className='text-muted')], className='mb-0 me-auto'),
+            dcc.Link([html.I(className='bi bi-arrow-left me-1'), '리더 목록'], href='/leaders', className='small me-2')
+            if leader else None,
+            dbc.Badge('리더', color='primary', className='me-1') if leader else None,
+            dbc.Badge('지난 리더', color='secondary', className='me-2') if leader and p['hr_state'] == 'former' else None,
             dbc.Badge('추적 중지', color='secondary', className='me-2') if not p['active'] else None,
             dbc.Button('추적 재개' if not p['active'] else '추적 중지', id='pp-toggle-active', color='secondary',
                        outline=True, size='sm', className='me-2',
@@ -144,11 +154,13 @@ def render(_, _h, _t, pid):
             dbc.Button([html.I(className='bi bi-pencil me-1'), '수정'], id='pe-open', color='secondary',
                        outline=True, size='sm'),
         ], className='d-flex align-items-center flex-wrap gap-1 mb-1'),
-        html.Div(p['org'], className='text-muted') if p['org'] else None,
+        html.Div([p['org'], html.Span(f"  ({p['org_path']})", className='small') if p['org_path'] else None],
+                 className='text-muted') if p['org'] else None,
         _hr_line(p),
         html.Div([dbc.Badge('People in SAIT', color='info', className='me-1'),
-                  "불러오기 때 People in SAIT 값과 비교해 바뀐 점을 제안하고 경력 이력을 쌓음 "
-                  f"(최근 {p['synced_at'][:10]})"], className='small text-muted')
+                  ("리더 불러오기 때 People in SAIT 값으로 맞추고 경력·평가·리더십진단을 옮김 " if leader else
+                   "불러오기 때 People in SAIT 값과 비교해 바뀐 점을 제안하고 경력 이력을 쌓음 ")
+                  + f"(최근 {p['synced_at'][:10]})"], className='small text-muted')
         if p['source_id'] else None,
         html.Div('별칭: ' + ', '.join(p['aliases']), className='small text-muted') if p['aliases'] else None,
         ui.multiline(p['note']) if p['note'] else None,
@@ -169,7 +181,8 @@ def render(_, _h, _t, pid):
                          className='badge rounded-pill text-bg-light border text-decoration-none me-1 mb-1')
                 for k, n in kw]) if kw else html.Div('없음', className='small text-muted')),
         ], className='mb-3'),
-        _absence_card(pid),
+        _absence_card(pid) if p['role'] != 'leader' else None,
+        _leadership_card(pid),
         _career_card(store.list_career(pid)),
         dbc.Card([
             dbc.CardHeader(f'관련 업무 ({len(tasks)})', className='small'),
@@ -181,6 +194,31 @@ def render(_, _h, _t, pid):
     task_opts = [{'label': f"#{t['id']} {t['title']}", 'value': t['id']} for t in store.list_tasks()]
     pending = sorted(h['id'] for h in hist if h['ai_status'] == 'pending')
     return header, side, task_opts, pending, not pending
+
+
+def _leadership_card(pid: int):
+    """리더십진단 (People in SAIT leadership — 리더 불러오기 때 옮김). 최근 연도의 평가자 그룹별 역량 점수."""
+    rows = leaders.leadership(pid)
+    if not rows:
+        return None
+    year = rows[0]['year']
+    latest = [r for r in rows if r['year'] == year]
+    dims = [d for d in leader_sync.LEADERSHIP_DIMS if any(d in r['scores'] for r in latest)]
+    others = sorted({r['year'] for r in rows} - {year}, reverse=True)
+    return dbc.Card([
+        dbc.CardHeader(f'리더십진단 {year}', className='small'),
+        dbc.CardBody([
+            dbc.Table([
+                html.Thead(html.Tr([html.Th('역량')] + [html.Th(r['group']) for r in latest])),
+                html.Tbody([html.Tr([html.Td(d)] + [html.Td(r['scores'].get(d, '-')) for r in latest]) for d in dims]
+                           + [html.Tr([html.Td('평균', className='fw-semibold')]
+                                      + [html.Td(r['avg'] if r['avg'] is not None else '-', className='fw-semibold')
+                                         for r in latest])]),
+            ], size='sm', className='mb-1 small text-center'),
+            html.Div('평균은 저해행동을 뺀 역량 평균' + (f" · 다른 연도: {', '.join(map(str, others))} (엑셀 내보내기에 모두)"
+                                                if others else ''), className='small text-muted'),
+        ]),
+    ], className='mb-3')
 
 
 def _absence_card(pid: int):
@@ -284,35 +322,37 @@ def add_record(_, pid, task_ids, etype, content, when, use_ai, links, att, att_n
           Output('pe-org', 'value'), Output('pe-aliases', 'value'), Output('pe-note', 'value'),
           Output('pe-error', 'children'), Output('pe-error', 'is_open'),
           Output('pp-refresh', 'data', allow_duplicate=True), Output('pp-redirect', 'pathname'),
+          Output('pe-assignment', 'value'),
           Input('pe-open', 'n_clicks'), Input('pe-cancel', 'n_clicks'), Input('pe-save', 'n_clicks'),
           Input('pe-delete', 'n_clicks'), Input('pp-toggle-active', 'n_clicks'),
           State('pp-id', 'data'), State('pe-name', 'value'), State('pe-position', 'value'), State('pe-org', 'value'),
-          State('pe-aliases', 'value'), State('pe-note', 'value'), State('pp-refresh', 'data'),
-          prevent_initial_call=True)
-def edit_person(n_open, _c, _s, _d, n_toggle, pid, name, position, org, aliases, note, n):
+          State('pe-aliases', 'value'), State('pe-note', 'value'), State('pe-assignment', 'value'),
+          State('pp-refresh', 'data'), prevent_initial_call=True)
+def edit_person(n_open, _c, _s, _d, n_toggle, pid, name, position, org, aliases, note, assignment, n):
     nu = no_update
     trig = ctx.triggered_id
     if trig is None or (trig in ('pe-open', 'pp-toggle-active') and not ctx.triggered[0]['value']):
-        return (nu,) * 10  # 머리말이 다시 그려지며 버튼이 새로 생길 때의 빈 트리거
+        return (nu,) * 11  # 머리말이 다시 그려지며 버튼이 새로 생길 때의 빈 트리거
     p = store.get_person(pid)
     if trig == 'pe-open':
-        return True, p['name'], p['position'], p['org'], ', '.join(p['aliases']), p['note'], '', False, nu, nu
+        return (True, p['name'], p['position'], p['org'], ', '.join(p['aliases']), p['note'], '', False, nu, nu,
+                p['assignment'])
     if trig == 'pe-cancel':
-        return (False,) + (nu,) * 5 + ('', False, nu, nu)
+        return (False,) + (nu,) * 5 + ('', False, nu, nu, nu)
     if trig == 'pp-toggle-active':
         store.update_person(pid, active=not p['active'])
-        return (nu,) * 8 + ((n or 0) + 1, nu)
+        return (nu,) * 8 + ((n or 0) + 1, nu, nu)
     if trig not in ('pe-save', 'pe-delete'):
-        return (nu,) * 10
+        return (nu,) * 11
     try:
         if trig == 'pe-delete':
             store.delete_person(pid)
-            return (False,) + (nu,) * 5 + ('', False, nu, '/people')
+            return (False,) + (nu,) * 5 + ('', False, nu, '/leaders' if p['role'] == 'leader' else '/people', nu)
         store.update_person(pid, name=name, position=position or '', org=org or '', aliases=aliases or '',
-                            note=note or '')
+                            note=note or '', assignment=assignment or '')
     except ValueError as e:
-        return (True,) + (nu,) * 5 + (str(e), True, nu, nu)
-    return (False,) + (nu,) * 5 + ('', False, (n or 0) + 1, nu)
+        return (True,) + (nu,) * 5 + (str(e), True, nu, nu, nu)
+    return (False,) + (nu,) * 5 + ('', False, (n or 0) + 1, nu, nu)
 
 
 def _profile_cards(pid: int):
@@ -323,7 +363,7 @@ def _profile_cards(pid: int):
                   html.Span(h['text'])], className='d-flex small py-1 border-bottom') for h in hls
     ]) if hls else html.Div('아직 정리한 주요 이력이 없습니다 — "정리"를 눌러 발령이력으로 초안을 만드세요.',
                             className='small text-muted')
-    kinds, years = profile.evaluation_table(pid)
+    kinds, years = profile.evaluation_table(pid, defaults=not leaders.is_leader(pid))
     ev_body = dbc.Table([
         html.Thead(html.Tr([html.Th('연도')] + [html.Th(k) for k in kinds])),
         html.Tbody([html.Tr([html.Td(r['year'])] + [html.Td(r.get(k, '-')) for k in kinds]) for r in years]),

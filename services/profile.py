@@ -196,10 +196,13 @@ def save_evaluations(person_id: int, items: list[dict]) -> int:
     return len(clean)
 
 
-def evaluation_table(person_id: int) -> tuple[list[str], list[dict]]:
-    """화면 표 — (종류 열 목록, 연도별 행 [{'year', 종류: 등급}]) 최근 연도가 위."""
+def evaluation_table(person_id: int, defaults: bool = True) -> tuple[list[str], list[dict]]:
+    """화면 표 — (종류 열 목록, 연도별 행 [{'year', 종류: 등급}]) 최근 연도가 위.
+    defaults=False(리더)면 기본 종류(임원종합평가·MBO) 열을 늘 넣지 않고 있는 종류만."""
     evals = list_evaluations(person_id)
-    kinds = [k for k in DEFAULT_EVAL_KINDS] + sorted({e['kind'] for e in evals} - set(DEFAULT_EVAL_KINDS))
+    base = DEFAULT_EVAL_KINDS if defaults else [k for k in ('연봉등급', '상반기업적', '하반기업적')
+                                                if any(e['kind'] == k for e in evals)]
+    kinds = list(base) + sorted({e['kind'] for e in evals} - set(base))
     by_year: dict[int, dict] = {}
     for e in evals:
         by_year.setdefault(e['year'], {'year': e['year']})[e['kind']] = e['grade'] or e['note']

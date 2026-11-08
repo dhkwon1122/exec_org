@@ -315,6 +315,7 @@ _NAV = [  # (이름, 주소, 아이콘, 주소 맞춤 — 'find' 는 ui.FIND_PAT
     ('캘린더', '/calendar', 'bi-calendar3', 'exact'),
     ('받은 메일', '/inbox', 'bi-inbox', 'exact'),
     ('임원', '/people', 'bi-people', 'partial'),
+    ('리더', '/leaders', 'bi-person-workspace', 'exact'),
     ('검색·자료', '/search', 'bi-search', 'find'),  # 이력 검색·참고자료·컨플루언스 (화면 위 탭 — ui.find_tabs)
     ('용어집', '/glossary', 'bi-book', 'exact'),
     ('요약 형식', '/formats', 'bi-layout-text-sidebar', 'exact'),
