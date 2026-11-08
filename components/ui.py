@@ -2,6 +2,7 @@
 import re
 from urllib.parse import quote
 
+import dash
 import dash_bootstrap_components as dbc
 from dash import dcc, html
 
@@ -147,6 +148,45 @@ def history_refs(refs: list[dict], terms: list[str] | None = None):
         else:
             items.append(html.Div([icon, highlight(r['title'], terms)]))
     return html.Div(items, className='small mt-1 ps-2 border-start border-2')
+
+
+HISTORY_PAGE = 30  # 기록 카드는 한 쪽에 이만큼 — 많이 그릴수록 화면(Dash)이 느려지고 덧붙이면 갈수록 더 느려져 쪽을 나눈다
+
+
+def pager(id_: str):
+    """기록 목록 아래 쪽 번호 (◀ 1 2 3 … ▶). pager_state 로 쪽 수·보이기를 정한다."""
+    return dbc.Pagination(id=id_, max_value=1, active_page=1, fully_expanded=False, previous_next=True, size='sm',
+                          className='mt-2 mb-0 justify-content-center', style={'display': 'none'})
+
+
+def page_of(rows: list, page) -> tuple[list, int]:
+    """→ (그 쪽의 기록, 쪽 번호 — 범위를 넘으면 마지막 쪽)."""
+    last = max(1, -(-len(rows) // HISTORY_PAGE))
+    page = min(max(int(page or 1), 1), last)
+    return rows[(page - 1) * HISTORY_PAGE:page * HISTORY_PAGE], page
+
+
+def pager_state(total: int) -> tuple:
+    """→ (쪽 수, style) — 한 쪽이면 숨김."""
+    pages = max(1, -(-total // HISTORY_PAGE))
+    return pages, ({} if pages > 1 else {'display': 'none'})
+
+
+def page_note(total: int, page: int) -> str:
+    """'31–60번째' 같은 표시 (한 쪽이면 빈 글자)."""
+    if total <= HISTORY_PAGE:
+        return ''
+    return f' · {(page - 1) * HISTORY_PAGE + 1}–{min(page * HISTORY_PAGE, total)}번째'
+
+
+def scroll_to_top_on_page(pager_id: str, target_id: str):
+    """쪽을 바꾸면 목록 처음으로 화면을 올린다."""
+    dash.clientside_callback(
+        f"""function(p) {{ var el = document.getElementById({target_id!r});
+            if (el && p > 0) {{ el.scrollIntoView({{block: 'start', behavior: 'instant'}}); }}
+            return window.dash_clientside.no_update; }}""",
+        dash.Output(target_id, 'className', allow_duplicate=True), dash.Input(pager_id, 'active_page'),
+        prevent_initial_call=True)
 
 
 def highlight(text: str, terms: list[str] | None, multiline_text: bool = False):

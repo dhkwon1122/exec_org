@@ -212,7 +212,7 @@ def layout(task_id=None, src=None, **_):
                              html.Div(dbc.Button([html.I(className='bi bi-box-arrow-in-down me-1'), '기존 이력 연결'],
                                                  id='hx-open', color='link', size='sm', className='p-0'),
                                       className='text-end mb-1'),
-                             html.Div(id='td-history')], label='이력', tab_id='history'),
+                             html.Div(id='td-history'), ui.pager('td-hist-page')], label='이력', tab_id='history'),
                     dbc.Tab([dbc.Card(dbc.CardBody(todo_ui.add_form('tt', with_task=False)), className='mb-3'),
                              html.Div(id='td-todos')], label='하위 업무', tab_id='todos', id='td-todo-tab'),
                     dbc.Tab([_reference_form(), html.Div(id='td-refs')], label='참고자료', tab_id='refs'),
@@ -226,7 +226,26 @@ def layout(task_id=None, src=None, **_):
 
 # ── 렌더링 ────────────────────────────────────────────────────────────
 
-@callback(Output('td-header', 'children'), Output('td-side', 'children'), Output('td-history', 'children'),
+@callback(Output('td-history', 'children'), Output('td-hist-page', 'max_value'), Output('td-hist-page', 'style'),
+          Input('td-refresh', 'data'), Input('todo-changed', 'data'), Input('history-changed', 'data'),
+          Input('td-hist-page', 'active_page'), State('td-id', 'data'))
+def render_history(_, _t, _h, page, tid):
+    """이력 목록만 따로 — 쪽을 바꿔도 업무 화면 전체를 다시 그리지 않게. 최근 것부터 한 쪽(30건)씩."""
+    if store.get_task(tid) is None:
+        return None, *ui.pager_state(0)
+    hist = store.list_history(tid)
+    rows, _ = ui.page_of(hist, page)
+    history = dbc.ListGroup([
+        ui.history_card(h, added_todos=store.todos_for_history(h['id']) if h['ai_todos'] else None,
+                        context_task_id=tid)
+        for h in rows]) if hist else html.Div('이력이 없습니다.', className='text-muted small')
+    return history, *ui.pager_state(len(hist))
+
+
+ui.scroll_to_top_on_page('td-hist-page', 'td-history')
+
+
+@callback(Output('td-header', 'children'), Output('td-side', 'children'),
           Output('td-refs', 'children'), Output('td-links', 'children'), Output('l-target', 'options'),
           Output('td-pending', 'data'), Output('td-poll', 'disabled'),
           Output('td-todos', 'children'), Output('td-todo-tab', 'label'), Output('tt-assignee', 'options'),
@@ -235,7 +254,7 @@ def layout(task_id=None, src=None, **_):
 def render(_, _t, _h, _d, tid):
     t = store.get_task(tid)
     if t is None:
-        return dbc.Alert('삭제된 업무입니다.', color='warning'), None, None, None, None, [], [], True, None, '하위 업무', []
+        return dbc.Alert('삭제된 업무입니다.', color='warning'), None, None, None, [], [], True, None, '하위 업무', []
     parent = store.get_task(t['parent_id']) if t['parent_id'] else None
 
     header = dbc.Card(dbc.CardBody([
@@ -274,13 +293,7 @@ def render(_, _t, _h, _d, tid):
                 for k, n in kw])),
         ]))
 
-    hist = store.list_history(tid)
-    history = dbc.ListGroup([
-        ui.history_card(h, added_todos=store.todos_for_history(h['id']) if h['ai_todos'] else None,
-                        context_task_id=tid)
-        for h in hist]) if hist else \
-        html.Div('이력이 없습니다.', className='text-muted small')
-    pending = sorted(h['id'] for h in hist if h['ai_status'] == 'pending')
+    pending = sorted(store.pending_ai_ids(tid))
 
     # 참고자료 — 이 업무·하위 업무에 등록한 자료, 그 업무들의 기록에 붙은 자료, 함께 걸친 기록의 자료
     refs = [r for r in store.references_for_task(tid) if r['kind'] != 'file']  # 파일은 아래 '문서'에 판으로
@@ -371,7 +384,7 @@ def render(_, _t, _h, _d, tid):
     n_done = sum(x['done'] for x in todos)
     todo_view = todo_ui.todo_list(todos, show_task=False,
                                   empty='하위 업무가 없습니다 — 위에 적고 Enter. 마감·담당을 정하면 "내 업무"와 캘린더에 나옵니다.')
-    return (header, side, history, ref_view, link_view, targets, pending, not pending,
+    return (header, side, ref_view, link_view, targets, pending, not pending,
             todo_view, f'하위 업무 ({n_done}/{len(todos)})' if todos else '하위 업무', todo_ui.assignee_options())
 
 

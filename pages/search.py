@@ -6,15 +6,13 @@
 """
 import dash
 import dash_bootstrap_components as dbc
-from dash import Input, Output, State, callback, ctx, dcc, html
+from dash import Input, Output, State, callback, dcc, html
 
 from components import doc_ui, ui
 from components.history_form import people_options
 from services import doc_summary, embed, glossary, store
 
 dash.register_page(__name__, path='/search', name='이력 검색', title='업무 기록 · 이력 검색')
-
-PAGE = 30  # 기록 카드는 한 번에 이만큼만 그린다 — 200건을 한꺼번에 그리면 화면(Dash)이 수십 초 멈춘다
 
 
 def _sem_status():
@@ -65,10 +63,8 @@ def layout(q: str = '', person: str = '', **_):
                             md=2, className='d-flex align-items-center flex-wrap'),
                 ], className='g-2 mb-3'),
                 html.Div(id='s-count', className='small text-muted mb-2'),
-                dcc.Store(id='s-limit', data=PAGE),
                 html.Div(id='s-results'),
-                dbc.Button(id='s-more', size='sm', color='secondary', outline=True, className='w-100 mt-2',
-                           style={'display': 'none'}),
+                ui.pager('s-page'),
                 html.Div(id='s-similar'),
             ], lg=9),
             dbc.Col([
@@ -93,19 +89,20 @@ _FILTERS = [Input('s-q', 'value'), Input('s-types', 'value'), Input('s-person', 
             Input('s-from', 'value'), Input('s-to', 'value'), Input('s-auto', 'value'), Input('s-sem', 'value')]
 
 
-@callback(Output('s-limit', 'data'), *_FILTERS, Input('s-more', 'n_clicks'), State('s-limit', 'data'),
-          prevent_initial_call=True)
-def page_limit(*args):
-    """조건이 바뀌면 처음 30건부터, '더 보기'를 누르면 30건 더."""
-    return (args[-1] or PAGE) + PAGE if ctx.triggered_id == 's-more' else PAGE
+@callback(Output('s-page', 'active_page'), *_FILTERS, prevent_initial_call=True)
+def first_page(*_):
+    """조건이 바뀌면 첫 쪽부터."""
+    return 1
 
 
-@callback(Output('s-results', 'children'), Output('s-count', 'children'), Output('s-more', 'children'),
-          Output('s-more', 'style'), Output('s-similar', 'children'),
-          *[State(i.component_id, i.component_property) for i in _FILTERS], Input('s-limit', 'data'))
-def search(q, types, person_id, author, date_from, date_to, include_auto, semantic=True, limit=PAGE):
-    """조건이 바뀌면 page_limit 이 s-limit 을 다시 정해 여기로 온다 (첫 화면은 s-limit 처음 값으로)."""
-    limit = limit or PAGE
+ui.scroll_to_top_on_page('s-page', 's-count')
+
+
+@callback(Output('s-results', 'children'), Output('s-count', 'children'), Output('s-page', 'max_value'),
+          Output('s-page', 'style'), Output('s-similar', 'children'),
+          *[State(i.component_id, i.component_property) for i in _FILTERS], Input('s-page', 'active_page'))
+def search(q, types, person_id, author, date_from, date_to, include_auto, semantic=True, page=1):
+    """조건이 바뀌면 first_page 가 쪽을 1로 돌려 여기로 온다 (첫 화면은 쪽의 처음 값으로). 한 쪽에 30건."""
     terms = store.search_terms(q or '')
     groups = [glossary.expand(t) for t in terms]  # 용어집의 같은 말
     extra = [w for g in groups for w in g[1:]]
@@ -121,13 +118,10 @@ def search(q, types, person_id, author, date_from, date_to, include_auto, semant
             similar, sim_docs, sim_refs = _semantic(sem_q, filters, {h['id'] for h in rows}, docs)
         except embed.EmbedError as e:
             sem_note = dbc.Alert(f'의미 검색을 하지 못했습니다 — {e}', color='warning', className='small py-1 px-2')
-    hide = ('', {'display': 'none'})
     if not rows and not docs and not similar and not sim_docs and not sim_refs:
-        return [sem_note, dbc.Alert('조건에 맞는 이력이 없습니다.', color='light')], '', *hide, None
-    more = ([html.I(className='bi bi-chevron-down me-1'), f'더 보기 ({len(rows) - limit}건 남음)'], {}) \
-        if len(rows) > limit else hide
-    label = f'{len(rows)}건' + (' (최대 200건까지)' if len(rows) >= 200 else '') \
-        + (f' 중 {limit}건 표시' if len(rows) > limit else '')
+        return [sem_note, dbc.Alert('조건에 맞는 이력이 없습니다.', color='light')], '', *ui.pager_state(0), None
+    shown, page = ui.page_of(rows, page)
+    label = f'{len(rows)}건' + (' (최대 200건까지)' if len(rows) >= 200 else '') + ui.page_note(len(rows), page)
     if docs:
         label += f' · 첨부 문서 {len(docs)}건'
     if extra:
@@ -138,8 +132,8 @@ def search(q, types, person_id, author, date_from, date_to, include_auto, semant
     if similar or sim_docs or sim_refs:
         label += f' · 뜻이 비슷한 이력 {len(similar)}건' + (f', 문서·자료 {len(sim_docs) + len(sim_refs)}건'
                                                        if sim_docs or sim_refs else '')
-    cards = dbc.ListGroup([ui.history_card(h, terms=terms, show_task=True, actions=False) for h in rows[:limit]])
-    return ([sem_note, _docs_card(docs) if docs else None, cards], label, *more,
+    cards = dbc.ListGroup([ui.history_card(h, terms=terms, show_task=True, actions=False) for h in shown])
+    return ([sem_note, _docs_card(docs) if docs else None, cards], label, *ui.pager_state(len(rows)),
             _similar_section(similar, sim_docs, sim_refs))
 
 
