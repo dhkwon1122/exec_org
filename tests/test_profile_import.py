@@ -181,7 +181,7 @@ def test_excel_requires_key_and_handles_same_names():
 def test_csv_upload_cp949():
     data = '사번,25MBO\nE001,A\n'.encode('cp949')
     t = excel_import.parse_upload('data:text/csv;base64,' + base64.b64encode(data).decode(), 'a.csv')
-    assert t == {'headers': ['사번', '25MBO'], 'rows': [['E001', 'A']]}
+    assert t == {'headers': ['사번', '25MBO'], 'rows': [['E001', 'A']], 'sheet': ''}
 
 
 def test_import_page_path_wins_over_person_template():

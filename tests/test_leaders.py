@@ -209,3 +209,35 @@ def test_leader_excel_upload_status_columns_and_new_leaders(env):
     assert {x['성명']: x for x in leaders.list_status()}['박팀장']['과제구분'] == '국책'
     wb = load_workbook(io.BytesIO(leaders.status_template()))
     assert [c.value for c in wb['리더급 현황'][1]] == leaders.STATUS_COLUMNS
+
+
+def _upload(wb_or_bytes, name='현황.xlsx'):
+    import base64
+    if not isinstance(wb_or_bytes, bytes):
+        buf = io.BytesIO()
+        wb_or_bytes.save(buf)
+        wb_or_bytes = buf.getvalue()
+    return 'data:application/octet-stream;base64,' + base64.b64encode(wb_or_bytes).decode(), name
+
+
+def test_upload_finds_header_row_and_sheet_and_explains_drm():
+    from openpyxl import Workbook
+    from services import excel_import
+    wb = Workbook()
+    wb.active.title = '안내'
+    wb.active.append(['이 파일은 리더급 현황입니다'])
+    ws = wb.create_sheet('리더급 현황')
+    ws.append(['리더급 현황 (2026.11 기준)'])  # 제목 행
+    ws.append([])
+    ws.append(['', '작성: 피플팀'])
+    ws.append(['사원번호', 'Platform', '그룹', '성명', '과제구분'])
+    ws.append(['L001', 'AI센터', 'AI팀', '박팀장', '국책'])
+    t = excel_import.parse_upload(*_upload(wb))
+    assert t['sheet'] == '리더급 현황' and t['headers'] == ['사원번호', 'Platform', '그룹', '성명', '과제구분']
+    assert t['rows'] == [['L001', 'AI센터', 'AI팀', '박팀장', '국책']]
+    # 암호·DRM(OLE 머리나 zip 이 아닌 내용) — 알아볼 수 있는 안내
+    for raw in (b'\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1' + b'\0' * 600, b'SCDSA002' + b'x' * 100):
+        with pytest.raises(excel_import.ImportError_, match='DRM'):
+            excel_import.parse_upload(*_upload(raw))
+    with pytest.raises(excel_import.ImportError_, match='xlsx·xls·csv'):
+        excel_import.parse_upload(*_upload(b'abc', '현황.pdf'))

@@ -7,6 +7,7 @@ requests==2.34.2
 psycopg2-binary==2.9.12
 Werkzeug>=3.0
 openpyxl==3.1.5
+xlrd==2.0.1
 olefile==0.47
 pypdf==6.17.0
 numpy==2.2.6
