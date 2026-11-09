@@ -14,6 +14,68 @@ from services.db import Person, PersonLeadership
 from services.leader_sync import LEADERSHIP_DIMS
 
 OTHERS = '타인평균'  # 리더십진단 요약에 쓰는 평가자 그룹 (동료+상사+부서원 평균)
+# 리더급 현황 칸 — 불러온 값(Person.leader_info, services/leader_sync.py)에 화면에서 고친 값(leader_manual)을 덮는다
+STATUS_COLUMNS = ['사원번호', 'Platform', '그룹', '부서명', '과제/파트명', '성명', 'CL', 'Knox ID', '구분', '직책구분',
+                  '보직장', '플랫폼장/팀장', '그룹장/PL', 'PM/파트장', '과제구분', '과제명', '보직 수행시작일']
+KIND_ORDER = {k: i for i, k in enumerate(['임원/Master', 'R.Master', '보직장', '일반'])}
+
+
+def _loads(raw) -> dict:
+    try:
+        v = json.loads(raw or '{}')
+    except ValueError:
+        return {}
+    return v if isinstance(v, dict) else {}
+
+
+def _status_of(p: Person) -> tuple[dict, set]:
+    """→ (현황 칸 값, 화면에서 고친 칸 이름)."""
+    info, manual = _loads(p.leader_info), _loads(p.leader_manual)
+    base = {'사원번호': p.source_id or '', '성명': p.name, 'CL': p.position or '', '부서명': p.org or '',
+            '직책구분': '임원/Master' if p.role != 'leader' else '일반'}
+    row = {c: str(manual.get(c, info.get(c) or base.get(c, '')) or '') for c in STATUS_COLUMNS}
+    return row, {c for c in manual if c in STATUS_COLUMNS}
+
+
+def list_status(query: str = '', include_former: bool = False) -> list[dict]:
+    """리더급 현황 — 리더 + 지금 임원. 행마다 STATUS_COLUMNS 칸과 id·role·former·edited(고친 칸).
+    직책구분(임원/Master → R.Master → 보직장 → 일반) → Platform → 그룹 → 과제/파트 → 성명 순."""
+    words = [w.lower() for w in store.search_terms(query or '')]
+    with db.SessionLocal() as s:
+        people = list(s.scalars(select(Person).where(Person.active.is_(True) | (Person.role == 'leader'))))
+    out = []
+    for p in people:
+        leader = p.role == 'leader'
+        former = (p.hr_state or '') == 'former'
+        if not leader and (former or not p.active):  # 임원은 지금 재직 중인 사람만
+            continue
+        if leader and former and not include_former:
+            continue
+        row, edited = _status_of(p)
+        if words and not all(any(w in v.lower() for v in row.values()) or w in (p.note or '').lower() for w in words):
+            continue
+        out.append({**row, 'id': p.id, 'role': p.role or '', 'former': former, 'edited': sorted(edited)})
+    return sorted(out, key=lambda r: (r['former'], KIND_ORDER.get(r['직책구분'], 9), r['Platform'], r['그룹'],
+                                      r['과제/파트명'], r['성명']))
+
+
+def save_status(person_id: int, column: str, value: str) -> None:
+    """현황 칸 하나를 고친다 — 불러온 값과 같아지면 고친 표시를 지운다. 불러오기를 다시 해도 고친 값이 앞선다."""
+    if column not in STATUS_COLUMNS:
+        raise ValueError(f'없는 칸입니다: {column}')
+    value = str(value if value is not None else '').strip()
+    with db.SessionLocal() as s:
+        p = s.get(Person, person_id)
+        if p is None:
+            raise ValueError('사람을 찾을 수 없습니다.')
+        manual = _loads(p.leader_manual)
+        synced = str(_loads(p.leader_info).get(column, '') or '')
+        if value == synced:
+            manual.pop(column, None)
+        else:
+            manual[column] = value
+        p.leader_manual = json.dumps(manual, ensure_ascii=False) if manual else ''
+        s.commit()
 
 
 def list_leaders(query: str = '', include_former: bool = False) -> list[dict]:
@@ -121,12 +183,17 @@ def _sheet(wb: Workbook, title: str, header: list[str], rows: list[list], widths
 
 
 def export_xlsx(person_ids: list[int], records: int = 20) -> bytes:
-    """고른 리더(또는 임원)의 자료를 엑셀로 — 기본 정보 / 경력·발령 / 평가 / 리더십진단 / 최근 기록(사람마다 records 건)."""
+    """고른 리더(또는 임원)의 자료를 엑셀로 — 리더급 현황 / 기본 정보 / 경력·발령 / 평가 / 리더십진단 /
+    최근 기록(사람마다 records 건)."""
     people = [p for p in (store.get_person(int(i)) for i in person_ids) if p]
     if not people:
         raise ValueError('내보낼 사람을 고르세요.')
     wb = Workbook()
     wb.remove(wb.active)
+    with db.SessionLocal() as s:
+        status = {p.id: _status_of(p)[0] for p in s.scalars(select(Person).where(Person.id.in_([p['id'] for p in people])))}
+    _sheet(wb, '리더급 현황', STATUS_COLUMNS, [[status[p['id']][c] for c in STATUS_COLUMNS] for p in people],
+           [10, 14, 16, 16, 18, 9, 7, 12, 8, 11, 7, 11, 9, 10, 9, 24, 13])
     _sheet(wb, '기본 정보', ['이름', '사번', '직책', '조직', '상위 조직', '직급', '재직상태', '나이', '입사일', '근속(년)',
                          '승격일', '연차', '최종학력', '최근 평가', '리더십진단(타인평균)', '메모'],
            [[p['name'], p['source_id'], p['assignment'], p['org'], p['org_path'], p['position'],
@@ -172,6 +239,6 @@ def draft_mail(person_ids: list[int]) -> dict:
     key = attachment_key([p['id'] for p in people])
     return {'subject': f'리더 자료 ({len(people)}명)', 'to': '',
             'text': f'리더 {len(people)}명의 자료를 엑셀로 첨부합니다.\n\n대상: {names}\n'
-                    '시트: 기본 정보 · 경력·발령 · 평가 · 리더십진단 · 최근 기록',
+                    '시트: 리더급 현황 · 기본 정보 · 경력·발령 · 평가 · 리더십진단 · 최근 기록',
             'table_html': '', 'attachments': [{'value': key, 'label': export_filename(len(people))}],
             'attach_value': [key], 'related_kind': 'leaders', 'related_id': ''}

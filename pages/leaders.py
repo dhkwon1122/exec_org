@@ -1,6 +1,7 @@
-"""리더급 목록 — 조직 직책자(팀장·그룹장 등). People in SAIT 에서 불러오고(services/leader_sync.py), 직접 추가도 한다.
-이름을 누르면 임원과 같은 화면(/people/<id>)에서 기록·경력·평가·리더십진단을 본다.
-고른 리더의 자료는 엑셀로 내려받거나 메일에 엑셀로 첨부해 보낸다(services/leaders.py)."""
+"""리더급 현황 — 보직장·R.Master(People in SAIT 에서 불러옴, services/leader_sync.py)와 지금 임원, 직접 추가한 리더.
+표 칸은 services/leaders.py STATUS_COLUMNS. 칸을 고치면 저장되고 불러오기를 다시 해도 유지된다(과제구분 등).
+'상세'를 누르면 임원과 같은 화면(/people/<id>)에서 기록·경력·평가·리더십진단을 본다.
+고른 사람의 자료는 엑셀로 내려받거나 메일에 엑셀로 첨부해 보낸다."""
 import dash
 import dash_bootstrap_components as dbc
 from dash import Input, Output, State, callback, ctx, dash_table, dcc, html, no_update
@@ -10,15 +11,12 @@ from services import leader_sync, leaders
 
 dash.register_page(__name__, path='/leaders', name='리더', title='업무 기록 · 리더')
 
-_COLS = [('name', '이름', 'markdown'), ('assignment', '직책', None), ('org', '조직', None),
-         ('org_path', '상위 조직', None), ('position', '직급', None), ('grade_years', '연차', None),
-         ('tenure', '근속', None), ('eval', '최근 평가', None), ('leadership', '리더십(타인평균)', None),
-         ('records', '기록', None), ('source_id', '사번', None)]
+_LINK = '상세'
 
 
 def layout(**_):
     return html.Div([
-        ui.page_head('리더', '조직 직책자(팀장·그룹장 등) — 임원과 같은 방식으로 기록·경력·평가를 모아 봅니다'),
+        ui.page_head('리더급 현황', '보직장·R.Master·임원 — 칸을 눌러 고치면 저장되고(과제구분 등), 불러오기를 다시 해도 유지됩니다'),
         dcc.Store(id='ld-refresh', data=0),
         dcc.Download(id='ld-download'),
         dbc.Modal([
@@ -39,14 +37,15 @@ def layout(**_):
         ], id='ldn-modal', is_open=False),
         dbc.Row([
             dbc.Col(dbc.Input(id='ld-q', type='search', debounce=True,
-                              placeholder='이름·직책·조직·사번·메모 검색'), md=4),
+                              placeholder='성명·사원번호·조직·과제·Knox ID 검색 (칸별 거르기는 표 머리 아래 칸)'), md=4),
             dbc.Col(dbc.Checkbox(id='ld-former', value=False, label='지난 리더 포함'), md=2,
                     className='d-flex align-items-center'),
             dbc.Col(dbc.Button([html.I(className='bi bi-arrow-repeat me-1'), 'People in SAIT에서 불러오기'],
                                id='ld-sync', color='secondary', outline=True, className='w-100',
                                disabled=not leader_sync.is_available(),
-                               title='조직 직책자(team_refer) 중 임원이 아닌 사람을 리더로 추가·갱신하고, '
-                                     '경력·평가·리더십진단을 함께 옮깁니다. 직책자에서 빠진 리더는 "지난 리더"로 둡니다.'),
+                               title='조직 직책자(보직장)·R.Master 중 임원이 아닌 사람을 리더로 추가·갱신하고, '
+                                     '현황 칸·경력·평가·리더십진단을 함께 옮깁니다. 리더급에서 빠진 리더는 "지난 리더"로 둡니다. '
+                                     '화면에서 고친 칸은 그대로 둡니다.'),
                     md=4),
             dbc.Col(dbc.Button([html.I(className='bi bi-person-plus me-1'), '직접 추가'], id='ldn-open',
                                color='primary', className='w-100'), md=2),
@@ -61,38 +60,62 @@ def layout(**_):
                        color='primary', disabled=True),
         ], className='d-flex align-items-center flex-wrap gap-1 mb-2'),
         dash_table.DataTable(
-            id='ld-table', data=[], row_selectable='multi', selected_row_ids=[], page_size=50,
-            sort_action='native', markdown_options={'link_target': '_self'},
-            columns=[{'id': c, 'name': n, **({'presentation': p} if p else {})} for c, n, p in _COLS],
-            style_cell={'textAlign': 'left', 'fontSize': '0.85rem', 'fontFamily': 'inherit', 'whiteSpace': 'normal',
-                        'height': 'auto', 'padding': '4px 8px'},
-            style_header={'fontWeight': 600, 'backgroundColor': 'var(--bs-tertiary-bg)'},
+            id='ld-table', data=[], row_selectable='multi', selected_row_ids=[], page_size=50, editable=True,
+            sort_action='native', filter_action='native', markdown_options={'link_target': '_self'},
+            columns=[{'id': c, 'name': c} for c in leaders.STATUS_COLUMNS]
+            + [{'id': _LINK, 'name': _LINK, 'presentation': 'markdown', 'editable': False}],
+            fixed_rows={'headers': True},
+            style_table={'overflowX': 'auto', 'maxHeight': '70vh', 'overflowY': 'auto'},
+            style_cell={'textAlign': 'left', 'fontSize': '0.8rem', 'fontFamily': 'inherit', 'whiteSpace': 'normal',
+                        'height': 'auto', 'padding': '4px 6px', 'minWidth': '64px', 'maxWidth': '220px'},
+            style_cell_conditional=[{'if': {'column_id': c}, 'textAlign': 'center'}
+                                    for c in ('보직장', '플랫폼장/팀장', '그룹장/PL', 'PM/파트장', 'CL')],
+            style_header={'fontWeight': 600, 'backgroundColor': 'var(--bs-tertiary-bg)', 'whiteSpace': 'normal'},
             style_data_conditional=[{'if': {'filter_query': '{former} = 1'}, 'color': '#9aa0a6'}],
             css=[{'selector': '.dash-cell-value p', 'rule': 'margin: 0'}],
         ),
-        html.Div('이름을 누르면 기록·경력·평가·리더십진단 화면으로 갑니다. 기록은 그 화면에서 "동향" 등으로 남깁니다.',
+        html.Div(['칸을 누르고 고친 뒤 Enter — 바로 저장됩니다. 과제구분처럼 불러올 수 없는 칸을 채우세요. ',
+                  '"상세"는 기록·경력·평가·리더십진단 화면. 표 머리 아래 칸에 글자를 넣으면 그 칸으로 거릅니다 (예: 직책구분에 보직장).'],
                  className='small text-muted mt-2'),
+        html.Div(id='ld-saved', className='small text-success'),
     ])
 
 
-def _row(p: dict) -> dict:
-    name = f"[{p['name']}](/people/{p['id']})" + (' · 지난 리더' if p['former'] else '') + \
-        (' · 추적 중지' if not p['active'] else '')
-    return {'id': p['id'], 'name': name, 'assignment': p['assignment'], 'org': p['org'], 'org_path': p['org_path'],
-            'position': p['position'], 'grade_years': p['grade_years'] if p['grade_years'] is not None else '',
-            'tenure': p['tenure'] if p['tenure'] is not None else '', 'eval': p['eval'],
-            'leadership': p['leadership'], 'records': p['count'] or '', 'source_id': p['source_id'],
-            'former': 1 if p['former'] else 0}
+def _row(r: dict) -> dict:
+    link = f"[{'지난 리더' if r['former'] else '열기'}](/people/{r['id']})"
+    return {**{c: r[c] for c in leaders.STATUS_COLUMNS}, _LINK: link, 'id': r['id'], 'former': 1 if r['former'] else 0}
 
 
 @callback(Output('ld-table', 'data'), Output('ld-count', 'children'),
           Input('ld-q', 'value'), Input('ld-former', 'value'), Input('ld-refresh', 'data'))
 def render(q, former, _):
-    rows = leaders.list_leaders(q or '', include_former=bool(former))
+    rows = leaders.list_status(q or '', include_former=bool(former))
     if not rows:
         hint = ' — "People in SAIT에서 불러오기"나 "직접 추가"로 리더를 넣으세요.' if not q else ''
         return [], '리더가 없습니다' + hint
-    return [_row(p) for p in rows], f'리더 {len(rows)}명'
+    kinds: dict[str, int] = {}
+    for r in rows:
+        kinds[r['직책구분'] or '-'] = kinds.get(r['직책구분'] or '-', 0) + 1
+    return [_row(r) for r in rows], f"{len(rows)}명 (" + ' · '.join(f'{k} {n}' for k, n in kinds.items()) + ')'
+
+
+@callback(Output('ld-saved', 'children'), Input('ld-table', 'data_timestamp'), State('ld-table', 'data'),
+          State('ld-table', 'data_previous'), prevent_initial_call=True)
+def save_edit(_ts, rows, prev):
+    """사람이 칸을 고쳤을 때만(data_timestamp — 표를 새로 그릴 때는 바뀌지 않음) 바뀐 칸을 저장."""
+    if not prev or not rows:
+        return no_update
+    before = {r['id']: r for r in prev}
+    saved = []
+    for r in rows:
+        old = before.get(r['id'])
+        if old is None:
+            continue
+        for c in leaders.STATUS_COLUMNS:
+            if (r.get(c) or '') != (old.get(c) or ''):
+                leaders.save_status(r['id'], c, r.get(c) or '')
+                saved.append(f"{r.get('성명') or ''} {c}")
+    return f"저장했습니다: {', '.join(saved)}" if saved else no_update
 
 
 @callback(Output('ld-picked', 'children'), Output('ld-xlsx', 'disabled'), Output('ld-mail', 'disabled'),
@@ -128,7 +151,7 @@ def sync(n, r):
         res = leader_sync.sync_leaders()
     except leader_sync.SyncError as e:
         return str(e), True, 'danger', no_update
-    parts = [f"직책자 {res['total']}명"]
+    parts = [f"리더급 {res['total']}명" + (f" (임원 {res['execs']}명 포함 — 임원은 현황 칸만)" if res['execs'] else '')]
     if res['added']:
         parts.append(f"새 리더 {len(res['added'])}명")
     if res['updated']:

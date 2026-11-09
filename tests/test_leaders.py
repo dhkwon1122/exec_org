@@ -27,6 +27,7 @@ PEOPLE = [
     ('L002', '정그룹', '반도체연구소', 'D12', 'CL4', '', '', '재직', '2026', '9', 'Y', '1975', '2003-01-01', '2019-03-01'),
     ('L003', '최예전', '소재팀', 'D13', 'CL3', '', '', '재직', '2026', '9', 'Y', '1980', '2008-01-01', '2021-03-01'),
     ('L004', '한직접', '경영지원', 'D14', 'CL3', '', '', '재직', '2026', '9', 'Y', '1982', '2010-01-01', '2022-03-01'),
+    ('M001', '서마스터', 'AI팀', 'AI팀', 'R. Master', '', 'sm.seo', '재직', '2026', '9', 'Y', '1979', '2006-01-01', ''),
 ]
 
 
@@ -35,6 +36,8 @@ def _team(path, rows):
 
 
 TEAM = [  # 조직 행 — 조직장급만 사번이 있다
+    ('AI팀', 'R&D', 'AI센터', 'AI팀', '', '1010', 'D-AI', 'D-C', '2', '', '', '', '', '2026', '03', '31'),
+    ('AI팀', 'R&D', 'AI센터', 'AI팀', '', '1010', 'D-AI', 'D-C', '2', 'L001', '박팀장', '팀장', '', '2026', '06', '30'),
     ('AI팀', 'R&D', 'AI센터', 'AI팀', '', '1010', 'D-AI', 'D-C', '2', 'L001', '박팀장', '팀장', '', '2026', '09', '30'),
     ('AI센터', 'R&D', 'AI센터', '', '', '1000', 'D-C', '', '1', 'E001', '김영수', '센터장', '', '2026', '09', '30'),
     ('반도체연구소', 'R&D', '반도체연구소', '', '', '2000', 'D-S', '', '1', 'L002', '정그룹', '그룹장', '', '2026', '09', '30'),
@@ -59,6 +62,10 @@ def env(tmp_path, monkeypatch):
                 [('L001', '2025', '타인평균', '4.0', '3.8', '3.6', '4.2', '4.0', '1.2'),
                  ('L001', '2025', '본인', '4.5', '4.5', '4.5', '4.5', '4.5', '1.0'),
                  ('L001', '2024', '타인평균', '3.5', '3.5', '3.5', '3.5', '3.5', '1.5')])
+    _text_table(pdb, 'tasks', ['researcher_id', 'task_name', 'the_task_name', 'start_date', 'end_date', 'input_rate'],
+                [('L001', '비전과제', '', '2026-01-01', '2027-12-31', '30'),
+                 ('L001', '언어과제', '언어과제(신)', '2026-01-01', '', '70'),
+                 ('L001', '끝난과제', '', '2024-01-01', '2025-01-01', '100')])
     monkeypatch.setenv('DATABASE_URL', f'sqlite:///{pdb}')
     monkeypatch.delenv('USER_DATABASE_URL', raising=False)
     monkeypatch.delenv('EXEC_ORG_POSITIONS', raising=False)
@@ -67,9 +74,19 @@ def env(tmp_path, monkeypatch):
     users.reset()
 
 
-def test_fetch_leaders_current_non_exec_holders():
+def test_fetch_leaders_current_holders_and_rmaster():
     got = {x['name']: x for x in leader_sync.fetch_leaders()}
-    assert set(got) == {'박팀장', '정그룹'}  # 임원(김영수)·없어진 조직의 직책자(최예전) 빼고
+    assert set(got) == {'김영수', '박팀장', '정그룹', '서마스터'}  # 없어진 조직의 직책자(최예전) 빼고
+    assert got['김영수']['exec'] and not got['박팀장']['exec']
+    st = got['박팀장']['status']
+    assert (st['Platform'], st['그룹'], st['과제/파트명'], st['부서명'], st['CL'], st['구분']) == \
+        ('AI센터', 'AI팀', '', 'AI팀', 'CL4', 'R&D')
+    assert (st['직책구분'], st['보직장'], st['플랫폼장/팀장'], st['그룹장/PL'], st['PM/파트장']) == ('보직장', 'O', '', 'O', '')
+    assert st['과제명'] == '언어과제(신), 비전과제' and st['보직 수행시작일'] == '2026-06-30'
+    assert got['김영수']['status']['직책구분'] == '임원/Master' and got['김영수']['status']['플랫폼장/팀장'] == 'O'
+    sm = got['서마스터']['status']  # 보직 없는 R.Master — 자기 소속(org_code)의 조직으로
+    assert (sm['직책구분'], sm['보직장'], sm['Platform'], sm['그룹'], sm['Knox ID']) == ('R.Master', '', 'AI센터', 'AI팀', 'sm.seo')
+    assert got['정그룹']['status']['플랫폼장/팀장'] == 'O' and got['정그룹']['status']['그룹장/PL'] == 'O'
     assert got['정그룹']['assignment'] == '그룹장, 팀장' and got['정그룹']['org'] == '반도체연구소, 반도체1팀'
     assert got['박팀장']['org_path'] == 'AI센터 > AI팀' and got['박팀장']['position'] == 'CL4'
     assert got['박팀장']['hire_date'] == '2005-01-01'
@@ -77,9 +94,10 @@ def test_fetch_leaders_current_non_exec_holders():
 
 def test_sync_adds_updates_former_and_brings_evals_leadership(env):
     r = leader_sync.sync_leaders()
-    assert sorted(r['added']) == ['박팀장', '정그룹'] and r['eval_changed'] == 3 and r['leadership_changed'] == 3
+    assert sorted(r['added']) == ['박팀장', '서마스터', '정그룹'] and r['eval_changed'] == 3 and r['leadership_changed'] == 3
+    assert r['skipped_exec'] == ['김영수']  # 임원 불러오기 전이라 사람 행이 없음
     rows = {x['name']: x for x in leaders.list_leaders()}
-    assert set(rows) == {'박팀장', '정그룹'}
+    assert set(rows) == {'박팀장', '정그룹', '서마스터'}
     park = rows['박팀장']
     assert park['assignment'] == '팀장' and park['eval'].startswith('2026 연봉등급 가')
     assert park['leadership'] == '2025 3.92'  # 저해행동 뺀 다섯 역량 평균
@@ -97,7 +115,7 @@ def test_sync_adds_updates_former_and_brings_evals_leadership(env):
     _team(env, [t for t in TEAM if t[9] != 'L002'])
     r = leader_sync.sync_leaders()
     assert r['former'] == ['정그룹'] and r['added'] == []
-    assert {x['name'] for x in leaders.list_leaders()} == {'박팀장', '한직접'}
+    assert {x['name'] for x in leaders.list_leaders()} == {'박팀장', '한직접', '서마스터'}
     allrows = {x['name']: x for x in leaders.list_leaders(include_former=True)}
     assert allrows['정그룹']['former'] and allrows['한직접']['position'] == 'CL3'
     assert allrows['한직접']['assignment'] == '파트장' and allrows['한직접']['hr_state'] == ''
@@ -107,10 +125,32 @@ def test_sync_adds_updates_former_and_brings_evals_leadership(env):
     assert not {x['name']: x for x in leaders.list_leaders()}['정그룹']['former']
 
 
+def test_status_rows_execs_and_manual_edits_survive_sync(env):
+    people_sync.sync_people()
+    leader_sync.sync_leaders()
+    leaders.add_leader('무사번', '파트장', '테스트파트')
+    rows = {r['성명']: r for r in leaders.list_status()}
+    assert list(rows) == ['김영수', '서마스터', '박팀장', '정그룹', '무사번']  # 직책구분 순 → 조직 순
+    assert rows['김영수']['직책구분'] == '임원/Master' and rows['김영수']['Platform'] == 'AI센터'
+    assert rows['무사번']['직책구분'] == '일반' and rows['무사번']['부서명'] == '테스트파트'
+    assert list(leaders.list_status()[0]) [:17] == leaders.STATUS_COLUMNS
+    park = rows['박팀장']['id']
+    leaders.save_status(park, '과제구분', '국책')
+    leaders.save_status(park, 'CL', 'CL5')
+    leader_sync.sync_leaders()  # 다시 불러와도 고친 칸은 그대로
+    r = {x['성명']: x for x in leaders.list_status()}['박팀장']
+    assert (r['과제구분'], r['CL'], r['edited']) == ('국책', 'CL5', ['CL', '과제구분'])
+    leaders.save_status(park, 'CL', 'CL4')  # 불러온 값과 같아지면 고친 표시가 지워짐
+    assert {x['성명']: x for x in leaders.list_status()}['박팀장']['edited'] == ['과제구분']
+    assert [x['성명'] for x in leaders.list_status('국책')] == ['박팀장']
+    with pytest.raises(ValueError):
+        leaders.save_status(park, '없는칸', 'x')
+
+
 def test_exec_sync_leaves_leaders_alone_and_promotes(env):
     leader_sync.sync_leaders()
     people_sync.sync_people()  # 임원 불러오기가 리더를 '퇴직·전출'로 바꾸지 않는다
-    park = next(p for p in store.list_people(role='leader'))
+    park = next(p for p in store.list_people(role='leader') if p['name'] == '박팀장')
     assert park['hr_state'] == 'current' and park['role'] == 'leader'
     assert [p['name'] for p in store.list_people(role='exec')] == ['김영수']
     # 리더가 임원이 되면 임원으로 옮긴다
@@ -124,10 +164,12 @@ def test_exec_sync_leaves_leaders_alone_and_promotes(env):
 
 def test_export_xlsx_and_mail_attachment(env, monkeypatch):
     leader_sync.sync_leaders()
-    ids = [x['id'] for x in leaders.list_leaders()]
+    ids = [x['id'] for x in leaders.list_leaders() if x['name'] != '서마스터']
     store.add_history(None, '면담 — 차기 과제 논의', '동향', author='나', title='박팀장 면담', person_ids=[ids[0]])
     wb = load_workbook(io.BytesIO(leaders.export_xlsx(ids)))
-    assert wb.sheetnames == ['기본 정보', '경력·발령', '평가', '리더십진단', '최근 기록']
+    assert wb.sheetnames == ['리더급 현황', '기본 정보', '경력·발령', '평가', '리더십진단', '최근 기록']
+    status = list(wb['리더급 현황'].values)
+    assert list(status[0]) == leaders.STATUS_COLUMNS and len(status) == 3
     basic = list(wb['기본 정보'].values)
     assert basic[0][:3] == ('이름', '사번', '직책') and len(basic) == 3
     assert len(list(wb['리더십진단'].values)) == 4 and list(wb['최근 기록'].values)[1][3] == '박팀장 면담'

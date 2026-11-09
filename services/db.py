@@ -257,6 +257,10 @@ class Person(Base):
     role = Column(String(10), default='', index=True)
     assignment = Column(String(200), default='')  # 직책 (팀장·그룹장 등 — 여러 조직을 맡으면 쉼표)
     org_path = Column(String(300), default='')  # 상위 조직까지 (1단계 > 2단계 > 3단계)
+    # 리더급 현황 칸(services/leaders.py STATUS_COLUMNS) — leader_info: 불러온 값(JSON), leader_manual: 화면에서 고친 값(JSON,
+    # 불러오기를 다시 해도 유지 — 불러온 값보다 앞선다). 임원도 리더급 현황에 나오면 같은 칸을 쓴다
+    leader_info = Column(Text, default='')
+    leader_manual = Column(Text, default='')
     created_at = Column(DateTime, default=_now)
     updated_at = Column(DateTime, default=_now, onupdate=_now)
 
