@@ -221,6 +221,17 @@ def export_xlsx(person_ids: list[int], records: int = 20) -> bytes:
     return buf.getvalue()
 
 
+def status_template() -> bytes:
+    """리더급 현황 엑셀 — 지금 표(지난 리더 빼고) 그대로. 고쳐서 리더 엑셀 업로드(/leaders/import)로 다시 올리는 양식."""
+    wb = Workbook()
+    wb.remove(wb.active)
+    _sheet(wb, '리더급 현황', STATUS_COLUMNS, [[r[c] for c in STATUS_COLUMNS] for r in list_status()],
+           [10, 14, 16, 16, 18, 9, 7, 12, 8, 11, 7, 11, 9, 10, 9, 24, 13])
+    buf = io.BytesIO()
+    wb.save(buf)
+    return buf.getvalue()
+
+
 def export_filename(n: int) -> str:
     return f"리더_자료_{date.today().strftime('%Y%m%d')}_{n}명.xlsx"
 

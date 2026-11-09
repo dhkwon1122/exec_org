@@ -179,3 +179,33 @@ def test_export_xlsx_and_mail_attachment(env, monkeypatch):
     assert files[0][0].endswith('_2명.xlsx') and files[0][1][:2] == b'PK'
     with pytest.raises(ValueError):
         leaders.export_xlsx([])
+
+
+def test_leader_excel_upload_status_columns_and_new_leaders(env):
+    from services import excel_import
+    leader_sync.sync_leaders()
+    park = next(x for x in leaders.list_status() if x['성명'] == '박팀장')
+    headers = ['사원번호', '성명', '과제구분', 'Platform', '25MBO', '비고']
+    rows = [['L001', '박팀장', '국책', 'AI센터', 'S', '면담 예정'],
+            ['', '새리더', '자체', '', '', ''],
+            ['L999', '', '', '', '', '']]
+    m = excel_import.suggest_mapping(headers, rows, use_ai=False, role='leader')
+    targets = [x['target'] for x in m]
+    assert targets == ['key:source_id', 'key:name', 'status:과제구분', 'status:Platform', 'eval:MBO:2025', 'field:note']
+    assert any(o['value'] == 'status:과제구분' for o in excel_import.target_options(m, 'leader'))
+    assert not any(o['value'].startswith('status:') for o in excel_import.target_options(m, 'exec'))
+    assert excel_import.suggest_mapping(headers, rows, use_ai=False)[2]['target'] == 'attr:과제구분'  # 임원 업로드는 그대로
+    table = {'headers': headers, 'rows': rows}
+    pre = excel_import.run(table, targets, create_missing=True, role='leader')
+    assert pre['created'] == ['새리더'] and pre['unmatched'] == ['L999']
+    assert pre['changes']['리더급 현황 · 과제구분'] == 2 and pre['changes']['리더급 현황 · Platform'] == 0  # 같은 값
+    assert leaders.list_status() and {x['성명'] for x in leaders.list_status()} == {'박팀장', '정그룹', '서마스터'}  # 미리보기
+    excel_import.run(table, targets, create_missing=True, apply=True, role='leader')
+    rows_now = {x['성명']: x for x in leaders.list_status()}
+    assert rows_now['박팀장']['과제구분'] == '국책' and rows_now['박팀장']['edited'] == ['과제구분']
+    assert rows_now['새리더']['과제구분'] == '자체' and rows_now['새리더']['role'] == 'leader'
+    assert profile.list_evaluations(park['id'])[0]['kind'] in ('MBO', '연봉등급')
+    leader_sync.sync_leaders()  # 다시 불러와도 올린 값 유지
+    assert {x['성명']: x for x in leaders.list_status()}['박팀장']['과제구분'] == '국책'
+    wb = load_workbook(io.BytesIO(leaders.status_template()))
+    assert [c.value for c in wb['리더급 현황'][1]] == leaders.STATUS_COLUMNS

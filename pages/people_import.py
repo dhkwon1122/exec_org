@@ -1,4 +1,5 @@
-"""임원 정보 엑셀 일괄 업로드 — 첫 행 제목을 보고 DB 칸을 맞춘 뒤(규칙 + 사내 AI) 미리보기 → 반영."""
+"""임원 정보 엑셀 일괄 업로드 — 첫 행 제목을 보고 DB 칸을 맞춘 뒤(규칙 + 사내 AI) 미리보기 → 반영.
+리더 엑셀 업로드(/leaders/import, pages/leaders_import.py)도 이 화면을 role='leader' 로 쓴다."""
 import dash
 import dash_bootstrap_components as dbc
 from dash import ALL, Input, Output, State, callback, ctx, dcc, html, no_update
@@ -10,21 +11,36 @@ dash.register_page(__name__, path='/people/import', name='임원 엑셀 업로�
 _SOURCE = {'rule': ('규칙', 'secondary'), 'ai': ('AI', 'info'), 'new': ('새 항목', 'warning')}
 
 
+_ROLE = {'exec': ('임원', '/people'), 'leader': ('리더', '/leaders')}
+
+
 def layout(**_):
+    return build('exec')
+
+
+def build(role: str):
+    who, back = _ROLE[role]
+    leader_tips = [
+        html.Li(['리더급 현황 칸 이름(', html.Code('Platform'), ', ', html.Code('그룹'), ', ', html.Code('과제구분'), ', ',
+                 html.Code('보직 수행시작일'), ' 등)과 같은 제목은 그 칸에 넣습니다 — 표에서 고친 값처럼 다시 불러와도 유지됩니다. ',
+                 '"양식 내려받기"의 빈 양식을 채워 올려도 됩니다.']),
+    ] if role == 'leader' else []
     return html.Div([
         dcc.Store(id='imp-table'),
         dcc.Store(id='imp-previewed', data=False),
-        html.Div([dcc.Link([html.I(className='bi bi-arrow-left me-1'), '임원 목록'], href='/people',
+        dcc.Store(id='imp-role', data=role),
+        html.Div([dcc.Link([html.I(className='bi bi-arrow-left me-1'), f'{who} 목록'], href=back,
                            className='small text-decoration-none')], className='mb-2'),
-        html.H4([html.I(className='bi bi-file-earmark-spreadsheet me-2'), '임원 정보 엑셀 일괄 업로드']),
+        html.H4([html.I(className='bi bi-file-earmark-spreadsheet me-2'), f'{who} 정보 엑셀 일괄 업로드']),
         dbc.Alert([
             html.Div('엑셀(xlsx) 또는 CSV 의 첫 행을 제목으로 읽어, 열마다 DB 의 어느 칸에 넣을지 맞춥니다.'),
-            html.Ul([
-                html.Li(['임원을 찾는 열: ', html.B('사번'), '(없으면 ', html.B('성명'), ') — 꼭 하나는 있어야 합니다.']),
+            html.Ul([*leader_tips,
+                html.Li([f'{who}을 찾는 열: ' if role == 'exec' else f'{who}를 찾는 열: ', html.B('사번'),
+                         '(사원번호, 없으면 ', html.B('성명'), ') — 꼭 하나는 있어야 합니다.']),
                 html.Li(['평가는 제목에 연도와 종류를 쓰면 됩니다 — 예: ', html.Code('25MBO'), ', ', html.Code('24Mbo'), ', ',
                          html.Code('2024 임원종합평가'), ', ', html.Code("'23 종합"), '. 처음 보는 평가 종류는 새로 만듭니다.']),
                 html.Li(['주요 이력 열은 한 칸에 여러 줄(예: ', html.Code('2023.03 상무 승진, AI센터장'),
-                         ') — 그 임원의 주요 이력을 이 내용으로 바꿉니다.']),
+                         f') — 그 {who}의 주요 이력을 이 내용으로 바꿉니다.']),
                 html.Li('규칙으로 모르는 제목은 사내 AI 가 판단하고, 맞는 칸이 없으면 같은 이름의 "추가 항목"을 만듭니다. '
                         '아래 표에서 열마다 바꿀 수 있습니다.'),
                 html.Li('빈 칸은 건드리지 않습니다. 반영 전에 미리보기로 몇 건이 바뀌는지 확인하세요.'),
@@ -41,7 +57,8 @@ def layout(**_):
         dcc.Loading(html.Div(id='imp-mapping'), type='dot'),
         html.Div(id='imp-actions', style={'display': 'none'}, children=[
             dbc.Checkbox(id='imp-create', value=False, className='small my-2',
-                         label='DB 에 없는 사번(또는 이름)은 새 임원으로 추가 (끄면 건너뛰고 목록만 보여 줌)'),
+                         label=f"DB 에 없는 사번(또는 이름)은 새 {who}{'으로' if role == 'exec' else '로'} 추가 "
+                               '(끄면 건너뛰고 목록만 보여 줌)'),
             html.Div([
                 dbc.Button([html.I(className='bi bi-eye me-1'), '미리보기'], id='imp-preview', color='secondary',
                            outline=True, className='me-2'),
@@ -53,8 +70,8 @@ def layout(**_):
     ])
 
 
-def _mapping_table(table: dict, mapping: list[dict]):
-    opts = excel_import.target_options(mapping)
+def _mapping_table(table: dict, mapping: list[dict], role: str = 'exec'):
+    opts = excel_import.target_options(mapping, role)
     rows = []
     for m in mapping:
         label, color = _SOURCE.get(m['source'], ('', 'light'))
@@ -89,26 +106,28 @@ def _mapping_table(table: dict, mapping: list[dict]):
           Output('imp-error', 'children'), Output('imp-error', 'is_open'), Output('imp-result', 'children'),
           Output('imp-apply', 'disabled'),
           Input('imp-upload', 'contents'), State('imp-upload', 'filename'), State('imp-ai', 'value'),
-          prevent_initial_call=True)
-def on_upload(contents, filename, use_ai):
+          State('imp-role', 'data'), prevent_initial_call=True)
+def on_upload(contents, filename, use_ai, role='exec'):
+    role = role or 'exec'
     if not contents:
         return (no_update,) * 7
     try:
         table = excel_import.parse_upload(contents, filename)
     except excel_import.ImportError_ as e:
         return None, None, {'display': 'none'}, str(e), True, None, True
-    mapping = excel_import.suggest_mapping(table['headers'], table['rows'], use_ai=bool(use_ai))
+    mapping = excel_import.suggest_mapping(table['headers'], table['rows'], use_ai=bool(use_ai), role=role)
     return (table, [html.Div([html.I(className='bi bi-file-earmark me-1'), filename], className='fw-semibold mb-1'),
-                    _mapping_table(table, mapping)], {}, '', False, None, True)
+                    _mapping_table(table, mapping, role)], {}, '', False, None, True)
 
 
-def _summary(r: dict, applied: bool):
+def _summary(r: dict, applied: bool, role: str = 'exec'):
+    who, back = _ROLE[role]
     changes = [html.Li(f'{k}: {n}건') for k, n in r['changes'].items() if n]
-    body = [html.Div(f"{'반영 완료' if applied else '미리보기'} — {r['rows']}행 중 임원 {r['matched']}명 확인"
-                     + (f", 새 임원 {len(r['created'])}명" if r['created'] else ''), className='fw-semibold'),
+    body = [html.Div(f"{'반영 완료' if applied else '미리보기'} — {r['rows']}행 중 {r['matched']}명 확인"
+                     + (f", 새 {who} {len(r['created'])}명" if r['created'] else ''), className='fw-semibold'),
             html.Ul(changes, className='mb-1') if changes else html.Div('바뀌는 값이 없습니다.', className='small')]
     if r['created']:
-        body.append(html.Div('새로 추가' + ('' if applied else '할') + ' 임원: ' + ', '.join(r['created']), className='small'))
+        body.append(html.Div('새로 추가' + ('' if applied else '할') + f' {who}: ' + ', '.join(r['created']), className='small'))
     if r['unmatched']:
         body.append(html.Div(f"DB 에 없어 건너뜀 {len(r['unmatched'])}건: " + ', '.join(r['unmatched'][:30])
                              + (' …' if len(r['unmatched']) > 30 else ''), className='small text-danger'))
@@ -116,26 +135,27 @@ def _summary(r: dict, applied: bool):
         body.append(html.Div('같은 이름이 여럿이라 건너뜀(사번 열을 쓰세요): ' + ', '.join(r['ambiguous']),
                              className='small text-danger'))
     if applied:
-        body.append(dcc.Link('임원 목록으로', href='/people', className='small'))
+        body.append(dcc.Link(f'{who} 목록으로', href=back, className='small'))
     return dbc.Alert(body, color='success' if applied else 'secondary')
 
 
 @callback(Output('imp-result', 'children', allow_duplicate=True), Output('imp-apply', 'disabled', allow_duplicate=True),
           Input('imp-preview', 'n_clicks'), Input('imp-apply', 'n_clicks'),
           State('imp-table', 'data'), State({'type': 'imp-target', 'index': ALL}, 'value'),
-          State({'type': 'imp-use', 'index': ALL}, 'value'), State('imp-create', 'value'),
+          State({'type': 'imp-use', 'index': ALL}, 'value'), State('imp-create', 'value'), State('imp-role', 'data'),
           prevent_initial_call=True)
-def preview_or_apply(_p, _a, table, targets, use, create):
+def preview_or_apply(_p, _a, table, targets, use, create, role='exec'):
+    role = role or 'exec'
     if not table or ctx.triggered_id not in ('imp-preview', 'imp-apply') or not ctx.triggered[0]['value']:
         return no_update, no_update
     apply = ctx.triggered_id == 'imp-apply'
     final = excel_import.exclude_columns(targets, use)
     try:
-        r = excel_import.run(table, final, create_missing=bool(create), apply=apply, by=auth.current_name())
+        r = excel_import.run(table, final, create_missing=bool(create), apply=apply, by=auth.current_name(), role=role)
     except excel_import.ImportError_ as e:
         return dbc.Alert(str(e), color='danger'), True
     skipped = [h for h, t, u in zip(table['headers'], targets, use) if not u and t != 'ignore']
-    out = _summary(r, apply)
+    out = _summary(r, apply, role)
     if skipped:
         out.children.insert(1, html.Div('올리지 않은 열: ' + ', '.join(skipped), className='small text-muted'))
     return out, apply  # 반영 뒤에는 다시 미리보기해야 반영 가능

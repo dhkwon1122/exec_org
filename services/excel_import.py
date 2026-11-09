@@ -7,7 +7,12 @@
    - 기존 칸이 없으면 미리 만든다: 처음 보는 평가 종류는 새 종류로, 그 밖의 제목은 '추가 항목'으로
    화면에서 열마다 매칭을 바꿀 수 있다.
 3) 사번(없으면 성명)으로 임원을 찾아 값을 넣는다. 빈 칸은 건드리지 않는다.
+
+role='leader'(리더 엑셀 업로드, /leaders/import)면 리더급 현황 칸(services/leaders.py STATUS_COLUMNS — Platform·그룹·
+과제구분 등)도 맞출 수 있다 — 'status:<칸>' 은 화면에서 고친 값과 같이 leader_manual 에 넣어 불러오기를 다시 해도 유지된다.
+없는 사람을 새로 추가하면 리더(role='leader', 직접 추가)로 만든다.
 """
+import json
 import base64
 import csv
 import io
@@ -116,7 +121,7 @@ def parse_target(t: str) -> tuple:
     parts = (t or 'ignore').split(':', 2)
     if parts[0] == 'eval' and len(parts) == 3 and parts[2].isdigit():
         return 'eval', parts[1], int(parts[2])
-    if parts[0] in ('key', 'field', 'attr') and len(parts) >= 2:
+    if parts[0] in ('key', 'field', 'attr', 'status') and len(parts) >= 2:
         return parts[0], ':'.join(parts[1:])
     if parts[0] == 'highlights':
         return ('highlights',)
@@ -126,9 +131,11 @@ def parse_target(t: str) -> tuple:
 def target_label(t: str) -> str:
     p = parse_target(t)
     if p[0] == 'key':
-        return f'{KEYS.get(p[1], p[1])} (임원 찾기)'
+        return f'{KEYS.get(p[1], p[1])} (사람 찾기)'
     if p[0] == 'field':
         return PERSON_FIELDS.get(p[1], p[1])
+    if p[0] == 'status':
+        return f'리더급 현황 · {p[1]}'
     if p[0] == 'eval':
         return f'평가 · {p[2]} {p[1]}'
     if p[0] == 'attr':
@@ -159,8 +166,17 @@ def _eval_from_header(h: str) -> tuple[str, int] | None:
     return (kind, year) if kind and year else None
 
 
-def rule_match(header: str, attrs: list[str]) -> str | None:
+def _status_columns() -> list[str]:
+    from services.leaders import STATUS_COLUMNS
+    return STATUS_COLUMNS
+
+
+def rule_match(header: str, attrs: list[str], role: str = 'exec') -> str | None:
     n = _norm(header)
+    if role == 'leader':  # 리더급 현황 칸 이름 그대로면 그 칸 (사원번호·성명은 사람 찾기)
+        for c in _status_columns():
+            if n == _norm(c):
+                return {'사원번호': 'key:source_id', '성명': 'key:name'}.get(c, f'status:{c}')
     for target, words in SYNONYMS.items():
         if n in {_norm(w) for w in words}:
             return target
@@ -180,18 +196,21 @@ DB 칸:
 - highlights — 주요 이력·경력 요약(여러 줄 글)
 - eval:<종류>:<연도> — 연도별 평가 등급. 종류는 기존 종류 중 고르고({kinds}), 맞는 게 없으면 새 종류 이름을 쓴다.
   2자리 연도(25)는 2025 로.
-- attr:<이름> — 위에 맞는 칸이 없을 때 새 추가 항목. 기존 추가 항목: {attrs}
+- attr:<이름> — 위에 맞는 칸이 없을 때 새 추가 항목. 기존 추가 항목: {attrs}{status}
 - ignore — 순번·합계처럼 저장할 필요 없는 열
 반드시 JSON 만 출력: {{"columns": [{{"index": 0, "target": "...", "reason": "짧은 근거"}}]}}"""
 
 
-def ai_match(headers: list[str], samples: list[list[str]], idx: list[int], attrs: list[str]) -> dict[int, tuple[str, str]]:
+def ai_match(headers: list[str], samples: list[list[str]], idx: list[int], attrs: list[str],
+             role: str = 'exec') -> dict[int, tuple[str, str]]:
     lines = []
     for i in idx:
         ex = [s[i] for s in samples if i < len(s) and s[i]][:3]
         lines.append(f'{i}: "{headers[i]}" 예시: {ex}')
-    raw = llm.chat(MAP_SYSTEM.format(kinds=', '.join(profile.eval_kinds()), attrs=', '.join(attrs) or '없음'),
-                   '열 목록:\n' + '\n'.join(lines))
+    status = ('\n- status:<칸> — 리더급 현황 칸(조직·직책 정보). 칸: ' + ', '.join(_status_columns()[1:5] + _status_columns()[6:])
+              if role == 'leader' else '')
+    raw = llm.chat(MAP_SYSTEM.format(kinds=', '.join(profile.eval_kinds()), attrs=', '.join(attrs) or '없음',
+                                     status=status), '열 목록:\n' + '\n'.join(lines))
     out = {}
     for c in llm._extract_json(raw).get('columns') or []:
         try:
@@ -203,16 +222,18 @@ def ai_match(headers: list[str], samples: list[list[str]], idx: list[int], attrs
         if i in idx and (p[0] != 'ignore' or t == 'ignore'):
             if p[0] == 'field' and p[1] not in PERSON_FIELDS or p[0] == 'key' and p[1] not in KEYS:
                 continue
+            if p[0] == 'status' and (role != 'leader' or p[1] not in _status_columns()):
+                continue
             out[i] = (t, str(c.get('reason') or '')[:100])
     return out
 
 
-def suggest_mapping(headers: list[str], rows: list[list[str]], use_ai: bool = True) -> list[dict]:
+def suggest_mapping(headers: list[str], rows: list[list[str]], use_ai: bool = True, role: str = 'exec') -> list[dict]:
     """열마다 {'index','header','target','source'(rule/ai/new),'reason','samples'}."""
     attrs = profile.attribute_names()
     out, todo = [], []
     for i, h in enumerate(headers):
-        t = rule_match(h, attrs)
+        t = rule_match(h, attrs, role)
         out.append({'index': i, 'header': h, 'target': t or f'attr:{h.strip()}', 'source': 'rule' if t else 'new',
                     'reason': '제목 규칙' if t else '맞는 칸이 없어 새 추가 항목으로',
                     'samples': [r[i] for r in rows if r[i]][:3]})
@@ -220,7 +241,7 @@ def suggest_mapping(headers: list[str], rows: list[list[str]], use_ai: bool = Tr
             todo.append(i)
     if todo and use_ai and llm.is_configured():
         try:
-            for i, (t, reason) in ai_match(headers, rows[:5], todo, attrs).items():
+            for i, (t, reason) in ai_match(headers, rows[:5], todo, attrs, role).items():
                 out[i].update(target=t, source='ai', reason=reason or 'AI 판단')
         except llm.LLMError as e:
             for i in todo:
@@ -228,9 +249,12 @@ def suggest_mapping(headers: list[str], rows: list[list[str]], use_ai: bool = Tr
     return out
 
 
-def target_options(mapping: list[dict]) -> list[dict]:
-    """매칭 드롭다운 — 고정 칸 + 평가(기존 종류 × 파일에 나온 연도) + 추가 항목 + 무시."""
+def target_options(mapping: list[dict], role: str = 'exec') -> list[dict]:
+    """매칭 드롭다운 — 고정 칸 (+ 리더급 현황 칸) + 평가(기존 종류 × 파일에 나온 연도) + 추가 항목 + 무시."""
     opts = [{'label': target_label(f'key:{k}'), 'value': f'key:{k}'} for k in KEYS]
+    if role == 'leader':
+        opts += [{'label': target_label(f'status:{c}'), 'value': f'status:{c}'}
+                 for c in _status_columns() if c not in ('사원번호', '성명')]
     opts += [{'label': v, 'value': f'field:{k}'} for k, v in PERSON_FIELDS.items()]
     opts.append({'label': target_label('highlights'), 'value': 'highlights'})
     years = sorted({parse_target(m['target'])[2] for m in mapping if parse_target(m['target'])[0] == 'eval'}
@@ -269,14 +293,15 @@ def exclude_columns(targets: list[str], use: list | None) -> list[str]:
 
 
 def run(table: dict, targets: list[str], create_missing: bool = False, apply: bool = False,
-        by: str = '') -> dict:
-    """apply=False 면 미리보기(DB 변경 없음), True 면 반영. 결과 요약을 돌려준다."""
+        by: str = '', role: str = 'exec') -> dict:
+    """apply=False 면 미리보기(DB 변경 없음), True 면 반영. 결과 요약을 돌려준다.
+    role='leader' 면 새로 추가하는 사람은 리더로, status:<칸> 은 리더급 현황 고친 값으로."""
     headers, rows = table['headers'], table['rows']
     parsed = [parse_target(t) for t in targets]
     key_sid = next((i for i, p in enumerate(parsed) if p == ('key', 'source_id')), None)
     key_name = next((i for i, p in enumerate(parsed) if p == ('key', 'name')), None)
     if key_sid is None and key_name is None:
-        raise ImportError_('임원을 찾을 열(사번 또는 성명)이 없습니다 — 한 열을 "사번" 또는 "성명"으로 맞추세요.')
+        raise ImportError_('사람을 찾을 열(사번 또는 성명)이 없습니다 — 한 열을 "사번" 또는 "성명"으로 맞추세요.')
     result = {'rows': len(rows), 'matched': 0, 'created': [], 'unmatched': [], 'ambiguous': [],
               'changes': {target_label(t): 0 for t, p in zip(targets, parsed) if p[0] not in ('ignore', 'key')}}
     with db.SessionLocal() as s:
@@ -299,7 +324,8 @@ def run(table: dict, targets: list[str], create_missing: bool = False, apply: bo
                 p = cands[0] if cands else None
             if p is None:
                 if create_missing and name:
-                    p = Person(name=name, source_id=sid, position='', org='', aliases='', note='')
+                    p = Person(name=name, source_id=sid, position='', org='', aliases='', note='',
+                               role='leader' if role == 'leader' else '')
                     if apply:
                         s.add(p)
                         s.flush()
@@ -335,6 +361,16 @@ def run(table: dict, targets: list[str], create_missing: bool = False, apply: bo
                     changed = cur != v
                     if changed and apply:
                         profile.upsert_attribute(s, p.id, pt[1], v)
+                elif pt[0] == 'status':
+                    from services.leaders import _loads, _status_of
+                    manual, info = _loads(p.leader_manual), _loads(p.leader_info)
+                    changed = _status_of(p)[0][pt[1]] != v  # 표에 보이는 값과 같으면 그대로 (양식을 그대로 올려도 0건)
+                    if changed and apply:
+                        if v == str(info.get(pt[1], '') or ''):
+                            manual.pop(pt[1], None)
+                        else:
+                            manual[pt[1]] = v
+                        p.leader_manual = json.dumps(manual, ensure_ascii=False) if manual else ''
                 elif pt[0] == 'highlights':
                     cur = [(h.date or '', h.text) for h in s.scalars(
                         select(PersonHighlight).where(PersonHighlight.person_id == p.id)
