@@ -1319,6 +1319,7 @@ def _person_dict(p: Person) -> dict:
         'aliases': _tags(p.aliases), 'note': p.note or '', 'active': bool(p.active),
         'source_id': p.source_id or '', 'synced_at': _dt(p.synced_at),
         'created_at': _dt(p.created_at), 'updated_at': _dt(p.updated_at),
+        'role': p.role or '', 'assignment': p.assignment or '', 'org_path': p.org_path or '',
         **hr, **hr_figures(hr['birth_year'], hr['hire_date'], hr['promotion_date']),
         # 재직 중 = People in SAIT 현재 임원, 또는 사번 없이 직접 등록해 추적 중인 임원
         'employed': hr['hr_state'] == 'current' or (hr['hr_state'] == '' and bool(p.active)),
@@ -1326,13 +1327,18 @@ def _person_dict(p: Person) -> dict:
 
 
 def create_person(name: str, position: str = '', org: str = '', aliases: list[str] | str = '',
-                  note: str = '') -> dict:
+                  note: str = '', role: str = '', assignment: str = '', source_id: str = '') -> dict:
+    """role: '' 임원 / 'leader' 리더 (services/leader_sync.py)."""
     name = (name or '').strip()
     if not name:
         raise ValueError('이름을 입력하세요.')
     with db.SessionLocal() as s:
+        source_id = (source_id or '').strip()
+        if source_id and s.scalar(select(Person.id).where(Person.source_id == source_id)):
+            raise ValueError(f'사번 {source_id} 인 사람이 이미 있습니다.')
         p = Person(name=name, position=(position or '').strip(), org=(org or '').strip(),
-                   aliases=_join_keywords(aliases), note=note or '')
+                   aliases=_join_keywords(aliases), note=note or '', role=role or '',
+                   assignment=(assignment or '').strip(), source_id=source_id)
         s.add(p)
         s.commit()
         return _person_dict(p)
@@ -1347,7 +1353,7 @@ def update_person(person_id: int, **fields) -> dict:
             if not (fields['name'] or '').strip():
                 raise ValueError('이름을 입력하세요.')
             p.name = fields['name'].strip()
-        for k in ('position', 'org', 'note'):
+        for k in ('position', 'org', 'note', 'assignment'):
             if k in fields:
                 setattr(p, k, (fields[k] or '').strip())
         if 'aliases' in fields:
@@ -1394,8 +1400,9 @@ def list_career(person_id: int) -> list[dict]:
 
 
 def list_people(query: str = '', include_inactive: bool = False, employed_only: bool = False,
-                order: str = 'recent') -> list[dict]:
+                order: str = 'recent', role: str = 'exec') -> list[dict]:
     """임원 목록 + 연결된 기록 수·마지막 기록 일시.
+    role: 'exec' 임원만(기본) / 'leader' 리더만 / 'all' 둘 다.
     employed_only: 재직 중인 임원만(퇴직·전출 제외 — 추적 중지 여부와 무관).
     order: 'recent' 최근 기록된 사람이 위로 / 'rank' 직위 순(EXEC_ORG_POSITIONS) → 이름."""
     with db.SessionLocal() as s:
@@ -1406,11 +1413,16 @@ def list_people(query: str = '', include_inactive: bool = False, employed_only: 
         stmt = select(Person, stats.c.n, stats.c.last).outerjoin(stats, stats.c.person_id == Person.id)
         if not include_inactive:
             stmt = stmt.where(Person.active.is_(True))
+        if role == 'leader':
+            stmt = stmt.where(Person.role == 'leader')
+        elif role == 'exec':
+            stmt = stmt.where(func.coalesce(Person.role, '') != 'leader')
         for term in search_terms(query):
             like = f'%{term}%'
             stmt = stmt.where(or_(Person.name.like(like), Person.position.like(like), Person.org.like(like),
                                   Person.aliases.like(like), Person.note.like(like), Person.source_id.like(like),
-                                  Person.education.like(like)))
+                                  Person.education.like(like), Person.assignment.like(like),
+                                  Person.org_path.like(like)))
         rows = [{**_person_dict(p), 'count': n or 0, 'last_at': _dt(last) if last else ''}
                 for p, n, last in s.execute(stmt)]
     if employed_only:

@@ -253,6 +253,14 @@ class Person(Base):
     hr_state = Column(String(10), default='')
     # 불러오기에서 덮어쓰지 않고 유지하기로 한 People in SAIT 값 (JSON {필드: 그때의 값}) — 다음 제안에서 기본 해제
     sync_skip = Column(Text, default='')
+    # '' = 임원, 'leader' = 리더급(조직 직책자 — services/leader_sync.py, /leaders). 같은 화면(/people/<id>)·기록·경력·평가를 쓴다
+    role = Column(String(10), default='', index=True)
+    assignment = Column(String(200), default='')  # 직책 (팀장·그룹장 등 — 여러 조직을 맡으면 쉼표)
+    org_path = Column(String(300), default='')  # 상위 조직까지 (1단계 > 2단계 > 3단계)
+    # 리더급 현황 칸(services/leaders.py STATUS_COLUMNS) — leader_info: 불러온 값(JSON), leader_manual: 화면에서 고친 값(JSON,
+    # 불러오기를 다시 해도 유지 — 불러온 값보다 앞선다). 임원도 리더급 현황에 나오면 같은 칸을 쓴다
+    leader_info = Column(Text, default='')
+    leader_manual = Column(Text, default='')
     created_at = Column(DateTime, default=_now)
     updated_at = Column(DateTime, default=_now, onupdate=_now)
 
@@ -327,6 +335,20 @@ class PersonEvaluation(Base):
     grade = Column(String(50), default='')
     note = Column(Text, default='')
     source = Column(String(20), default='manual')
+    updated_at = Column(DateTime, default=_now, onupdate=_now)
+
+
+class PersonLeadership(Base):
+    """리더십진단 — People in SAIT leadership 표(연도·평가자 그룹별 역량 점수)를 리더 불러오기 때 옮겨 둔다.
+    scores: JSON {역량: 점수} (미래통찰·성과창출·몰입촉진·인재육성·자기관리·저해행동)."""
+    __tablename__ = 'person_leadership'
+    __table_args__ = (UniqueConstraint('person_id', 'year', 'evaluator_group', name='uq_person_leadership'),)
+
+    id = Column(Integer, primary_key=True)
+    person_id = Column(Integer, ForeignKey('people.id', ondelete='CASCADE'), nullable=False, index=True)
+    year = Column(Integer, nullable=False)
+    evaluator_group = Column(String(30), nullable=False, default='')  # 본인 / 동료 / 상사 / 부서원 / 타인평균
+    scores = Column(Text, default='')
     updated_at = Column(DateTime, default=_now, onupdate=_now)
 
 

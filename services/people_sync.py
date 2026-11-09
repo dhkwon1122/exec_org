@@ -330,7 +330,7 @@ def plan_sync() -> dict:
     items, unchanged = [], 0
     unlinked_by_name: dict[str, list[Person]] = {}
     for p in people:
-        if not p.source_id:
+        if not p.source_id and p.role != 'leader':  # 리더(services/leader_sync.py)는 이름으로 잇지 않는다
             unlinked_by_name.setdefault(p.name, []).append(p)
     for e, is_past in [(e, False) for e in execs] + [(e, True) for e in past]:
         sid = e['source_id']
@@ -375,7 +375,7 @@ def plan_sync() -> dict:
             unchanged += 1
     seen = {e['source_id'] for e in execs}
     missing = [f'{p.name} {p.position}'.strip() for p in people
-               if p.source_id and p.source_id not in seen and p.active]
+               if p.source_id and p.source_id not in seen and p.active and p.role != 'leader']
     return {'total': len(execs), 'past_total': len(past), 'items': items, 'unchanged': unchanged,
             'missing': missing, 'career_new': career_new, 'seen': sorted(seen)}
 
@@ -458,21 +458,31 @@ def apply_sync(plan: dict, keys) -> dict:
         for p in people:
             if p.source_id and p.source_id in seen:
                 p.synced_at = now  # People in SAIT 값과 대조를 마친 시각
-            if p.source_id and seen:  # 현재 임원 목록에 있으면 재직, 빠졌으면 퇴직·전출
+                if p.role == 'leader':  # 리더가 임원이 됨 — 임원 목록으로 (기록·경력은 그대로)
+                    p.role = ''
+                    updated.append(f'{p.name} (리더 → 임원)')
+            if p.source_id and seen and p.role != 'leader':  # 현재 임원 목록에 있으면 재직, 빠졌으면 퇴직·전출
                 p.hr_state = 'current' if p.source_id in seen else 'former'
             if p.id in changed_fields:
                 updated.append(f"{p.name} ({', '.join(changed_fields[p.id])})")
-            have = existing.get(p.id, set())
-            for c in careers.get(p.source_id, []) if p.source_id else []:
-                if c['key'] in have:
-                    continue
-                s.add(PersonCareer(person_id=p.id, kind=c['kind'], date=c['date'], position=c['position'],
-                                   org=c['org'], title=c['title'], assignment=c['assignment'], source_key=c['key']))
-                have.add(c['key'])
-                career_added += 1
+            career_added += save_careers(s, p, careers, existing)
         s.commit()
     return {'added': added, 'past_added': past_added, 'linked': linked, 'updated': updated, 'kept': kept,
             'skipped': skipped, 'career_added': career_added}
+
+
+def save_careers(s, p: Person, careers: dict[str, list[dict]], existing: dict[int, set[str]]) -> int:
+    """사번이 연결된 사람의 경력 항목 중 아직 없는 것만 쌓는다 → 새로 넣은 수 (임원·리더 함께 씀)."""
+    have = existing.setdefault(p.id, set())
+    n = 0
+    for c in careers.get(p.source_id, []) if p.source_id else []:
+        if c['key'] in have:
+            continue
+        s.add(PersonCareer(person_id=p.id, kind=c['kind'], date=c['date'], position=c['position'],
+                           org=c['org'], title=c['title'], assignment=c['assignment'], source_key=c['key']))
+        have.add(c['key'])
+        n += 1
+    return n
 
 
 def sync_people() -> dict:

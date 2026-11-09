@@ -48,7 +48,7 @@ def layout(q: str = '', person: str = '', **_):
                 dbc.Row([
                     dbc.Col(dcc.Dropdown(id='s-types', multi=True, placeholder='유형 (전체)',
                                          options=store.ENTRY_TYPES + store.AUTO_ENTRY_TYPES), md=2),
-                    dbc.Col(dcc.Dropdown(id='s-person', placeholder='임원', options=people_options(),
+                    dbc.Col(dcc.Dropdown(id='s-person', placeholder='임원·리더', options=people_options(),
                                          value=int(person) if str(person).isdigit() else None), md=2),
                     dbc.Col(dcc.Dropdown(id='s-author', placeholder='작성자', options=store.history_authors()), md=2),
                     dbc.Col(dbc.InputGroup([dbc.InputGroupText('부터'), dbc.Input(id='s-from', type='date')],

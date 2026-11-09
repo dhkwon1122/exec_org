@@ -924,8 +924,8 @@ def render_items(sel, _):
     rows = [{**r, 'state_label': {'new': '변경', 'same': '같음', 'unknown': '임원 모름'}[r['state']]}
             for r in mailbox.person_update_rows(sug.get('person_updates') or [])]
     show_person = 'person_updates' in sug
-    people = [{'label': f"{p['name']} {p['position']}".strip(), 'value': p['id']}
-              for p in store.list_people(order='rank')]
+    people = [{'label': f"{p['name']} {p['position']}".strip() + (' · 리더' if p['role'] == 'leader' else ''),
+               'value': p['id']} for p in store.list_people(order='rank', role='all')]
     detected = store.detect_people(f"{m['subject']}\n{m['body']}")
     left = mailbox.pending_items(m) if m['status'] in ('review', 'failed') else []
     pending = html.Div([html.I(className='bi bi-hourglass-split me-1'), '아직 처리하지 않은 추천: ',
