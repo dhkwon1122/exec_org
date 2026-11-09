@@ -2,6 +2,8 @@
 표 칸은 services/leaders.py STATUS_COLUMNS. 칸을 고치면 저장되고 불러오기를 다시 해도 유지된다(과제구분 등).
 '상세'를 누르면 임원과 같은 화면(/people/<id>)에서 기록·경력·평가·리더십진단을 본다.
 고른 사람의 자료는 엑셀로 내려받거나 메일에 엑셀로 첨부해 보낸다."""
+from datetime import date
+
 import dash
 import dash_bootstrap_components as dbc
 from dash import Input, Output, State, callback, ctx, dash_table, dcc, html, no_update
@@ -40,20 +42,27 @@ def layout(**_):
                               placeholder='성명·사원번호·조직·과제·Knox ID 검색 (칸별 거르기는 표 머리 아래 칸)'), md=4),
             dbc.Col(dbc.Checkbox(id='ld-former', value=False, label='지난 리더 포함'), md=2,
                     className='d-flex align-items-center'),
-            dbc.Col(dbc.Button([html.I(className='bi bi-arrow-repeat me-1'), 'People in SAIT에서 불러오기'],
+            dbc.Col(dbc.Button([html.I(className='bi bi-arrow-repeat me-1'), 'SAIT에서 불러오기'],
                                id='ld-sync', color='secondary', outline=True, className='w-100',
                                disabled=not leader_sync.is_available(),
                                title='조직 직책자(보직장)·R.Master 중 임원이 아닌 사람을 리더로 추가·갱신하고, '
                                      '현황 칸·경력·평가·리더십진단을 함께 옮깁니다. 리더급에서 빠진 리더는 "지난 리더"로 둡니다. '
                                      '화면에서 고친 칸은 그대로 둡니다.'),
-                    md=4),
-            dbc.Col(dbc.Button([html.I(className='bi bi-person-plus me-1'), '직접 추가'], id='ldn-open',
-                               color='primary', className='w-100'), md=2),
+                    md=2),
+            dbc.Col(dbc.ButtonGroup([
+                dbc.Button([html.I(className='bi bi-file-earmark-spreadsheet me-1'), '엑셀 업로드'], href='/leaders/import',
+                           color='secondary', outline=True,
+                           title='리더급 현황 칸·평가·주요 이력 등을 엑셀로 한꺼번에 (임원 엑셀 업로드와 같은 방식)'),
+                dbc.Button([html.I(className='bi bi-person-plus me-1'), '직접 추가'], id='ldn-open', color='primary'),
+            ], className='w-100'), md=4),
         ], className='g-2 mb-2'),
         dcc.Loading(dbc.Alert(id='ld-msg', is_open=False, dismissable=True, className='py-2 small'), type='dot'),
         html.Div([
             html.Span(id='ld-count', className='small text-muted me-auto'),
             html.Span(id='ld-picked', className='small me-2'),
+            dbc.Button([html.I(className='bi bi-download me-1'), '양식 내려받기'], id='ld-template', size='sm',
+                       color='link', className='me-1 text-decoration-none',
+                       title='지금 리더급 현황 표를 엑셀로 — 고쳐서 "엑셀 업로드"로 다시 올리는 양식'),
             dbc.Button([html.I(className='bi bi-file-earmark-excel me-1'), '엑셀 내려받기'], id='ld-xlsx', size='sm',
                        color='secondary', outline=True, className='me-1', disabled=True),
             dbc.Button([html.I(className='bi bi-envelope me-1'), '메일로 보내기 (엑셀 첨부)'], id='ld-mail', size='sm',
@@ -131,6 +140,14 @@ def download(n, ids):
     if not n or not ids:
         return no_update
     return dcc.send_bytes(leaders.export_xlsx(ids), leaders.export_filename(len(ids)))
+
+
+@callback(Output('ld-download', 'data', allow_duplicate=True), Input('ld-template', 'n_clicks'),
+          prevent_initial_call=True)
+def template(n):
+    if not n:
+        return no_update
+    return dcc.send_bytes(leaders.status_template(), f"리더급_현황_{date.today().strftime('%Y%m%d')}.xlsx")
 
 
 @callback(Output('mail-draft', 'data', allow_duplicate=True), Input('ld-mail', 'n_clicks'),
