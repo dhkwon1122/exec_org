@@ -73,41 +73,121 @@ class ImportError_(ValueError):
     pass
 
 
+_OLE = b'\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1'  # 옛 xls·암호 걸린 xlsx·일부 DRM 파일의 머리
+_DRM_MSG = ('암호나 보안(DRM)이 걸린 파일이라 열 수 없습니다 — 엑셀에서 보안 해제(또는 "다른 이름으로 저장" → '
+            'Excel 통합 문서 .xlsx / CSV)한 뒤 올려 주세요.')
+
+
+def _sheets_xlsx(data: bytes) -> list[tuple[str, list[list]]]:
+    import openpyxl
+    try:
+        wb = openpyxl.load_workbook(io.BytesIO(data), read_only=True, data_only=True)
+    except Exception as e:  # noqa: BLE001
+        if data[:8] == _OLE:
+            raise ImportError_(_DRM_MSG) from e
+        if data[:2] != b'PK':  # 엑셀(zip) 파일이 아님 — 보안 프로그램이 감싼 파일 등
+            raise ImportError_(_DRM_MSG) from e
+        raise ImportError_(f'엑셀 파일을 열 수 없습니다: {type(e).__name__}') from e
+    out = []
+    for ws in wb.worksheets:
+        try:
+            ws.reset_dimensions()  # 크기 정보가 틀린 파일(시스템에서 내려받은 엑셀 등)도 끝까지 읽게
+        except AttributeError:
+            pass
+        out.append((ws.title, [list(r) for r in ws.iter_rows(values_only=True)]))
+    wb.close()
+    return out
+
+
+def _sheets_xls(data: bytes) -> list[tuple[str, list[list]]]:
+    try:
+        import xlrd
+    except ImportError as e:
+        raise ImportError_('옛 엑셀(.xls)을 읽을 수 없습니다 — xlsx 로 저장해 올려 주세요.') from e
+    try:
+        book = xlrd.open_workbook(file_contents=data)
+    except Exception as e:  # noqa: BLE001
+        raise ImportError_(_DRM_MSG) from e
+    out = []
+    for sh in book.sheets():
+        rows = []
+        for i in range(sh.nrows):
+            row = []
+            for c in sh.row(i):
+                v = c.value
+                if c.ctype == xlrd.XL_CELL_DATE:
+                    try:
+                        v = xlrd.xldate.xldate_as_datetime(v, book.datemode)
+                    except Exception:  # noqa: BLE001
+                        pass
+                row.append(v)
+            rows.append(row)
+        out.append((sh.name, rows))
+    return out
+
+
+def _header_score(row: list[str]) -> int:
+    """제목 행다운 정도 — 아는 제목(사번·성명·평가·리더급 현황 칸 등)이 많을수록 높다."""
+    score = 0
+    for h in row:
+        if h and (rule_match(h, [], 'leader') or rule_match(h, [])):
+            score += 3
+        elif h:
+            score += 0 if len(h) > 30 else 1
+    return score
+
+
+def _pick_table(sheets: list[tuple[str, list[list]]]) -> tuple[str, list[list[str]]]:
+    """시트마다 앞 15행 중 제목 행을 찾아(위에 제목·안내 행이 있어도) 가장 그럴듯한 시트·행부터."""
+    best = None
+    for name, raw in sheets:
+        table = [[cell_str(v) for v in r] for r in raw if any(cell_str(v) for v in r)]
+        for i, row in enumerate(table[:15]):
+            if sum(1 for h in row if h) < 2:
+                continue
+            score = _header_score(row)
+            if best is None or score > best[0]:
+                best = (score, name, table[i:])
+    if best is None:
+        raise ImportError_('제목 행과 데이터가 있어야 합니다 (제목 행에 두 칸 이상).')
+    return best[1], best[2]
+
+
 def parse_upload(contents: str, filename: str) -> dict:
-    """dcc.Upload 내용 → {'headers': [...], 'rows': [[...], ...]} (첫 행이 제목, 빈 행 제외)."""
+    """dcc.Upload 내용 → {'headers', 'rows', 'sheet', 'skipped'} — 시트·제목 행을 찾아 읽는다(빈 행 제외).
+    xlsx·xlsm·xls·csv. 암호·보안(DRM) 파일은 알아볼 수 있게 알린다."""
     try:
         data = base64.b64decode(contents.split(',', 1)[1])
     except (IndexError, ValueError) as e:
         raise ImportError_('파일을 읽을 수 없습니다.') from e
+    if not data:
+        raise ImportError_('빈 파일입니다.')
     name = (filename or '').lower()
     if name.endswith('.csv'):
         for enc in ('utf-8-sig', 'cp949'):
             try:
-                table = list(csv.reader(io.StringIO(data.decode(enc))))
+                sheets = [('CSV', list(csv.reader(io.StringIO(data.decode(enc)))))]
                 break
             except UnicodeDecodeError:
                 continue
         else:
             raise ImportError_('CSV 인코딩을 알 수 없습니다 (UTF-8 또는 CP949).')
     elif name.endswith(('.xlsx', '.xlsm')):
-        import openpyxl
-        try:
-            wb = openpyxl.load_workbook(io.BytesIO(data), read_only=True, data_only=True)
-        except Exception as e:  # noqa: BLE001
-            raise ImportError_(f'엑셀 파일을 열 수 없습니다: {type(e).__name__}') from e
-        table = [list(r) for r in wb.worksheets[0].iter_rows(values_only=True)]
-        wb.close()
+        sheets = _sheets_xlsx(data)
+    elif name.endswith('.xls'):
+        sheets = _sheets_xls(data) if data[:8] == _OLE else _sheets_xlsx(data)  # 이름만 xls 인 xlsx 도
     else:
-        raise ImportError_('xlsx 또는 csv 파일만 올릴 수 있습니다.')
-    table = [[cell_str(v) for v in r] for r in table if any(cell_str(v) for v in r)]
+        raise ImportError_('xlsx·xls·csv 파일만 올릴 수 있습니다.')
+    sheet, table = _pick_table(sheets)
     if len(table) < 2:
-        raise ImportError_('제목 행과 데이터가 있어야 합니다 (첫 행 = 제목).')
+        raise ImportError_('제목 행 아래에 데이터가 없습니다.')
     headers = table[0]
     while headers and not headers[-1]:
         headers.pop()
     width = len(headers)
     rows = [(r + [''] * width)[:width] for r in table[1:]]
-    return {'headers': [h or f'(제목 없음 {i + 1})' for i, h in enumerate(headers)], 'rows': rows}
+    return {'headers': [h or f'(제목 없음 {i + 1})' for i, h in enumerate(headers)], 'rows': rows,
+            'sheet': sheet if len(sheets) > 1 else ''}
 
 
 # ── 매칭 ──────────────────────────────────────────────────────────────

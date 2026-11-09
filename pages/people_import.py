@@ -1,10 +1,14 @@
 """임원 정보 엑셀 일괄 업로드 — 첫 행 제목을 보고 DB 칸을 맞춘 뒤(규칙 + 사내 AI) 미리보기 → 반영.
 리더 엑셀 업로드(/leaders/import, pages/leaders_import.py)도 이 화면을 role='leader' 로 쓴다."""
+import logging
+
 import dash
 import dash_bootstrap_components as dbc
 from dash import ALL, Input, Output, State, callback, ctx, dcc, html, no_update
 
 from services import auth, excel_import, llm
+
+log = logging.getLogger(__name__)
 
 dash.register_page(__name__, path='/people/import', name='임원 엑셀 업로드', title='업무 기록 · 임원 엑셀 업로드')
 
@@ -47,7 +51,7 @@ def build(role: str):
             ], className='mb-0 small'),
         ], color='light', className='small'),
         dcc.Upload(id='imp-upload', children=html.Div([html.I(className='bi bi-upload me-2'),
-                                                       '여기로 파일을 끌어 놓거나 눌러서 선택 (xlsx, csv)']),
+                                                       '여기로 파일을 끌어 놓거나 눌러서 선택 (xlsx, xls, csv)']),
                    className='border border-2 rounded text-center p-4 mb-2 text-muted',
                    style={'borderStyle': 'dashed', 'cursor': 'pointer'}, multiple=False),
         dbc.Checkbox(id='imp-ai', value=llm.is_configured(), disabled=not llm.is_configured(),
@@ -104,20 +108,27 @@ def _mapping_table(table: dict, mapping: list[dict], role: str = 'exec'):
 
 @callback(Output('imp-table', 'data'), Output('imp-mapping', 'children'), Output('imp-actions', 'style'),
           Output('imp-error', 'children'), Output('imp-error', 'is_open'), Output('imp-result', 'children'),
-          Output('imp-apply', 'disabled'),
+          Output('imp-apply', 'disabled'), Output('imp-upload', 'contents'),
           Input('imp-upload', 'contents'), State('imp-upload', 'filename'), State('imp-ai', 'value'),
           State('imp-role', 'data'), prevent_initial_call=True)
 def on_upload(contents, filename, use_ai, role='exec'):
+    """읽은 뒤 업로드 칸을 비운다 — 같은 파일을 고쳐 다시 끌어 놓아도 다시 읽게."""
     role = role or 'exec'
     if not contents:
-        return (no_update,) * 7
+        return (no_update,) * 8
+    fail = lambda msg: (None, None, {'display': 'none'}, msg, True, None, True, None)  # noqa: E731
     try:
         table = excel_import.parse_upload(contents, filename)
+        mapping = excel_import.suggest_mapping(table['headers'], table['rows'], use_ai=bool(use_ai), role=role)
     except excel_import.ImportError_ as e:
-        return None, None, {'display': 'none'}, str(e), True, None, True
-    mapping = excel_import.suggest_mapping(table['headers'], table['rows'], use_ai=bool(use_ai), role=role)
-    return (table, [html.Div([html.I(className='bi bi-file-earmark me-1'), filename], className='fw-semibold mb-1'),
-                    _mapping_table(table, mapping, role)], {}, '', False, None, True)
+        return fail(f'{filename}: {e}')
+    except Exception as e:  # noqa: BLE001 — 화면에 아무것도 안 나오지 않게
+        log.exception('엑셀 업로드 읽기 실패 %s', filename)
+        return fail(f'{filename}: 파일을 읽다가 오류가 났습니다 ({type(e).__name__}: {str(e)[:200]})')
+    where = f" · 시트 '{table['sheet']}'" if table.get('sheet') else ''
+    return (table, [html.Div([html.I(className='bi bi-file-earmark me-1'), filename,
+                              html.Span(where, className='text-muted fw-normal small')], className='fw-semibold mb-1'),
+                    _mapping_table(table, mapping, role)], {}, '', False, None, True, None)
 
 
 def _summary(r: dict, applied: bool, role: str = 'exec'):
