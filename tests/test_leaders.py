@@ -191,14 +191,16 @@ def test_leader_excel_upload_status_columns_and_new_leaders(env):
             ['L999', '', '', '', '', '']]
     m = excel_import.suggest_mapping(headers, rows, use_ai=False, role='leader')
     targets = [x['target'] for x in m]
-    assert targets == ['key:source_id', 'key:name', 'status:과제구분', 'status:Platform', 'eval:MBO:2025', 'field:note']
+    assert targets == ['key:source_id', 'key:name', 'status:과제구분', 'ignore', 'eval:MBO:2025', 'field:note']
+    assert '사번으로' in m[3]['reason']  # Platform 은 사번으로 People in SAIT 에서 읽는 칸
+    assert not any(o['value'] == 'status:Platform' for o in excel_import.target_options(m, 'leader'))
     assert any(o['value'] == 'status:과제구분' for o in excel_import.target_options(m, 'leader'))
     assert not any(o['value'].startswith('status:') for o in excel_import.target_options(m, 'exec'))
     assert excel_import.suggest_mapping(headers, rows, use_ai=False)[2]['target'] == 'attr:과제구분'  # 임원 업로드는 그대로
     table = {'headers': headers, 'rows': rows}
     pre = excel_import.run(table, targets, create_missing=True, role='leader')
     assert pre['created'] == ['새리더'] and pre['unmatched'] == ['L999']
-    assert pre['changes']['리더급 현황 · 과제구분'] == 2 and pre['changes']['리더급 현황 · Platform'] == 0  # 같은 값
+    assert pre['changes']['리더급 현황 · 과제구분'] == 2
     assert leaders.list_status() and {x['성명'] for x in leaders.list_status()} == {'박팀장', '정그룹', '서마스터'}  # 미리보기
     excel_import.run(table, targets, create_missing=True, apply=True, role='leader')
     rows_now = {x['성명']: x for x in leaders.list_status()}
@@ -241,3 +243,27 @@ def test_upload_finds_header_row_and_sheet_and_explains_drm():
             excel_import.parse_upload(*_upload(raw))
     with pytest.raises(excel_import.ImportError_, match='xlsx·xls·csv'):
         excel_import.parse_upload(*_upload(b'abc', '현황.pdf'))
+
+
+def test_platform_group_dept_come_from_own_record_by_sid(env):
+    from sqlalchemy import create_engine, text
+    with create_engine(f'sqlite:///{env}').begin() as c:  # 정그룹: 맡은 조직은 반도체연구소지만 소속은 AI팀
+        c.execute(text("UPDATE researchers SET org_code='AI팀', department='AI전략실' WHERE researcher_id='L002'"))
+    st = {x['name']: x['status'] for x in leader_sync.fetch_leaders()}['정그룹']
+    assert (st['Platform'], st['그룹'], st['부서명']) == ('AI센터', 'AI팀', 'AI전략실')
+    assert st['플랫폼장/팀장'] == 'O'  # 보직은 맡은 조직 기준 그대로
+    leader_sync.sync_leaders()
+    jung = {x['성명']: x for x in leaders.list_status()}['정그룹']
+    with pytest.raises(ValueError, match='사번으로'):
+        leaders.save_status(jung['id'], 'Platform', '다른플랫폼')
+    # 예전에 고쳐 둔 값이 있어도 사번으로 읽은 값이 보인다
+    from services.db import Person
+    with db.SessionLocal() as s:
+        s.get(Person, jung['id']).leader_manual = '{"Platform": "옛값", "과제구분": "국책"}'
+        s.commit()
+    jung = {x['성명']: x for x in leaders.list_status()}['정그룹']
+    assert jung['Platform'] == 'AI센터' and jung['과제구분'] == '국책' and jung['edited'] == ['과제구분']
+    # 사번으로 직접 추가하면 바로 채워진다 (불러오기 전에도)
+    leaders.add_leader('한직접', '파트장', '', 'L004')
+    han = {x['성명']: x for x in leaders.list_status()}['한직접']
+    assert han['부서명'] == '경영지원' and han['CL'] == 'CL3'

@@ -206,13 +206,18 @@ def _tasks(engine, sids) -> dict[str, str]:
 
 
 def _status(sid: str, r: dict, orgs: _Orgs, deps: list[str], kind: str, task: str) -> dict:
-    """리더급 현황 칸 (services/leaders.py STATUS_COLUMNS 이름 그대로)."""
-    home = deps[0] if deps else orgs.by_name.get(_s(r.get('org_code')), '')
+    """리더급 현황 칸 (services/leaders.py STATUS_COLUMNS 이름 그대로).
+    Platform·그룹·부서명은 사번으로 읽은 그 사람의 소속(researchers 의 org_code → 조직 1·2단계, department) —
+    맡은 조직이 아니라 (Researcher-board 의 org_code_label_maps 와 같은 기준). 소속 조직을 못 찾으면 맡은 조직으로.
+    과제/파트명·구분은 맡은 조직(없으면 소속)."""
+    own = orgs.by_name.get(_s(r.get('org_code')), '')
+    home = deps[0] if deps else own
     lv = orgs.levels(home) if home else {}
+    own_lv = orgs.levels(own) if own else lv
     layers = {orgs.layer(d) for d in deps}
     node = orgs.nodes.get(home, {})
     return {
-        '사원번호': sid, 'Platform': lv.get(1, ''), '그룹': lv.get(2, ''), '부서명': _s(r.get('department')),
+        '사원번호': sid, 'Platform': own_lv.get(1, ''), '그룹': own_lv.get(2, ''), '부서명': _s(r.get('department')),
         '과제/파트명': lv.get(3, ''), '성명': _s(r.get('name')), 'CL': _s(r.get('position')),
         'Knox ID': _s(r.get('knox_id')), '구분': _s(node.get('work_type')), '직책구분': kind,
         '보직장': 'O' if deps else '', **{h: 'O' if n in layers else '' for n, h in LAYER_HEADS.items()},
@@ -252,6 +257,26 @@ def fetch_leaders(engine=None) -> list[dict]:
                     **{f: _s(r.get(f)) for f in HR_FIELDS if f != 'education'}, 'education': edu.get(sid, ''),
                     'status': {**_status(sid, r, orgs, deps, kind, tasks.get(sid, '')), '성명': name}})
     return sorted(out, key=lambda x: (x['org_path'], x['name']))
+
+
+def refresh_status(sids) -> int:
+    """이 사번들의 리더급 현황 칸만 People in SAIT 에서 바로 다시 읽어 넣는다 (직접 추가·엑셀 업로드 뒤 —
+    다음 불러오기를 기다리지 않게). People in SAIT 를 못 읽으면 0 (화면은 다음 불러오기 때 채워짐)."""
+    sids = {str(x).strip() for x in sids or [] if str(x or '').strip()}
+    if not sids or not is_available():
+        return 0
+    try:
+        with _people_db() as engine:
+            st = _status_for(engine, sids)
+    except SyncError:
+        return 0
+    n = 0
+    with db.SessionLocal() as s:
+        for p in s.scalars(select(Person).where(Person.source_id.in_(list(st)))):
+            p.leader_info = json.dumps(st[p.source_id], ensure_ascii=False)
+            n += 1
+        s.commit()
+    return n
 
 
 def _status_for(engine, sids) -> dict[str, dict]:

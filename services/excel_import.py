@@ -246,6 +246,11 @@ def _eval_from_header(h: str) -> tuple[str, int] | None:
     return (kind, year) if kind and year else None
 
 
+def _db_columns() -> tuple[str, ...]:
+    from services.leaders import FROM_DB
+    return FROM_DB
+
+
 def _status_columns() -> list[str]:
     from services.leaders import STATUS_COLUMNS
     return STATUS_COLUMNS
@@ -253,10 +258,11 @@ def _status_columns() -> list[str]:
 
 def rule_match(header: str, attrs: list[str], role: str = 'exec') -> str | None:
     n = _norm(header)
-    if role == 'leader':  # 리더급 현황 칸 이름 그대로면 그 칸 (사원번호·성명은 사람 찾기)
+    if role == 'leader':  # 리더급 현황 칸 이름 그대로면 그 칸 (사원번호·성명은 사람 찾기, 사번으로 읽는 칸은 무시)
+        from services.leaders import FROM_DB
         for c in _status_columns():
             if n == _norm(c):
-                return {'사원번호': 'key:source_id', '성명': 'key:name'}.get(c, f'status:{c}')
+                return {'사원번호': 'key:source_id', '성명': 'key:name'}.get(c, 'ignore' if c in FROM_DB else f'status:{c}')
     for target, words in SYNONYMS.items():
         if n in {_norm(w) for w in words}:
             return target
@@ -304,6 +310,10 @@ def ai_match(headers: list[str], samples: list[list[str]], idx: list[int], attrs
                 continue
             if p[0] == 'status' and (role != 'leader' or p[1] not in _status_columns()):
                 continue
+            if p[0] == 'status':
+                from services.leaders import FROM_DB
+                if p[1] in FROM_DB:
+                    continue
             out[i] = (t, str(c.get('reason') or '')[:100])
     return out
 
@@ -314,8 +324,10 @@ def suggest_mapping(headers: list[str], rows: list[list[str]], use_ai: bool = Tr
     out, todo = [], []
     for i, h in enumerate(headers):
         t = rule_match(h, attrs, role)
+        db_col = role == 'leader' and t == 'ignore' and _norm(h) in {_norm(c) for c in _db_columns()}
         out.append({'index': i, 'header': h, 'target': t or f'attr:{h.strip()}', 'source': 'rule' if t else 'new',
-                    'reason': '제목 규칙' if t else '맞는 칸이 없어 새 추가 항목으로',
+                    'reason': '사번으로 People in SAIT 에서 읽는 칸이라 올리지 않음' if db_col
+                    else '제목 규칙' if t else '맞는 칸이 없어 새 추가 항목으로',
                     'samples': [r[i] for r in rows if r[i]][:3]})
         if not t:
             todo.append(i)
@@ -333,8 +345,9 @@ def target_options(mapping: list[dict], role: str = 'exec') -> list[dict]:
     """매칭 드롭다운 — 고정 칸 (+ 리더급 현황 칸) + 평가(기존 종류 × 파일에 나온 연도) + 추가 항목 + 무시."""
     opts = [{'label': target_label(f'key:{k}'), 'value': f'key:{k}'} for k in KEYS]
     if role == 'leader':
+        from services.leaders import FROM_DB
         opts += [{'label': target_label(f'status:{c}'), 'value': f'status:{c}'}
-                 for c in _status_columns() if c not in ('사원번호', '성명')]
+                 for c in _status_columns() if c not in ('사원번호', '성명', *FROM_DB)]
     opts += [{'label': v, 'value': f'field:{k}'} for k, v in PERSON_FIELDS.items()]
     opts.append({'label': target_label('highlights'), 'value': 'highlights'})
     years = sorted({parse_target(m['target'])[2] for m in mapping if parse_target(m['target'])[0] == 'eval'}
@@ -461,8 +474,12 @@ def run(table: dict, targets: list[str], create_missing: bool = False, apply: bo
                         _replace_highlights(s, p.id, v)
                 if changed:
                     result['changes'][label] += 1
+        fresh = [sid for sid, p in by_sid.items() if p.role == 'leader' and not p.leader_info]
         if apply:
             s.commit()
+    if apply and role == 'leader' and fresh:  # 새로 넣은 리더도 Platform·그룹·부서명 등 현황 칸을 사번으로 바로
+        from services import leader_sync
+        leader_sync.refresh_status(fresh)
     return result
 
 

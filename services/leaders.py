@@ -18,6 +18,8 @@ OTHERS = '타인평균'  # 리더십진단 요약에 쓰는 평가자 그룹 (�
 STATUS_COLUMNS = ['사원번호', 'Platform', '그룹', '부서명', '과제/파트명', '성명', 'CL', 'Knox ID', '구분', '직책구분',
                   '보직장', '플랫폼장/팀장', '그룹장/PL', 'PM/파트장', '과제구분', '과제명', '보직 수행시작일']
 KIND_ORDER = {k: i for i, k in enumerate(['임원/Master', 'R.Master', '보직장', '일반'])}
+# 사번으로 People in SAIT 에서 읽는 칸 — 표·엑셀 업로드로 고치지 않는다 (고친 값이 있어도 무시)
+FROM_DB = ('Platform', '그룹', '부서명')
 
 
 def _loads(raw) -> dict:
@@ -33,8 +35,12 @@ def _status_of(p: Person) -> tuple[dict, set]:
     info, manual = _loads(p.leader_info), _loads(p.leader_manual)
     base = {'사원번호': p.source_id or '', '성명': p.name, 'CL': p.position or '', '부서명': p.org or '',
             '직책구분': '임원/Master' if p.role != 'leader' else '일반'}
-    row = {c: str(manual.get(c, info.get(c) or base.get(c, '')) or '') for c in STATUS_COLUMNS}
-    return row, {c for c in manual if c in STATUS_COLUMNS}
+    def pick(c):
+        if c in manual and c not in FROM_DB:
+            return manual[c]
+        return info.get(c) or base.get(c, '')
+    row = {c: str(pick(c) or '') for c in STATUS_COLUMNS}
+    return row, {c for c in manual if c in STATUS_COLUMNS and c not in FROM_DB}
 
 
 def list_status(query: str = '', include_former: bool = False) -> list[dict]:
@@ -63,6 +69,8 @@ def save_status(person_id: int, column: str, value: str) -> None:
     """현황 칸 하나를 고친다 — 불러온 값과 같아지면 고친 표시를 지운다. 불러오기를 다시 해도 고친 값이 앞선다."""
     if column not in STATUS_COLUMNS:
         raise ValueError(f'없는 칸입니다: {column}')
+    if column in FROM_DB:
+        raise ValueError(f'{column} 은(는) 사번으로 People in SAIT 에서 읽는 칸이라 고칠 수 없습니다.')
     value = str(value if value is not None else '').strip()
     with db.SessionLocal() as s:
         p = s.get(Person, person_id)
@@ -151,8 +159,12 @@ def leadership(person_id: int) -> list[dict]:
 
 def add_leader(name: str, assignment: str = '', org: str = '', source_id: str = '', position: str = '') -> dict:
     """직접 추가 — 사번을 넣으면 다음 불러오기 때 인사 정보 빈 칸·경력·평가·리더십진단이 채워진다."""
-    return store.create_person(name, position=position, org=org, role='leader', assignment=assignment,
-                               source_id=source_id)
+    p = store.create_person(name, position=position, org=org, role='leader', assignment=assignment,
+                            source_id=source_id)
+    if source_id:  # 사번이 있으면 Platform·그룹·부서명 등 현황 칸을 바로
+        from services import leader_sync
+        leader_sync.refresh_status([source_id])
+    return p
 
 
 def is_leader(person_id: int) -> bool:
