@@ -281,3 +281,33 @@ def test_head_columns_follow_assignment_title(env):
     got = {x['name']: x['status'] for x in leader_sync.fetch_leaders()}
     assert (got['박팀장']['그룹장/PL'], got['박팀장']['PM/파트장']) == ('', 'O')
     assert (got['최예전']['그룹장/PL'], got['최예전']['플랫폼장/팀장']) == ('O', '')  # 단계 칸이 비어도 직책명으로
+
+
+def test_numeric_sids_keep_leading_zeros(env, tmp_path):
+    from services import excel_import
+    assert [store.norm_sid(v) for v in ('12345', '12345.0', '00012345', 'E001', ' 7 ', '', '123456789')] == \
+        ['00012345', '00012345', '00012345', 'E001', '00000007', '', '123456789']
+    # 엑셀이 숫자로 읽어 0 이 지워진 사번 — DB 에 없어도 8자리로 새로 넣는다
+    table = {'headers': ['사원번호', '성명', '과제구분'], 'rows': [['12345', '영빠짐', '국책']]}
+    targets = [m['target'] for m in excel_import.suggest_mapping(table['headers'], table['rows'], use_ai=False,
+                                                                   role='leader')]
+    r = excel_import.run(table, targets, create_missing=True, apply=True, role='leader')
+    assert r['created'] == ['영빠짐']
+    row = {x['성명']: x for x in leaders.list_status()}['영빠짐']
+    assert row['사원번호'] == '00012345'
+    r = excel_import.run(table, targets, apply=True, role='leader')  # 다시 올려도 같은 사람으로
+    assert r['matched'] == 1 and r['created'] == []
+    leaders.add_leader('직접', source_id='777')
+    assert '00000777' in {x['사원번호'] for x in leaders.list_status()}
+    # 내보낸 엑셀의 사원번호 칸은 텍스트 서식
+    wb = load_workbook(io.BytesIO(leaders.status_template()))
+    assert {c.number_format for c in list(wb['리더급 현황'].columns)[0][1:]} == {'@'}
+    # 예전에 짧게 들어간 사번은 시작할 때 8자리로 (겹치면 그대로)
+    from services.db import Person
+    with db.SessionLocal() as s:
+        s.add(Person(name='짧은', source_id='4321', role='leader'))
+        s.add(Person(name='겹침', source_id='777', role='leader'))  # 00000777 이 이미 있음
+        s.commit()
+    db.configure(str(db.engine.url))
+    got = {p['name']: p['source_id'] for p in store.list_people(role='leader', include_inactive=True)}
+    assert got['짧은'] == '00004321' and got['겹침'] == '777'

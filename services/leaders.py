@@ -161,9 +161,9 @@ def add_leader(name: str, assignment: str = '', org: str = '', source_id: str = 
     """직접 추가 — 사번을 넣으면 다음 불러오기 때 인사 정보 빈 칸·경력·평가·리더십진단이 채워진다."""
     p = store.create_person(name, position=position, org=org, role='leader', assignment=assignment,
                             source_id=source_id)
-    if source_id:  # 사번이 있으면 Platform·그룹·부서명 등 현황 칸을 바로
+    if p['source_id']:  # 사번이 있으면 Platform·그룹·부서명 등 현황 칸을 바로 (8자리로 맞춘 사번)
         from services import leader_sync
-        leader_sync.refresh_status([source_id])
+        leader_sync.refresh_status([p['source_id']])
     return p
 
 
@@ -187,9 +187,12 @@ def _sheet(wb: Workbook, title: str, header: list[str], rows: list[list], widths
         ws.append(['' if v is None else v for v in r])
     for i, w in enumerate(widths or [], start=1):
         ws.column_dimensions[get_column_letter(i)].width = w
+    sid_cols = {i for i, h in enumerate(header) if h in ('사원번호', '사번')}
     for row in ws.iter_rows(min_row=2):
-        for c in row:
+        for i, c in enumerate(row):
             c.alignment = Alignment(vertical='top', wrap_text=True)
+            if i in sid_cols:
+                c.number_format = '@'  # 텍스트 — 엑셀에서 열어 고쳐도 앞자리 0 이 지워지지 않게
     ws.freeze_panes = 'B2'
     return ws
 

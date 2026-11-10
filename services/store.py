@@ -117,6 +117,15 @@ def search_terms(query: str) -> list[str]:
     return [a or b for a, b in re.findall(r'"([^"]+)"|(\S+)', query or '') if (a or b).strip()]
 
 
+def norm_sid(v) -> str:
+    """사번 — 숫자만이면 8자리로 앞을 0 으로 채운다 (People in SAIT 와 같게: 엑셀이 숫자로 읽어 0 을 지운
+    '12345'·'12345.0' → '00012345'). 문자가 섞인 사번은 그대로."""
+    s = str(v if v is not None else '').strip()
+    if re.fullmatch(r'\d+(\.0+)?', s):
+        return str(int(float(s))).zfill(8) if len(s.split('.')[0]) <= 8 else s.split('.')[0]
+    return s
+
+
 def _join_keywords(v) -> str:
     items = v if isinstance(v, list) else re.split(r'[,\n]', v or '')
     seen, out = set(), []
@@ -1333,7 +1342,7 @@ def create_person(name: str, position: str = '', org: str = '', aliases: list[st
     if not name:
         raise ValueError('이름을 입력하세요.')
     with db.SessionLocal() as s:
-        source_id = (source_id or '').strip()
+        source_id = norm_sid(source_id)
         if source_id and s.scalar(select(Person.id).where(Person.source_id == source_id)):
             raise ValueError(f'사번 {source_id} 인 사람이 이미 있습니다.')
         p = Person(name=name, position=(position or '').strip(), org=(org or '').strip(),

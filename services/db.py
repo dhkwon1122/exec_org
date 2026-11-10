@@ -675,6 +675,7 @@ def make_engine(url: str | None = None):
             _link_source_history(engine)
             _migrate_absences(engine)
             _default_schedule_owner(engine)
+            _pad_short_source_ids(engine)
             break
         except Exception:  # noqa: BLE001
             if attempt == 4:
@@ -749,6 +750,18 @@ def _add_missing_columns(engine):
                     conn.execute(text(f'CREATE INDEX IF NOT EXISTS ix_{table.name}_{col.name} '
                                       f'ON {table.name} ({col.name})'))
 
+
+
+def _pad_short_source_ids(engine):
+    """엑셀 업로드가 앞자리 0 을 지운 채 넣은 사번(숫자 8자리 미만)을 8자리로 — 같은 사번이 이미 있으면 그대로 둔다."""
+    with engine.begin() as conn:
+        rows = conn.execute(text("SELECT id, source_id FROM people WHERE source_id IS NOT NULL AND source_id != ''")).all()
+        have = {sid for _, sid in rows}
+        for pid, sid in rows:
+            s = (sid or '').strip()
+            if s.isdigit() and len(s) < 8 and s.zfill(8) not in have:
+                conn.execute(text('UPDATE people SET source_id = :s WHERE id = :i'), {'s': s.zfill(8), 'i': pid})
+                have.add(s.zfill(8))
 
 
 def _default_schedule_owner(engine):

@@ -21,7 +21,7 @@ from datetime import date, datetime
 
 from sqlalchemy import select
 
-from services import db, llm, profile
+from services import db, llm, profile, store
 from services.db import Person, PersonAttribute, PersonEvaluation, PersonHighlight
 
 # 사람 정보 칸 — target 'field:<이름>'
@@ -404,10 +404,9 @@ def run(table: dict, targets: list[str], create_missing: bool = False, apply: bo
         for p in people:
             by_name.setdefault(p.name, []).append(p)
         for r in rows:
-            sid = r[key_sid].strip() if key_sid is not None else ''
+            # 엑셀이 숫자로 읽어 앞자리 0 을 지운 사번도 8자리로 (People in SAIT 와 같게)
+            sid = store.norm_sid(r[key_sid]) if key_sid is not None else ''
             name = r[key_name].strip() if key_name is not None else ''
-            if sid and sid.isdigit() and sid not in by_sid and sid.zfill(8) in by_sid:
-                sid = sid.zfill(8)  # 엑셀이 앞자리 0 을 지운 사번
             p = by_sid.get(sid) if sid else None
             if p is None and not sid and name:
                 cands = by_name.get(name, [])
