@@ -39,6 +39,19 @@ EVAL_KINDS = {'salary_grade': '연봉등급', 'first_half_grade': '상반기업�
 _EVAL_COL = re.compile(r'^(\d{4})_(salary_grade|first_half_grade|second_half_grade)$')
 _LEVELS = ('dep_1st_name', 'dep_2nd_name', 'dep_3rd_name')
 LAYER_HEADS = {1: '플랫폼장/팀장', 2: '그룹장/PL', 3: 'PM/파트장'}
+# 팀/리더 참조의 직책명으로 어느 칸인지 — 조직 단계보다 먼저 본다 (PL·PM 은 과제 단계 조직에 붙기도 하고,
+# PM 은 직무프로필 '(M)'으로 채워진다 — Researcher-board pipeline/team_refer_intake.py). 앞 규칙이 우선
+_TITLE_HEADS = [(re.compile(r'(?<![A-Za-z])PM(?![A-Za-z])|파트장', re.I), 3),
+                (re.compile(r'(?<![A-Za-z])PL(?![A-Za-z])|그룹장', re.I), 2),
+                (re.compile(r'플랫폼장|팀장|센터장|본부장'), 1)]
+
+
+def head_layer(assignment: str, layer: int) -> int:
+    """직책명이 PM·파트장이면 3, PL·그룹장이면 2, 플랫폼장·팀장·센터장·본부장이면 1, 그 밖에는 조직 단계."""
+    for rx, n in _TITLE_HEADS:
+        if rx.search(assignment or ''):
+            return n
+    return layer
 KINDS = ('임원/Master', 'R.Master', '보직장', '일반')  # 직책구분 (앞이 우선)
 
 __all__ = ['SyncError', 'is_available', 'fetch_leaders', 'sync_leaders', 'LEADERSHIP_DIMS', 'EVAL_KINDS',
@@ -214,7 +227,7 @@ def _status(sid: str, r: dict, orgs: _Orgs, deps: list[str], kind: str, task: st
     home = deps[0] if deps else own
     lv = orgs.levels(home) if home else {}
     own_lv = orgs.levels(own) if own else lv
-    layers = {orgs.layer(d) for d in deps}
+    layers = {head_layer(_s(orgs.nodes[d].get('assignment_name')), orgs.layer(d)) for d in deps}
     node = orgs.nodes.get(home, {})
     return {
         '사원번호': sid, 'Platform': own_lv.get(1, ''), '그룹': own_lv.get(2, ''), '부서명': _s(r.get('department')),

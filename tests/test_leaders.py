@@ -81,7 +81,8 @@ def test_fetch_leaders_current_holders_and_rmaster():
     st = got['박팀장']['status']
     assert (st['Platform'], st['그룹'], st['과제/파트명'], st['부서명'], st['CL'], st['구분']) == \
         ('AI센터', 'AI팀', '', 'AI팀', 'CL4', 'R&D')
-    assert (st['직책구분'], st['보직장'], st['플랫폼장/팀장'], st['그룹장/PL'], st['PM/파트장']) == ('보직장', 'O', '', 'O', '')
+    # 직책명 '팀장' 이라 2단계 조직이어도 플랫폼장/팀장 칸 (직책명이 단계보다 먼저)
+    assert (st['직책구분'], st['보직장'], st['플랫폼장/팀장'], st['그룹장/PL'], st['PM/파트장']) == ('보직장', 'O', 'O', '', '')
     assert st['과제명'] == '언어과제(신), 비전과제' and st['보직 수행시작일'] == '2026-06-30'
     assert got['김영수']['status']['직책구분'] == '임원/Master' and got['김영수']['status']['플랫폼장/팀장'] == 'O'
     sm = got['서마스터']['status']  # 보직 없는 R.Master — 자기 소속(org_code)의 조직으로
@@ -267,3 +268,16 @@ def test_platform_group_dept_come_from_own_record_by_sid(env):
     leaders.add_leader('한직접', '파트장', '', 'L004')
     han = {x['성명']: x for x in leaders.list_status()}['한직접']
     assert han['부서명'] == '경영지원' and han['CL'] == 'CL3'
+
+
+def test_head_columns_follow_assignment_title(env):
+    assert [leader_sync.head_layer(a, 1) for a in ('PM', 'PL', '파트장', '그룹장', '팀장', '본부장', '연구위원', 'APM팀')] == \
+        [3, 2, 3, 2, 1, 1, 1, 1]
+    assert leader_sync.head_layer('', 3) == 3
+    team = [t for t in TEAM if t[9] != 'L001'] + [  # 박팀장이 과제 단계(3)가 아닌 2단계 조직의 PM 으로 등록된 경우
+        ('비전과제', 'R&D', 'AI센터', 'AI팀', '비전과제', '1012', 'D-V', 'D-AI', '2', 'L001', '박팀장', 'PM', '', '2026', '09', '30'),
+        ('AI팀', 'R&D', 'AI센터', 'AI팀', '', '1010', 'D-AI', 'D-C', '', 'L003', '최예전', 'PL', '', '2026', '09', '30')]
+    _team(env, team)
+    got = {x['name']: x['status'] for x in leader_sync.fetch_leaders()}
+    assert (got['박팀장']['그룹장/PL'], got['박팀장']['PM/파트장']) == ('', 'O')
+    assert (got['최예전']['그룹장/PL'], got['최예전']['플랫폼장/팀장']) == ('O', '')  # 단계 칸이 비어도 직책명으로
