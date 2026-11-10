@@ -329,3 +329,26 @@ def test_delete_leaders_stays_deleted_after_sync(env):
     assert leaders.excluded_sids() == set()
     leader_sync.sync_leaders()
     assert [x['성명'] for x in leaders.list_status()].count('박팀장') == 1
+
+
+def test_plan_then_apply_only_chosen(env):
+    from sqlalchemy import create_engine, text
+    first = leader_sync.plan_leaders()
+    assert {i['kind'] for i in first['items']} >= {'add', 'extras'} and leaders.list_status() == []  # 제안만
+    leader_sync.apply_leaders([i['key'] for i in first['items'] if i['key'] != 'add:L002'])
+    names = {x['성명'] for x in leaders.list_status()}
+    assert '박팀장' in names and '정그룹' not in names
+    with create_engine(f'sqlite:///{env}').begin() as c:
+        c.execute(text("UPDATE researchers SET position='CL5' WHERE researcher_id='L001'"))
+    _team(env, [t for t in TEAM if t[9] != 'M001'])  # 바뀌는 것 없음(서마스터는 R.Master 라 그대로)
+    plan = leader_sync.plan_leaders()
+    by_key = {i['key']: i for i in plan['items']}
+    assert 'set:L001' in by_key and '직급 CL4 → CL5' in by_key['set:L001']['label']
+    assert 'CL CL4 → CL5' in by_key['set:L001']['label']  # 현황 칸도
+    assert 'add:L002' in by_key  # 지난번에 고르지 않은 새 리더는 다시 제안
+    park = {x['성명']: x for x in leaders.list_status()}['박팀장']
+    assert park['CL'] == 'CL4'  # 제안만으로는 그대로
+    r = leader_sync.apply_leaders(['set:L001'])
+    assert r['updated'] == ['박팀장'] and r['added'] == []
+    assert {x['성명']: x for x in leaders.list_status()}['박팀장']['CL'] == 'CL5'
+    assert not any(i['key'] == 'set:L001' for i in leader_sync.plan_leaders()['items'])  # 반영 뒤엔 제안 없음

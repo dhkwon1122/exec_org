@@ -14,6 +14,8 @@ from services import auth, leader_sync, leaders
 dash.register_page(__name__, path='/leaders', name='리더', title='업무 기록 · 리더')
 
 _LINK = '상세'
+_PLAN_KINDS = [('add', '새 리더'), ('set', '바뀐 정보'), ('former', '지난 리더로 (리더급에서 빠짐)'),
+               ('extras', '경력·발령 · 평가 · 리더십진단')]
 
 
 def layout(**_):
@@ -21,6 +23,25 @@ def layout(**_):
         ui.page_head('리더급 현황', '보직장·R.Master·임원 — 칸을 눌러 고치면 저장되고(과제구분 등), 불러오기를 다시 해도 유지됩니다'),
         dcc.Store(id='ld-refresh', data=0),
         dcc.Download(id='ld-download'),
+        dcc.Store(id='lp-plan'),
+        dbc.Modal([
+            dbc.ModalHeader(dbc.ModalTitle('People in SAIT 리더 변경 제안')),
+            dbc.ModalBody([
+                html.Div(id='lp-head', className='mb-2'),
+                html.Div([dbc.Button('전체 선택', id='lp-all', size='sm', color='secondary', outline=True, className='me-1'),
+                          dbc.Button('전체 해제', id='lp-none', size='sm', color='secondary', outline=True)],
+                         className='mb-2'),
+                *[html.Div([html.Div(id=f'lp-title-{k}', className='fw-semibold small mb-1'),
+                            dbc.Checklist(id=f'lp-{k}', options=[], value=[], className='small ms-2')],
+                           id=f'lp-group-{k}', className='mb-3') for k, _ in _PLAN_KINDS],
+            ]),
+            dbc.ModalFooter([
+                html.Span('고른 것만 반영합니다. 고르지 않은 것은 지금 값 그대로 두고, 다음 불러오기 때 다시 제안합니다.',
+                          className='small text-muted me-auto'),
+                dbc.Button('취소', id='lp-cancel', color='secondary', outline=True),
+                dbc.Button('선택 반영', id='lp-apply', color='primary'),
+            ]),
+        ], id='lp-modal', is_open=False, size='lg', scrollable=True),
         dbc.Modal([
             dbc.ModalHeader(dbc.ModalTitle('리더 직접 추가')),
             dbc.ModalBody([
@@ -45,8 +66,8 @@ def layout(**_):
             dbc.Col(dbc.Button([html.I(className='bi bi-arrow-repeat me-1'), 'SAIT에서 불러오기'],
                                id='ld-sync', color='secondary', outline=True, className='w-100',
                                disabled=not leader_sync.is_available(),
-                               title='조직 직책자(보직장)·R.Master 중 임원이 아닌 사람을 리더로 추가·갱신하고, '
-                                     '현황 칸·경력·평가·리더십진단을 함께 옮깁니다. 리더급에서 빠진 리더는 "지난 리더"로 둡니다. '
+                               title='조직 직책자(보직장)·R.Master 를 People in SAIT 와 비교해 바뀔 것을 먼저 보여 줍니다 — '
+                                     '새 리더·바뀐 정보·지난 리더·경력·평가·리더십진단 중 고른 것만 반영. '
                                      '화면에서 고친 칸은 그대로 둡니다.'),
                     md=2),
             dbc.Col(dbc.ButtonGroup([
@@ -203,28 +224,72 @@ def mail(n, ids):
     return leaders.draft_mail(ids)
 
 
-@callback(Output('ld-msg', 'children'), Output('ld-msg', 'is_open'), Output('ld-msg', 'color'),
+_PLAN_OUT = [Output('lp-head', 'children')] + [
+    o for k, _ in _PLAN_KINDS for o in (Output(f'lp-group-{k}', 'style'), Output(f'lp-title-{k}', 'children'),
+                                        Output(f'lp-{k}', 'options'), Output(f'lp-{k}', 'value'))]
+
+
+def _plan_view(plan: dict) -> list:
+    items = plan['items']
+    head = (f"리더급 {plan['total']}명 확인" + (f" (임원 {plan['execs']}명 포함 — 임원은 현황 칸만)" if plan['execs'] else '')
+            + (f" · 제안 {len(items)}건" if items else ' · 바뀐 것이 없습니다.'))
+    if plan['skipped_exec']:
+        head += f" · 아직 임원 목록에 없는 임원 {len(plan['skipped_exec'])}명은 임원 불러오기에서"
+    out = [head]
+    for k, title in _PLAN_KINDS:
+        opts = [{'label': i['label'], 'value': i['key']} for i in items if i['kind'] == k]
+        out += [None if opts else {'display': 'none'}, f'{title} ({len(opts)})', opts, [o['value'] for o in opts]]
+    return out
+
+
+@callback(Output('lp-modal', 'is_open'), Output('lp-plan', 'data'), Output('lp-apply', 'disabled'), *_PLAN_OUT,
+          Output('ld-msg', 'children'), Output('ld-msg', 'is_open'), Output('ld-msg', 'color'),
           Output('ld-refresh', 'data', allow_duplicate=True),
-          Input('ld-sync', 'n_clicks'), State('ld-refresh', 'data'), prevent_initial_call=True)
-def sync(n, r):
-    if not n:
-        return no_update, no_update, no_update, no_update
+          Input('ld-sync', 'n_clicks'), Input('lp-cancel', 'n_clicks'), Input('lp-apply', 'n_clicks'),
+          State('lp-plan', 'data'), *[State(f'lp-{k}', 'value') for k, _ in _PLAN_KINDS], State('ld-refresh', 'data'),
+          prevent_initial_call=True)
+def sync(n_sync, _c, n_apply, plan, *chosen_and_r):
+    """불러오기 → 제안 창(고르기) → 선택 반영. 제안을 만들 때는 DB 를 바꾸지 않는다."""
+    nu = no_update
+    keep = (nu,) * len(_PLAN_OUT)
+    trig = ctx.triggered_id
+    *chosen, r = chosen_and_r
+    if trig == 'lp-cancel':
+        return (False, None, nu, *keep, nu, nu, nu, nu)
+    if trig == 'ld-sync' and n_sync:
+        try:
+            plan = leader_sync.plan_leaders()
+        except leader_sync.SyncError as e:
+            return (nu, nu, nu, *keep, str(e), True, 'danger', nu)
+        if not plan['items']:
+            return (False, None, nu, *keep, _plan_view(plan)[0], True, 'secondary', (r or 0) + 1)
+        return (True, {'n': len(plan['items'])}, False, *_plan_view(plan), nu, nu, nu, nu)
+    if trig != 'lp-apply' or not n_apply or not plan:
+        return (nu, nu, nu, *keep, nu, nu, nu, nu)
+    keys = [k for vals in chosen for k in (vals or [])]
     try:
-        res = leader_sync.sync_leaders()
+        res = leader_sync.apply_leaders(keys)
     except leader_sync.SyncError as e:
-        return str(e), True, 'danger', no_update
-    parts = [f"리더급 {res['total']}명" + (f" (임원 {res['execs']}명 포함 — 임원은 현황 칸만)" if res['execs'] else '')]
+        return (nu, nu, nu, *keep, str(e), True, 'danger', nu)
+    parts = []
     if res['added']:
         parts.append(f"새 리더 {len(res['added'])}명")
     if res['updated']:
         parts.append(f"정보 바뀜 {len(res['updated'])}명")
     if res['former']:
-        parts.append(f"지난 리더로 {len(res['former'])}명 ({', '.join(res['former'][:5])}"
-                     + (' 등' if len(res['former']) > 5 else '') + ')')
-    if res['skipped_exec']:
-        parts.append(f"임원이라 건너뜀 {len(res['skipped_exec'])}명")
-    parts.append(f"경력 {res['career_added']}건 · 평가 {res['eval_changed']}건 · 리더십진단 {res['leadership_changed']}건 반영")
-    return '불러왔습니다 — ' + ' · '.join(parts), True, 'success', (r or 0) + 1
+        parts.append(f"지난 리더로 {len(res['former'])}명")
+    if 'extras' in keys:
+        parts.append(f"경력 {res['career_added']}건 · 평가 {res['eval_changed']}건 · 리더십진단 {res['leadership_changed']}건")
+    msg = ('반영했습니다 — ' + ' · '.join(parts)) if parts else '고른 제안이 없어 바꾸지 않았습니다.'
+    return (False, None, True, *keep, msg, True, 'success' if parts else 'secondary', (r or 0) + 1)
+
+
+@callback(*[Output(f'lp-{k}', 'value', allow_duplicate=True) for k, _ in _PLAN_KINDS],
+          Input('lp-all', 'n_clicks'), Input('lp-none', 'n_clicks'),
+          *[State(f'lp-{k}', 'options') for k, _ in _PLAN_KINDS], prevent_initial_call=True)
+def select_all(_a, _n, *opts):
+    on = ctx.triggered_id == 'lp-all'
+    return [[o['value'] for o in (x or [])] if on else [] for x in opts]
 
 
 @callback(Output('ldn-modal', 'is_open'), Output('ldn-error', 'children'), Output('ldn-error', 'is_open'),
