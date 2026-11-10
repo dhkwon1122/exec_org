@@ -81,7 +81,8 @@ def test_fetch_leaders_current_holders_and_rmaster():
     st = got['박팀장']['status']
     assert (st['Platform'], st['그룹'], st['과제/파트명'], st['부서명'], st['CL'], st['구분']) == \
         ('AI센터', 'AI팀', '', 'AI팀', 'CL4', 'R&D')
-    assert (st['직책구분'], st['보직장'], st['플랫폼장/팀장'], st['그룹장/PL'], st['PM/파트장']) == ('보직장', 'O', '', 'O', '')
+    # 직책명 '팀장' 이라 2단계 조직이어도 플랫폼장/팀장 칸 (직책명이 단계보다 먼저)
+    assert (st['직책구분'], st['보직장'], st['플랫폼장/팀장'], st['그룹장/PL'], st['PM/파트장']) == ('보직장', 'O', 'O', '', '')
     assert st['과제명'] == '언어과제(신), 비전과제' and st['보직 수행시작일'] == '2026-06-30'
     assert got['김영수']['status']['직책구분'] == '임원/Master' and got['김영수']['status']['플랫폼장/팀장'] == 'O'
     sm = got['서마스터']['status']  # 보직 없는 R.Master — 자기 소속(org_code)의 조직으로
@@ -191,14 +192,16 @@ def test_leader_excel_upload_status_columns_and_new_leaders(env):
             ['L999', '', '', '', '', '']]
     m = excel_import.suggest_mapping(headers, rows, use_ai=False, role='leader')
     targets = [x['target'] for x in m]
-    assert targets == ['key:source_id', 'key:name', 'status:과제구분', 'status:Platform', 'eval:MBO:2025', 'field:note']
+    assert targets == ['key:source_id', 'key:name', 'status:과제구분', 'ignore', 'eval:MBO:2025', 'field:note']
+    assert '사번으로' in m[3]['reason']  # Platform 은 사번으로 People in SAIT 에서 읽는 칸
+    assert not any(o['value'] == 'status:Platform' for o in excel_import.target_options(m, 'leader'))
     assert any(o['value'] == 'status:과제구분' for o in excel_import.target_options(m, 'leader'))
     assert not any(o['value'].startswith('status:') for o in excel_import.target_options(m, 'exec'))
     assert excel_import.suggest_mapping(headers, rows, use_ai=False)[2]['target'] == 'attr:과제구분'  # 임원 업로드는 그대로
     table = {'headers': headers, 'rows': rows}
     pre = excel_import.run(table, targets, create_missing=True, role='leader')
     assert pre['created'] == ['새리더'] and pre['unmatched'] == ['L999']
-    assert pre['changes']['리더급 현황 · 과제구분'] == 2 and pre['changes']['리더급 현황 · Platform'] == 0  # 같은 값
+    assert pre['changes']['리더급 현황 · 과제구분'] == 2
     assert leaders.list_status() and {x['성명'] for x in leaders.list_status()} == {'박팀장', '정그룹', '서마스터'}  # 미리보기
     excel_import.run(table, targets, create_missing=True, apply=True, role='leader')
     rows_now = {x['성명']: x for x in leaders.list_status()}
@@ -241,3 +244,70 @@ def test_upload_finds_header_row_and_sheet_and_explains_drm():
             excel_import.parse_upload(*_upload(raw))
     with pytest.raises(excel_import.ImportError_, match='xlsx·xls·csv'):
         excel_import.parse_upload(*_upload(b'abc', '현황.pdf'))
+
+
+def test_platform_group_dept_come_from_own_record_by_sid(env):
+    from sqlalchemy import create_engine, text
+    with create_engine(f'sqlite:///{env}').begin() as c:  # 정그룹: 맡은 조직은 반도체연구소지만 소속은 AI팀
+        c.execute(text("UPDATE researchers SET org_code='AI팀', department='AI전략실' WHERE researcher_id='L002'"))
+    st = {x['name']: x['status'] for x in leader_sync.fetch_leaders()}['정그룹']
+    assert (st['Platform'], st['그룹'], st['부서명']) == ('AI센터', 'AI팀', 'AI전략실')
+    assert st['플랫폼장/팀장'] == 'O'  # 보직은 맡은 조직 기준 그대로
+    leader_sync.sync_leaders()
+    jung = {x['성명']: x for x in leaders.list_status()}['정그룹']
+    with pytest.raises(ValueError, match='사번으로'):
+        leaders.save_status(jung['id'], 'Platform', '다른플랫폼')
+    # 예전에 고쳐 둔 값이 있어도 사번으로 읽은 값이 보인다
+    from services.db import Person
+    with db.SessionLocal() as s:
+        s.get(Person, jung['id']).leader_manual = '{"Platform": "옛값", "과제구분": "국책"}'
+        s.commit()
+    jung = {x['성명']: x for x in leaders.list_status()}['정그룹']
+    assert jung['Platform'] == 'AI센터' and jung['과제구분'] == '국책' and jung['edited'] == ['과제구분']
+    # 사번으로 직접 추가하면 바로 채워진다 (불러오기 전에도)
+    leaders.add_leader('한직접', '파트장', '', 'L004')
+    han = {x['성명']: x for x in leaders.list_status()}['한직접']
+    assert han['부서명'] == '경영지원' and han['CL'] == 'CL3'
+
+
+def test_head_columns_follow_assignment_title(env):
+    assert [leader_sync.head_layer(a, 1) for a in ('PM', 'PL', '파트장', '그룹장', '팀장', '본부장', '연구위원', 'APM팀')] == \
+        [3, 2, 3, 2, 1, 1, 1, 1]
+    assert leader_sync.head_layer('', 3) == 3
+    team = [t for t in TEAM if t[9] != 'L001'] + [  # 박팀장이 과제 단계(3)가 아닌 2단계 조직의 PM 으로 등록된 경우
+        ('비전과제', 'R&D', 'AI센터', 'AI팀', '비전과제', '1012', 'D-V', 'D-AI', '2', 'L001', '박팀장', 'PM', '', '2026', '09', '30'),
+        ('AI팀', 'R&D', 'AI센터', 'AI팀', '', '1010', 'D-AI', 'D-C', '', 'L003', '최예전', 'PL', '', '2026', '09', '30')]
+    _team(env, team)
+    got = {x['name']: x['status'] for x in leader_sync.fetch_leaders()}
+    assert (got['박팀장']['그룹장/PL'], got['박팀장']['PM/파트장']) == ('', 'O')
+    assert (got['최예전']['그룹장/PL'], got['최예전']['플랫폼장/팀장']) == ('O', '')  # 단계 칸이 비어도 직책명으로
+
+
+def test_numeric_sids_keep_leading_zeros(env, tmp_path):
+    from services import excel_import
+    assert [store.norm_sid(v) for v in ('12345', '12345.0', '00012345', 'E001', ' 7 ', '', '123456789')] == \
+        ['00012345', '00012345', '00012345', 'E001', '00000007', '', '123456789']
+    # 엑셀이 숫자로 읽어 0 이 지워진 사번 — DB 에 없어도 8자리로 새로 넣는다
+    table = {'headers': ['사원번호', '성명', '과제구분'], 'rows': [['12345', '영빠짐', '국책']]}
+    targets = [m['target'] for m in excel_import.suggest_mapping(table['headers'], table['rows'], use_ai=False,
+                                                                   role='leader')]
+    r = excel_import.run(table, targets, create_missing=True, apply=True, role='leader')
+    assert r['created'] == ['영빠짐']
+    row = {x['성명']: x for x in leaders.list_status()}['영빠짐']
+    assert row['사원번호'] == '00012345'
+    r = excel_import.run(table, targets, apply=True, role='leader')  # 다시 올려도 같은 사람으로
+    assert r['matched'] == 1 and r['created'] == []
+    leaders.add_leader('직접', source_id='777')
+    assert '00000777' in {x['사원번호'] for x in leaders.list_status()}
+    # 내보낸 엑셀의 사원번호 칸은 텍스트 서식
+    wb = load_workbook(io.BytesIO(leaders.status_template()))
+    assert {c.number_format for c in list(wb['리더급 현황'].columns)[0][1:]} == {'@'}
+    # 예전에 짧게 들어간 사번은 시작할 때 8자리로 (겹치면 그대로)
+    from services.db import Person
+    with db.SessionLocal() as s:
+        s.add(Person(name='짧은', source_id='4321', role='leader'))
+        s.add(Person(name='겹침', source_id='777', role='leader'))  # 00000777 이 이미 있음
+        s.commit()
+    db.configure(str(db.engine.url))
+    got = {p['name']: p['source_id'] for p in store.list_people(role='leader', include_inactive=True)}
+    assert got['짧은'] == '00004321' and got['겹침'] == '777'

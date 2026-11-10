@@ -71,7 +71,8 @@ def layout(**_):
         dash_table.DataTable(
             id='ld-table', data=[], row_selectable='multi', selected_row_ids=[], page_size=50, editable=True,
             sort_action='native', filter_action='native', markdown_options={'link_target': '_self'},
-            columns=[{'id': c, 'name': c} for c in leaders.STATUS_COLUMNS]
+            columns=[{'id': c, 'name': c, **({'editable': False} if c in leaders.FROM_DB else {})}
+                     for c in leaders.STATUS_COLUMNS]
             + [{'id': _LINK, 'name': _LINK, 'presentation': 'markdown', 'editable': False}],
             fixed_rows={'headers': True},
             style_table={'overflowX': 'auto', 'maxHeight': '70vh', 'overflowY': 'auto'},
@@ -80,10 +81,12 @@ def layout(**_):
             style_cell_conditional=[{'if': {'column_id': c}, 'textAlign': 'center'}
                                     for c in ('보직장', '플랫폼장/팀장', '그룹장/PL', 'PM/파트장', 'CL')],
             style_header={'fontWeight': 600, 'backgroundColor': 'var(--bs-tertiary-bg)', 'whiteSpace': 'normal'},
-            style_data_conditional=[{'if': {'filter_query': '{former} = 1'}, 'color': '#9aa0a6'}],
+            style_data_conditional=[{'if': {'filter_query': '{former} = 1'}, 'color': '#9aa0a6'}]
+            + [{'if': {'column_id': c}, 'backgroundColor': 'var(--bs-tertiary-bg)'} for c in leaders.FROM_DB],
             css=[{'selector': '.dash-cell-value p', 'rule': 'margin: 0'}],
         ),
         html.Div(['칸을 누르고 고친 뒤 Enter — 바로 저장됩니다. 과제구분처럼 불러올 수 없는 칸을 채우세요. ',
+                  'Platform·그룹·부서명(회색)은 사번으로 People in SAIT 에서 읽는 칸이라 고치지 않습니다. ',
                   '"상세"는 기록·경력·평가·리더십진단 화면. 표 머리 아래 칸에 글자를 넣으면 그 칸으로 거릅니다 (예: 직책구분에 보직장).'],
                  className='small text-muted mt-2'),
         html.Div(id='ld-saved', className='small text-success'),
