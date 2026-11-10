@@ -89,8 +89,8 @@ class _Orgs:
         if not {'researcher_id', 'dep_id'} <= set(t.c.keys()):
             raise SyncError('team_refer 테이블에 researcher_id·dep_id 컬럼이 없습니다.')
         rows = _rows(engine, select(*_cols(t, 'dep_id', 'upper_dep_id', 'researcher_id', 'name', 'assignment_name',
-                                           'org_name_wd', 'work_type', 'team_layer', 'deleted', 'valid_year',
-                                           'valid_month', 'valid_day', *_LEVELS)))
+                                           'org_name_wd', 'work_type', 'team_layer', 'dep_code', 'deleted',
+                                           'valid_year', 'valid_month', 'valid_day', *_LEVELS)))
         self.history: dict[str, list[dict]] = {}
         for r in rows:
             dep = _s(r.get('dep_id'))
@@ -103,6 +103,62 @@ class _Orgs:
         for dep, r in self.nodes.items():
             if _s(r.get('org_name_wd')):
                 self.by_name.setdefault(_s(r['org_name_wd']), dep)
+        self.children: dict[str, list[str]] = {}
+        for dep, r in self.nodes.items():
+            up = _s(r.get('upper_dep_id'))
+            if up in self.nodes and up != dep:
+                self.children.setdefault(up, []).append(dep)
+        self.member_ids: dict[str, set] = {}  # 조직 → 지금 소속 사번
+        self._order: dict[str, list] = {}
+        self._load_members(engine)
+
+    def _load_members(self, engine):
+        """조직(dep_id) → 지금 그 조직에 소속된 사번 (researchers 현재 행의 org_code = 조직의 org_name_wd)."""
+        t = _table(engine, 'researchers')
+        if t is None or 'org_code' not in t.c.keys():
+            return
+        latest: dict[str, tuple] = {}
+        for r in _rows(engine, select(*_cols(t, 'researcher_id', 'org_code', 'is_current', 'valid_year', 'valid_month'))):
+            sid = _s(r.get('researcher_id'))
+            rank = (_s(r.get('is_current')) != 'N', _ym(r))
+            if sid and (sid not in latest or rank >= latest[sid][0]):
+                latest[sid] = (rank, _s(r.get('org_code')), _s(r.get('is_current')) != 'N')
+        for sid, (_, org, cur) in latest.items():
+            dep = self.by_name.get(org)
+            if dep and cur:
+                self.member_ids.setdefault(dep, set()).add(sid)
+
+    def subtree(self, dep: str) -> set[str]:
+        out, stack = set(), [dep]
+        while stack:
+            d = stack.pop()
+            if d in out:
+                continue
+            out.add(d)
+            stack.extend(self.children.get(d, []))
+        return out
+
+    def headcount(self, deps: list[str], exclude: str = '') -> int:
+        """맡은 조직들(하위 조직 포함)에 지금 소속된 사람 수 — exclude(본인)는 빼고."""
+        alld = set().union(*(self.subtree(d) for d in deps)) if deps else set()
+        ids = set().union(*(self.member_ids.get(d, set()) for d in alld)) if alld else set()
+        return len(ids - {exclude})
+
+    def order(self, dep: str) -> list:
+        """조직 편제 순 정렬 열쇠 — 맨 위 조직부터 [조직코드(숫자면 숫자로), 이름] 를 이어 붙인 것."""
+        if dep in self._order:
+            return self._order[dep]
+        chain, cur, seen = [], dep, set()
+        while cur in self.nodes and cur not in seen:
+            seen.add(cur)
+            chain.append(cur)
+            cur = _s(self.nodes[cur].get('upper_dep_id'))
+        key = []
+        for d in reversed(chain):
+            code = _s(self.nodes[d].get('dep_code'))
+            key.append([int(code) if code.isdigit() else 10 ** 12, code, self.name(d)])
+        self._order[dep] = key
+        return key
 
     def layer(self, dep: str) -> int:
         r = self.nodes.get(dep, {})
@@ -235,6 +291,8 @@ def _status(sid: str, r: dict, orgs: _Orgs, deps: list[str], kind: str, task: st
         'Knox ID': _s(r.get('knox_id')), '구분': _s(node.get('work_type')), '직책구분': kind,
         '보직장': 'O' if deps else '', **{h: 'O' if n in layers else '' for n, h in LAYER_HEADS.items()},
         '과제명': task, '보직 수행시작일': min((orgs.since(d, sid) for d in deps if orgs.since(d, sid)), default=''),
+        '부서원 수': str(orgs.headcount(deps, sid)) if deps else '',
+        '_order': orgs.order(home) if home else [],  # 조직 편제 순 (services/leaders.py list_status 정렬)
     }
 
 
@@ -451,7 +509,7 @@ def _run(keys=None, apply: bool = True) -> dict:
                 diff = [(c, str(old.get(c) or ''), str(st.get(c) or '')) for c in STATUS_COLUMNS
                         if c not in ('사원번호', '성명') and (c in FROM_DB or c not in manual_cols)
                         and str(old.get(c) or '') != str(st.get(c) or '')]
-                if diff or not p.leader_info:
+                if diff or not p.leader_info or old != st:  # 정렬 열쇠처럼 안 보이는 값만 바뀌어도 (묻지 않고)
                     pending.setdefault(sid, []).extend(diff)
                     apply_fields.setdefault(sid, {})['leader_info'] = json.dumps(st, ensure_ascii=False)
         for sid, ch in pending.items():

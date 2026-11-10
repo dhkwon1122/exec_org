@@ -131,10 +131,13 @@ def test_status_rows_execs_and_manual_edits_survive_sync(env):
     leader_sync.sync_leaders()
     leaders.add_leader('무사번', '파트장', '테스트파트')
     rows = {r['성명']: r for r in leaders.list_status()}
-    assert list(rows) == ['김영수', '서마스터', '박팀장', '정그룹', '무사번']  # 직책구분 순 → 조직 순
+    # 조직 편제 순 — AI센터(1000, 김영수) > AI팀(1010, 박팀장 → 소속원 서마스터) > 반도체연구소(2000) > 조직 모름
+    assert list(rows) == ['김영수', '박팀장', '서마스터', '정그룹', '무사번']
+    # 부서원 수 — 맡은 조직(하위 포함)에 지금 소속된 사람, 본인 빼고 (서마스터만 AI팀 소속으로 잡힘)
+    assert (rows['김영수']['부서원 수'], rows['박팀장']['부서원 수'], rows['서마스터']['부서원 수']) == ('1', '1', '')
     assert rows['김영수']['직책구분'] == '임원/Master' and rows['김영수']['Platform'] == 'AI센터'
     assert rows['무사번']['직책구분'] == '일반' and rows['무사번']['부서명'] == '테스트파트'
-    assert list(leaders.list_status()[0]) [:17] == leaders.STATUS_COLUMNS
+    assert list(leaders.list_status()[0])[:18] == leaders.STATUS_COLUMNS
     park = rows['박팀장']['id']
     leaders.save_status(park, '과제구분', '국책')
     leaders.save_status(park, 'CL', 'CL5')
@@ -163,23 +166,34 @@ def test_exec_sync_leaves_leaders_alone_and_promotes(env):
     assert {p['name'] for p in store.list_people(role='exec')} == {'김영수', '박팀장'}
 
 
-def test_export_xlsx_and_mail_attachment(env, monkeypatch):
+def test_export_whole_list_with_options_and_mail_attachment(env):
+    from datetime import date
     leader_sync.sync_leaders()
-    ids = [x['id'] for x in leaders.list_leaders() if x['name'] != '서마스터']
-    store.add_history(None, '면담 — 차기 과제 논의', '동향', author='나', title='박팀장 면담', person_ids=[ids[0]])
-    wb = load_workbook(io.BytesIO(leaders.export_xlsx(ids)))
-    assert wb.sheetnames == ['리더급 현황', '기본 정보', '경력·발령', '평가', '리더십진단', '최근 기록']
-    status = list(wb['리더급 현황'].values)
-    assert list(status[0]) == leaders.STATUS_COLUMNS and len(status) == 3
-    basic = list(wb['기본 정보'].values)
-    assert basic[0][:3] == ('이름', '사번', '직책') and len(basic) == 3
-    assert len(list(wb['리더십진단'].values)) == 4 and list(wb['최근 기록'].values)[1][3] == '박팀장 면담'
-    draft = leaders.draft_mail(ids)
-    assert draft['attach_value'] == [f"leaders:{ids[0]}.{ids[1]}"] and '2명' in draft['subject']
-    files = outbox._load_attachments(draft['attach_value'])
-    assert files[0][0].endswith('_2명.xlsx') and files[0][1][:2] == b'PK'
-    with pytest.raises(ValueError):
-        leaders.export_xlsx([])
+    park = next(x for x in leaders.list_status() if x['성명'] == '박팀장')
+    store.add_history(None, '면담 — 차기 과제 논의', '동향', author='나', title='박팀장 면담', person_ids=[park['id']])
+    assert leaders.export_filename(date(2026, 11, 10)) == '(26-1110) 대외비_SAIT 리더급 현황.xlsx'
+    # 기본 — 전체 명단, 화면의 칸·순서 그대로, 시트 하나
+    wb = load_workbook(io.BytesIO(leaders.export_xlsx()))
+    assert wb.sheetnames == ['리더급 현황']
+    rows = list(wb['리더급 현황'].values)
+    assert list(rows[0]) == leaders.STATUS_COLUMNS
+    assert [r[5] for r in rows[1:]] == [x['성명'] for x in leaders.list_status()]
+    # 고르면 칸·시트를 더한다
+    wb = load_workbook(io.BytesIO(leaders.export_xlsx(['hr', 'lead', 'note', 'history', 'leadership', 'nope'])))
+    assert wb.sheetnames == ['리더급 현황', '리더십진단', '최근 기록']
+    head = [c.value for c in wb['리더급 현황'][1]]
+    assert head[len(leaders.STATUS_COLUMNS):] == ['재직상태', '나이', '입사일', '근속(년)', '승격일', '연차', '최종학력',
+                                                  '리더십진단(타인평균)', '메모']
+    assert list(wb['최근 기록'].values)[1][4] == '박팀장 면담'
+    draft = leaders.draft_mail(['eval', 'career'])
+    assert draft['attach_value'] == ['leaders::eval,career'] and '대외비' in draft['subject']
+    name, data = outbox._load_attachments(draft['attach_value'])[0]
+    assert name == leaders.export_filename() and data[:2] == b'PK'
+    assert load_workbook(io.BytesIO(data)).sheetnames == ['리더급 현황', '경력·발령']
+    # 지난 리더 포함이면 '상태' 칸
+    assert leaders.attachment_key([], True) == 'leaders:F:'
+    wb = load_workbook(io.BytesIO(leaders.export_xlsx([], include_former=True)))
+    assert [c.value for c in wb['리더급 현황'][1]][-1] == '상태'
 
 
 def test_leader_excel_upload_status_columns_and_new_leaders(env):
@@ -210,7 +224,7 @@ def test_leader_excel_upload_status_columns_and_new_leaders(env):
     assert profile.list_evaluations(park['id'])[0]['kind'] in ('MBO', '연봉등급')
     leader_sync.sync_leaders()  # 다시 불러와도 올린 값 유지
     assert {x['성명']: x for x in leaders.list_status()}['박팀장']['과제구분'] == '국책'
-    wb = load_workbook(io.BytesIO(leaders.status_template()))
+    wb = load_workbook(io.BytesIO(leaders.export_xlsx()))
     assert [c.value for c in wb['리더급 현황'][1]] == leaders.STATUS_COLUMNS
 
 
@@ -300,7 +314,7 @@ def test_numeric_sids_keep_leading_zeros(env, tmp_path):
     leaders.add_leader('직접', source_id='777')
     assert '00000777' in {x['사원번호'] for x in leaders.list_status()}
     # 내보낸 엑셀의 사원번호 칸은 텍스트 서식
-    wb = load_workbook(io.BytesIO(leaders.status_template()))
+    wb = load_workbook(io.BytesIO(leaders.export_xlsx()))
     assert {c.number_format for c in list(wb['리더급 현황'].columns)[0][1:]} == {'@'}
     # 예전에 짧게 들어간 사번은 시작할 때 8자리로 (겹치면 그대로)
     from services.db import Person

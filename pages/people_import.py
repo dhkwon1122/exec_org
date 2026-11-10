@@ -27,7 +27,7 @@ def build(role: str):
     leader_tips = [
         html.Li(['리더급 현황 칸 이름(', html.Code('Platform'), ', ', html.Code('그룹'), ', ', html.Code('과제구분'), ', ',
                  html.Code('보직 수행시작일'), ' 등)과 같은 제목은 그 칸에 넣습니다 — 표에서 고친 값처럼 다시 불러와도 유지됩니다. ',
-                 '"양식 내려받기"의 빈 양식을 채워 올려도 됩니다.']),
+                 '리더 화면의 "엑셀 내보내기"로 받은 파일을 고쳐 올려도 됩니다.']),
     ] if role == 'leader' else []
     return html.Div([
         dcc.Store(id='imp-table'),

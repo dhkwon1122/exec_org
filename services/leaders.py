@@ -16,10 +16,10 @@ from services.leader_sync import LEADERSHIP_DIMS
 OTHERS = '타인평균'  # 리더십진단 요약에 쓰는 평가자 그룹 (동료+상사+부서원 평균)
 # 리더급 현황 칸 — 불러온 값(Person.leader_info, services/leader_sync.py)에 화면에서 고친 값(leader_manual)을 덮는다
 STATUS_COLUMNS = ['사원번호', 'Platform', '그룹', '부서명', '과제/파트명', '성명', 'CL', 'Knox ID', '구분', '직책구분',
-                  '보직장', '플랫폼장/팀장', '그룹장/PL', 'PM/파트장', '과제구분', '과제명', '보직 수행시작일']
+                  '보직장', '플랫폼장/팀장', '그룹장/PL', 'PM/파트장', '과제구분', '과제명', '보직 수행시작일', '부서원 수']
 KIND_ORDER = {k: i for i, k in enumerate(['임원/Master', 'R.Master', '보직장', '일반'])}
 # 사번으로 People in SAIT 에서 읽는 칸 — 표·엑셀 업로드로 고치지 않는다 (고친 값이 있어도 무시)
-FROM_DB = ('Platform', '그룹', '부서명')
+FROM_DB = ('Platform', '그룹', '부서명', '부서원 수')
 
 
 def _loads(raw) -> dict:
@@ -45,7 +45,8 @@ def _status_of(p: Person) -> tuple[dict, set]:
 
 def list_status(query: str = '', include_former: bool = False) -> list[dict]:
     """리더급 현황 — 리더 + 지금 임원. 행마다 STATUS_COLUMNS 칸과 id·role·former·edited(고친 칸).
-    직책구분(임원/Master → R.Master → 보직장 → 일반) → Platform → 그룹 → 과제/파트 → 성명 순."""
+    조직 편제 순(조직도에서 위 조직부터, 같은 단계는 조직코드 순 — 맡은 조직, 없으면 소속 조직), 한 조직 안에서는
+    보직장 먼저 → 직책구분 → 성명. 조직을 모르는 임원은 맨 위, 그 밖의 사람은 맨 아래."""
     words = [w.lower() for w in store.search_terms(query or '')]
     with db.SessionLocal() as s:
         people = list(s.scalars(select(Person).where(Person.active.is_(True) | (Person.role == 'leader'))))
@@ -60,9 +61,14 @@ def list_status(query: str = '', include_former: bool = False) -> list[dict]:
         row, edited = _status_of(p)
         if words and not all(any(w in v.lower() for v in row.values()) or w in (p.note or '').lower() for w in words):
             continue
-        out.append({**row, 'id': p.id, 'role': p.role or '', 'former': former, 'edited': sorted(edited)})
-    return sorted(out, key=lambda r: (r['former'], KIND_ORDER.get(r['직책구분'], 9), r['Platform'], r['그룹'],
-                                      r['과제/파트명'], r['성명']))
+        out.append({**row, 'id': p.id, 'role': p.role or '', 'former': former, 'edited': sorted(edited),
+                    '_order': _loads(p.leader_info).get('_order') or []})
+
+    def key(r):
+        order = r['_order']
+        group = 0 if order else (-1 if r['직책구분'] == '임원/Master' else 1)
+        return (r['former'], group, order, r['보직장'] != 'O', KIND_ORDER.get(r['직책구분'], 9), r['성명'])
+    return sorted(out, key=key)
 
 
 def save_status(person_id: int, column: str, value: str) -> None:
@@ -237,74 +243,102 @@ def _sheet(wb: Workbook, title: str, header: list[str], rows: list[list], widths
     return ws
 
 
-def export_xlsx(person_ids: list[int], records: int = 20) -> bytes:
-    """고른 리더(또는 임원)의 자료를 엑셀로 — 리더급 현황 / 기본 정보 / 경력·발령 / 평가 / 리더십진단 /
-    최근 기록(사람마다 records 건)."""
-    people = [p for p in (store.get_person(int(i)) for i in person_ids) if p]
-    if not people:
-        raise ValueError('내보낼 사람을 고르세요.')
+# 내보내기 — 늘 전체 명단. 기본은 화면의 칸(STATUS_COLUMNS), 고르면 칸·시트를 더한다
+EXTRA_COLUMNS = {
+    'hr': ('기본 인사정보 (재직상태·나이·입사일·근속·승격일·연차·최종학력)',
+           [('재직상태', 'employment_status'), ('나이', 'age'), ('입사일', 'hire_date'), ('근속(년)', 'tenure'),
+            ('승격일', 'promotion_date'), ('연차', 'grade_years'), ('최종학력', 'education')]),
+    'eval': ('최근 평가', [('최근 평가', '_eval')]),
+    'lead': ('리더십진단 (타인평균)', [('리더십진단(타인평균)', '_lead')]),
+    'note': ('메모', [('메모', 'note')]),
+    'records': ('기록 수', [('기록 수', 'count')]),
+}
+EXTRA_SHEETS = {'career': '경력·발령 (시트)', 'evals': '평가 이력 (시트)', 'leadership': '리더십진단 상세 (시트)',
+                'history': '최근 기록 (시트, 사람마다 20건)'}
+_STATUS_WIDTHS = [10, 14, 16, 16, 18, 9, 7, 12, 8, 11, 7, 11, 9, 10, 9, 24, 13, 9]
+
+
+def export_filename(today: date | None = None) -> str:
+    """'(26-1110) 대외비_SAIT 리더급 현황.xlsx'."""
+    d = today or date.today()
+    return f"({d:%y}-{d:%m%d}) 대외비_SAIT 리더급 현황.xlsx"
+
+
+def export_xlsx(options: list[str] | None = None, include_former: bool = False, records: int = 20) -> bytes:
+    """리더급 현황 전체 명단을 엑셀로 — 화면 순서(조직 편제 순)·화면 칸 그대로, options 로 고른 칸(EXTRA_COLUMNS)과
+    시트(EXTRA_SHEETS)를 더한다."""
+    options = [o for o in (options or []) if o in EXTRA_COLUMNS or o in EXTRA_SHEETS]
+    rows = list_status(include_former=include_former)
+    if not rows:
+        raise ValueError('내보낼 리더가 없습니다.')
+    ids = [r['id'] for r in rows]
+    wanted = set(ids)
+    people = {p['id']: p for p in store.list_people(include_inactive=True, role='all') if p['id'] in wanted}
+    evals = _latest_evals(ids) if 'eval' in options else {}
+    lead = _latest_leadership(ids) if 'lead' in options else {}
+    extra = [col for k, (_, cols) in EXTRA_COLUMNS.items() if k in options for col in cols]
+    header = STATUS_COLUMNS + [h for h, _ in extra] + (['상태'] if include_former else [])
+
+    def extra_value(r, key):
+        if key == '_eval':
+            return evals.get(r['id'], '')
+        if key == '_lead':
+            return lead.get(r['id'], '')
+        v = people.get(r['id'], {}).get(key)
+        return '' if v is None else v
     wb = Workbook()
     wb.remove(wb.active)
-    with db.SessionLocal() as s:
-        status = {p.id: _status_of(p)[0] for p in s.scalars(select(Person).where(Person.id.in_([p['id'] for p in people])))}
-    _sheet(wb, '리더급 현황', STATUS_COLUMNS, [[status[p['id']][c] for c in STATUS_COLUMNS] for p in people],
-           [10, 14, 16, 16, 18, 9, 7, 12, 8, 11, 7, 11, 9, 10, 9, 24, 13])
-    _sheet(wb, '기본 정보', ['이름', '사번', '직책', '조직', '상위 조직', '직급', '재직상태', '나이', '입사일', '근속(년)',
-                         '승격일', '연차', '최종학력', '최근 평가', '리더십진단(타인평균)', '메모'],
-           [[p['name'], p['source_id'], p['assignment'], p['org'], p['org_path'], p['position'],
-             p['employment_status'], p['age'], p['hire_date'], p['tenure'], p['promotion_date'], p['grade_years'],
-             p['education'], _latest_evals([p['id']]).get(p['id'], ''),
-             _latest_leadership([p['id']]).get(p['id'], ''), p['note']] for p in people],
-           [10, 11, 14, 22, 34, 10, 9, 6, 11, 8, 11, 6, 28, 30, 14, 30])
-    _sheet(wb, '경력·발령', ['이름', '구분', '날짜', '직급', '조직', '발령', '직책'],
-           [[p['name'], c['kind'], c['date'], c['position'], c['org'], c['title'], c['assignment']]
-            for p in people for c in store.list_career(p['id'])], [10, 9, 11, 10, 30, 24, 14])
-    evals = [(p, e) for p in people for e in profile.list_evaluations(p['id'])]
-    _sheet(wb, '평가', ['이름', '연도', '종류', '등급', '메모'],
-           [[p['name'], e['year'], e['kind'], e['grade'], e['note']] for p, e in evals], [10, 7, 14, 8, 40])
-    _sheet(wb, '리더십진단', ['이름', '연도', '평가자', *LEADERSHIP_DIMS, '평균(저해행동 제외)'],
-           [[p['name'], x['year'], x['group'], *[x['scores'].get(d) for d in LEADERSHIP_DIMS], x['avg']]
-            for p in people for x in leadership(p['id'])], [10, 7, 9] + [9] * len(LEADERSHIP_DIMS) + [12])
-    hist_rows = []
-    for p in people:
-        for h in store.search_history('', person_id=p['id'], limit=records):
-            hist_rows.append([p['name'], h['occurred_at'][:10], h['entry_type'], h['title'] or '',
-                              h['summary'] or h['content'][:500], h.get('task_title') or ''])
-    _sheet(wb, '최근 기록', ['이름', '날짜', '유형', '제목', '요약·내용', '업무'], hist_rows, [10, 11, 8, 30, 60, 24])
+    _sheet(wb, '리더급 현황', header,
+           [[r[c] for c in STATUS_COLUMNS] + [extra_value(r, k) for _, k in extra]
+            + (['지난 리더' if r['former'] else ''] if include_former else []) for r in rows],
+           _STATUS_WIDTHS + [12] * (len(header) - len(STATUS_COLUMNS)))
+    if 'career' in options:
+        _sheet(wb, '경력·발령', ['성명', '사원번호', '구분', '날짜', '직급', '조직', '발령', '직책'],
+               [[r['성명'], r['사원번호'], c['kind'], c['date'], c['position'], c['org'], c['title'], c['assignment']]
+                for r in rows for c in store.list_career(r['id'])], [10, 11, 9, 11, 10, 30, 24, 14])
+    if 'evals' in options:
+        _sheet(wb, '평가 이력', ['성명', '사원번호', '연도', '종류', '등급', '메모'],
+               [[r['성명'], r['사원번호'], e['year'], e['kind'], e['grade'], e['note']]
+                for r in rows for e in profile.list_evaluations(r['id'])], [10, 11, 7, 14, 8, 40])
+    if 'leadership' in options:
+        _sheet(wb, '리더십진단', ['성명', '사원번호', '연도', '평가자', *LEADERSHIP_DIMS, '평균(저해행동 제외)'],
+               [[r['성명'], r['사원번호'], x['year'], x['group'], *[x['scores'].get(d) for d in LEADERSHIP_DIMS], x['avg']]
+                for r in rows for x in leadership(r['id'])], [10, 11, 7, 9] + [9] * len(LEADERSHIP_DIMS) + [12])
+    if 'history' in options:
+        hist = []
+        for r in rows:
+            for h in store.search_history('', person_id=r['id'], limit=records):
+                hist.append([r['성명'], r['사원번호'], h['occurred_at'][:10], h['entry_type'], h['title'] or '',
+                             h['summary'] or h['content'][:500], h.get('task_title') or ''])
+        _sheet(wb, '최근 기록', ['성명', '사원번호', '날짜', '유형', '제목', '요약·내용', '업무'], hist,
+               [10, 11, 11, 8, 30, 60, 24])
     buf = io.BytesIO()
     wb.save(buf)
     return buf.getvalue()
 
 
-def status_template() -> bytes:
-    """리더급 현황 엑셀 — 지금 표(지난 리더 빼고) 그대로. 고쳐서 리더 엑셀 업로드(/leaders/import)로 다시 올리는 양식."""
-    wb = Workbook()
-    wb.remove(wb.active)
-    _sheet(wb, '리더급 현황', STATUS_COLUMNS, [[r[c] for c in STATUS_COLUMNS] for r in list_status()],
-           [10, 14, 16, 16, 18, 9, 7, 12, 8, 11, 7, 11, 9, 10, 9, 24, 13])
-    buf = io.BytesIO()
-    wb.save(buf)
-    return buf.getvalue()
+def attachment_key(options: list[str] | None = None, include_former: bool = False) -> str:
+    """메일 보내기 창(components/mail_ui.py)의 첨부 값 — 보낼 때 services/outbox.py 가 엑셀을 새로 만든다.
+    'leaders:<F 면 지난 리더 포함>:<고른 항목,…>'"""
+    return f"leaders:{'F' if include_former else ''}:{','.join(options or [])}"
 
 
-def export_filename(n: int) -> str:
-    return f"리더_자료_{date.today().strftime('%Y%m%d')}_{n}명.xlsx"
+def from_attachment_key(rest: str) -> tuple[str, bytes]:
+    """attachment_key 의 'leaders:' 뒤 → (파일 이름, 엑셀)."""
+    flag, _, opts = (rest or '').partition(':')
+    return export_filename(), export_xlsx([o for o in opts.split(',') if o], include_former=flag == 'F')
 
 
-def attachment_key(person_ids: list[int]) -> str:
-    """메일 보내기 창(components/mail_ui.py)의 첨부 값 — 보낼 때 services/outbox.py 가 엑셀을 새로 만든다."""
-    return 'leaders:' + '.'.join(str(int(i)) for i in person_ids)
-
-
-def draft_mail(person_ids: list[int]) -> dict:
-    """메일 초안 — 본문은 짧은 안내, 자료는 엑셀 첨부(미리 체크)."""
-    people = [p for p in (store.get_person(int(i)) for i in person_ids) if p]
-    if not people:
-        raise ValueError('내보낼 리더를 고르세요.')
-    names = ', '.join(p['name'] for p in people[:10]) + (f' 외 {len(people) - 10}명' if len(people) > 10 else '')
-    key = attachment_key([p['id'] for p in people])
-    return {'subject': f'리더 자료 ({len(people)}명)', 'to': '',
-            'text': f'리더 {len(people)}명의 자료를 엑셀로 첨부합니다.\n\n대상: {names}\n'
-                    '시트: 리더급 현황 · 기본 정보 · 경력·발령 · 평가 · 리더십진단 · 최근 기록',
-            'table_html': '', 'attachments': [{'value': key, 'label': export_filename(len(people))}],
+def draft_mail(options: list[str] | None = None, include_former: bool = False) -> dict:
+    """메일 초안 — 본문은 짧은 안내, 리더급 현황 엑셀은 첨부(미리 체크)."""
+    n = len(list_status(include_former=include_former))
+    if not n:
+        raise ValueError('내보낼 리더가 없습니다.')
+    key = attachment_key(options, include_former)
+    added = [EXTRA_COLUMNS[o][0] if o in EXTRA_COLUMNS else EXTRA_SHEETS[o] for o in options or []
+             if o in EXTRA_COLUMNS or o in EXTRA_SHEETS]
+    return {'subject': '[대외비] SAIT 리더급 현황', 'to': '',
+            'text': f'SAIT 리더급 현황({n}명)을 엑셀로 첨부합니다.' + (f"\n\n더한 항목: {', '.join(added)}" if added else '')
+                    + '\n\n대외비 자료이니 외부로 전달하지 말아 주세요.',
+            'table_html': '', 'attachments': [{'value': key, 'label': export_filename()}],
             'attach_value': [key], 'related_kind': 'leaders', 'related_id': ''}
