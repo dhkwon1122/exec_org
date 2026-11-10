@@ -86,11 +86,9 @@ def _load_attachments(keys: list[str]) -> list[tuple[str, bytes]]:
     out = []
     for k in keys or []:
         kind, _, sid = str(k).partition(':')
-        if kind == 'leaders':  # 리더 자료 엑셀 — 보낼 때 새로 만든다 (services/leaders.py)
+        if kind == 'leaders':  # 리더급 현황 엑셀 — 보낼 때 새로 만든다 (services/leaders.py)
             from services import leaders
-            ids = [int(x) for x in sid.split('.') if x.isdigit()]
-            if ids:
-                out.append((leaders.export_filename(len(ids)), leaders.export_xlsx(ids)))
+            out.append(leaders.from_attachment_key(sid))
             continue
         if not sid.isdigit():
             continue

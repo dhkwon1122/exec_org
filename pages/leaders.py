@@ -1,9 +1,7 @@
 """리더급 현황 — 보직장·R.Master(People in SAIT 에서 불러옴, services/leader_sync.py)와 지금 임원, 직접 추가한 리더.
 표 칸은 services/leaders.py STATUS_COLUMNS. 칸을 고치면 저장되고 불러오기를 다시 해도 유지된다(과제구분 등).
 '상세'를 누르면 임원과 같은 화면(/people/<id>)에서 기록·경력·평가·리더십진단을 본다.
-고른 사람의 자료는 엑셀로 내려받거나 메일에 엑셀로 첨부해 보낸다."""
-from datetime import date
-
+엑셀 내보내기는 늘 전체 명단 — 화면의 칸이 기본, 칸·시트를 골라 더해 내려받거나 메일에 첨부한다."""
 import dash
 import dash_bootstrap_components as dbc
 from dash import Input, Output, State, callback, ctx, dash_table, dcc, html, no_update
@@ -24,6 +22,28 @@ def layout(**_):
         dcc.Store(id='ld-refresh', data=0),
         dcc.Download(id='ld-download'),
         dcc.Store(id='lp-plan'),
+        dbc.Modal([
+            dbc.ModalHeader(dbc.ModalTitle('리더급 현황 엑셀 내보내기')),
+            dbc.ModalBody([
+                html.Div(id='lx-head', className='small mb-2'),
+                html.Div('기본: 화면의 칸 (' + ' · '.join(leaders.STATUS_COLUMNS) + ')', className='small text-muted mb-3'),
+                html.Div('칸 더하기', className='fw-semibold small mb-1'),
+                dbc.Checklist(id='lx-cols', value=[], className='small ms-2 mb-3',
+                              options=[{'label': v[0], 'value': k} for k, v in leaders.EXTRA_COLUMNS.items()]),
+                html.Div('시트 더하기', className='fw-semibold small mb-1'),
+                dbc.Checklist(id='lx-sheets', value=[], className='small ms-2 mb-3',
+                              options=[{'label': v, 'value': k} for k, v in leaders.EXTRA_SHEETS.items()]),
+                html.Div(id='lx-file', className='small'),
+                html.Div('표에서 고친 칸(과제구분 등)을 고쳐 "엑셀 업로드"로 다시 올릴 수도 있습니다 '
+                         '(Platform·그룹·부서명·부서원 수는 사번으로 읽는 칸이라 올리지 않음).', className='small text-muted mt-2'),
+            ]),
+            dbc.ModalFooter([
+                dbc.Button('닫기', id='lx-close', color='secondary', outline=True, className='me-auto'),
+                dbc.Button([html.I(className='bi bi-download me-1'), '내려받기'], id='lx-download', color='secondary'),
+                dbc.Button([html.I(className='bi bi-envelope me-1'), '메일로 보내기 (엑셀 첨부)'], id='lx-mail',
+                           color='primary'),
+            ]),
+        ], id='lx-modal', is_open=False),
         dbc.Modal([
             dbc.ModalHeader(dbc.ModalTitle('People in SAIT 리더 변경 제안')),
             dbc.ModalBody([
@@ -81,17 +101,12 @@ def layout(**_):
         html.Div([
             html.Span(id='ld-count', className='small text-muted me-auto'),
             html.Span(id='ld-picked', className='small me-2'),
-            dbc.Button([html.I(className='bi bi-download me-1'), '양식 내려받기'], id='ld-template', size='sm',
-                       color='link', className='me-1 text-decoration-none',
-                       title='지금 리더급 현황 표를 엑셀로 — 고쳐서 "엑셀 업로드"로 다시 올리는 양식'),
-            dbc.Button([html.I(className='bi bi-file-earmark-excel me-1'), '엑셀 내려받기'], id='ld-xlsx', size='sm',
-                       color='secondary', outline=True, className='me-1', disabled=True),
             dbc.Button([html.I(className='bi bi-trash me-1'), '삭제'], id='ld-delete', size='sm', color='danger',
                        outline=True, className='me-1', disabled=True,
                        title='고른 리더를 명단에서 지웁니다 (임원은 임원 화면에서). 다시 불러와도 생기지 않습니다'),
             dcc.ConfirmDialog(id='ld-delete-confirm'),
-            dbc.Button([html.I(className='bi bi-envelope me-1'), '메일로 보내기 (엑셀 첨부)'], id='ld-mail', size='sm',
-                       color='primary', disabled=True),
+            dbc.Button([html.I(className='bi bi-file-earmark-excel me-1'), '엑셀 내보내기'], id='lx-open', size='sm',
+                       color='primary', title='전체 명단 — 화면의 칸 그대로, 필요하면 항목을 더해서'),
         ], className='d-flex align-items-center flex-wrap gap-1 mb-2'),
         dash_table.DataTable(
             id='ld-table', data=[], row_selectable='multi', selected_row_ids=[], page_size=50, editable=True,
@@ -193,35 +208,38 @@ def delete(n, ids, r):
     return html.Div([html.Div(x) for x in parts]), True, color, (r or 0) + 1, []
 
 
-@callback(Output('ld-picked', 'children'), Output('ld-xlsx', 'disabled'), Output('ld-mail', 'disabled'),
-          Input('ld-table', 'selected_row_ids'))
+@callback(Output('ld-picked', 'children'), Input('ld-table', 'selected_row_ids'))
 def picked(ids):
     n = len(ids or [])
-    return (f'{n}명 고름' if n else '내보낼 리더를 왼쪽 칸에서 고르세요'), not n, not n
+    return f'{n}명 고름' if n else ''
 
 
-@callback(Output('ld-download', 'data'), Input('ld-xlsx', 'n_clicks'), State('ld-table', 'selected_row_ids'),
-          prevent_initial_call=True)
-def download(n, ids):
-    if not n or not ids:
-        return no_update
-    return dcc.send_bytes(leaders.export_xlsx(ids), leaders.export_filename(len(ids)))
+@callback(Output('lx-modal', 'is_open'), Output('lx-head', 'children'), Output('lx-file', 'children'),
+          Input('lx-open', 'n_clicks'), Input('lx-close', 'n_clicks'), Input('lx-mail', 'n_clicks'),
+          State('ld-former', 'value'), prevent_initial_call=True)
+def export_window(n_open, _c, _m, former):
+    if ctx.triggered_id != 'lx-open' or not n_open:
+        return False, no_update, no_update  # 닫기·메일(메일 창이 열림)
+    n = len(leaders.list_status(include_former=bool(former)))
+    head = f'전체 명단 {n}명 — 화면 순서(조직 편제 순)' + (' · 지난 리더 포함' if former else '')
+    return True, head, ['파일 이름: ', html.Code(leaders.export_filename())]
 
 
-@callback(Output('ld-download', 'data', allow_duplicate=True), Input('ld-template', 'n_clicks'),
-          prevent_initial_call=True)
-def template(n):
+@callback(Output('ld-download', 'data'), Input('lx-download', 'n_clicks'),
+          State('lx-cols', 'value'), State('lx-sheets', 'value'), State('ld-former', 'value'), prevent_initial_call=True)
+def download(n, cols, sheets, former):
     if not n:
         return no_update
-    return dcc.send_bytes(leaders.status_template(), f"리더급_현황_{date.today().strftime('%Y%m%d')}.xlsx")
+    return dcc.send_bytes(leaders.export_xlsx((cols or []) + (sheets or []), include_former=bool(former)),
+                          leaders.export_filename())
 
 
-@callback(Output('mail-draft', 'data', allow_duplicate=True), Input('ld-mail', 'n_clicks'),
-          State('ld-table', 'selected_row_ids'), prevent_initial_call=True)
-def mail(n, ids):
-    if not n or not ids:
+@callback(Output('mail-draft', 'data', allow_duplicate=True), Input('lx-mail', 'n_clicks'),
+          State('lx-cols', 'value'), State('lx-sheets', 'value'), State('ld-former', 'value'), prevent_initial_call=True)
+def mail(n, cols, sheets, former):
+    if not n:
         return no_update
-    return leaders.draft_mail(ids)
+    return leaders.draft_mail((cols or []) + (sheets or []), include_former=bool(former))
 
 
 _PLAN_OUT = [Output('lp-head', 'children')] + [
