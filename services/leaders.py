@@ -45,8 +45,8 @@ def _status_of(p: Person) -> tuple[dict, set]:
 
 def list_status(query: str = '', include_former: bool = False) -> list[dict]:
     """리더급 현황 — 리더 + 지금 임원. 행마다 STATUS_COLUMNS 칸과 id·role·former·edited(고친 칸).
-    조직 편제 순(조직도에서 위 조직부터, 같은 단계는 조직코드 순 — 맡은 조직, 없으면 소속 조직), 한 조직 안에서는
-    보직장 먼저 → 직책구분 → 성명. 조직을 모르는 임원은 맨 위, 그 밖의 사람은 맨 아래."""
+    조직코드 순(맡은 조직, 없으면 소속 조직의 팀/리더 참조 조직코드), 한 조직 안에서는 보직장 먼저 → 직책구분 → 성명.
+    조직을 모르는 임원은 맨 위, 그 밖의 사람은 맨 아래."""
     words = [w.lower() for w in store.search_terms(query or '')]
     with db.SessionLocal() as s:
         people = list(s.scalars(select(Person).where(Person.active.is_(True) | (Person.role == 'leader'))))

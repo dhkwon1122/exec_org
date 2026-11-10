@@ -366,3 +366,12 @@ def test_plan_then_apply_only_chosen(env):
     assert r['updated'] == ['박팀장'] and r['added'] == []
     assert {x['성명']: x for x in leaders.list_status()}['박팀장']['CL'] == 'CL5'
     assert not any(i['key'] == 'set:L001' for i in leader_sync.plan_leaders()['items'])  # 반영 뒤엔 제안 없음
+
+
+def test_sorted_by_org_code(env):
+    # 반도체연구소(2000) 아래지만 조직코드가 1500 인 팀 — 조직코드 순이면 반도체연구소보다 앞
+    _team(env, TEAM + [('X팀', 'R&D', '반도체연구소', 'X팀', '', '1500', 'D-X', 'D-S', '2', 'L004', '한직접', '팀장', '',
+                        '2026', '09', '30')])
+    people_sync.sync_people()
+    leader_sync.sync_leaders()
+    assert [x['성명'] for x in leaders.list_status()] == ['김영수', '박팀장', '서마스터', '한직접', '정그룹']
