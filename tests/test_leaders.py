@@ -311,3 +311,21 @@ def test_numeric_sids_keep_leading_zeros(env, tmp_path):
     db.configure(str(db.engine.url))
     got = {p['name']: p['source_id'] for p in store.list_people(role='leader', include_inactive=True)}
     assert got['짧은'] == '00004321' and got['겹침'] == '777'
+
+
+def test_delete_leaders_stays_deleted_after_sync(env):
+    people_sync.sync_people()
+    leader_sync.sync_leaders()
+    rows = {x['성명']: x for x in leaders.list_status()}
+    hid = store.add_history(None, '면담', '동향', author='나', person_ids=[rows['정그룹']['id']])['id']
+    res = leaders.delete_leaders([rows['박팀장']['id'], rows['김영수']['id'], rows['정그룹']['id']], by='나')
+    assert res['deleted'] == ['박팀장'] and res['execs'] == ['김영수']
+    assert res['blocked'][0][0] == '정그룹' and '이 사람에게만' in res['blocked'][0][1]
+    assert hid and '박팀장' not in {x['성명'] for x in leaders.list_status()}
+    leader_sync.sync_leaders()  # 다시 불러와도 생기지 않는다
+    assert '박팀장' not in {x['성명'] for x in leaders.list_status()}
+    assert leaders.excluded_sids() == {'L001'}
+    leaders.add_leader('박팀장', '팀장', '', 'L001')  # 같은 사번으로 직접 추가하면 다시
+    assert leaders.excluded_sids() == set()
+    leader_sync.sync_leaders()
+    assert [x['성명'] for x in leaders.list_status()].count('박팀장') == 1

@@ -30,7 +30,7 @@ from datetime import date, datetime
 from sqlalchemy import select
 
 from services import db, people_sync, profile
-from services.db import Person, PersonLeadership
+from services.db import LeaderExclusion, Person, PersonLeadership
 from services.people_sync import (HR_FIELDS, SyncError, _canonical_positions, _chunks, _cols, _existing_keys,
                                   _fetch_careers, _fetch_education, _people_db, _rows, _s, _table, _ym, save_careers)
 
@@ -387,10 +387,13 @@ def sync_leaders() -> dict:
     added, updated, former, skipped_exec = [], [], [], []
     with db.SessionLocal() as s:
         by_sid = {p.source_id: p for p in s.scalars(select(Person)) if p.source_id}
+        excluded = set(s.scalars(select(LeaderExclusion.source_id)))
         seen = set()
         for L in leaders:
             sid = L['source_id']
             p = by_sid.get(sid)
+            if p is None and sid in excluded:  # 리더 명단에서 지운 사람 — 다시 추가하지 않는다
+                continue
             if L['exec'] or (p is not None and p.role != 'leader'):  # 임원 — 임원 불러오기에서, 현황 칸만
                 if p is None:
                     skipped_exec.append(L['name'])

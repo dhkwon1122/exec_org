@@ -9,7 +9,7 @@ import dash_bootstrap_components as dbc
 from dash import Input, Output, State, callback, ctx, dash_table, dcc, html, no_update
 
 from components import ui
-from services import leader_sync, leaders
+from services import auth, leader_sync, leaders
 
 dash.register_page(__name__, path='/leaders', name='리더', title='업무 기록 · 리더')
 
@@ -65,6 +65,10 @@ def layout(**_):
                        title='지금 리더급 현황 표를 엑셀로 — 고쳐서 "엑셀 업로드"로 다시 올리는 양식'),
             dbc.Button([html.I(className='bi bi-file-earmark-excel me-1'), '엑셀 내려받기'], id='ld-xlsx', size='sm',
                        color='secondary', outline=True, className='me-1', disabled=True),
+            dbc.Button([html.I(className='bi bi-trash me-1'), '삭제'], id='ld-delete', size='sm', color='danger',
+                       outline=True, className='me-1', disabled=True,
+                       title='고른 리더를 명단에서 지웁니다 (임원은 임원 화면에서). 다시 불러와도 생기지 않습니다'),
+            dcc.ConfirmDialog(id='ld-delete-confirm'),
             dbc.Button([html.I(className='bi bi-envelope me-1'), '메일로 보내기 (엑셀 첨부)'], id='ld-mail', size='sm',
                        color='primary', disabled=True),
         ], className='d-flex align-items-center flex-wrap gap-1 mb-2'),
@@ -128,6 +132,44 @@ def save_edit(_ts, rows, prev):
                 leaders.save_status(r['id'], c, r.get(c) or '')
                 saved.append(f"{r.get('성명') or ''} {c}")
     return f"저장했습니다: {', '.join(saved)}" if saved else no_update
+
+
+@callback(Output('ld-delete', 'disabled'), Input('ld-table', 'selected_row_ids'))
+def can_delete(ids):
+    return not ids
+
+
+@callback(Output('ld-delete-confirm', 'displayed'), Output('ld-delete-confirm', 'message'),
+          Input('ld-delete', 'n_clicks'), State('ld-table', 'selected_row_ids'), State('ld-table', 'data'),
+          prevent_initial_call=True)
+def ask_delete(n, ids, rows):
+    if not n or not ids:
+        return no_update, no_update
+    names = [r['성명'] for r in rows or [] if r['id'] in set(ids)]
+    shown = ', '.join(names[:10]) + (f' 외 {len(names) - 10}명' if len(names) > 10 else '')
+    return True, (f'{len(names)}명을 리더 명단에서 지울까요?\n{shown}\n\n'
+                  '기록·경력·평가도 이 사람 화면에서 함께 사라집니다(여러 사람·업무에 걸친 기록은 그대로). '
+                  'People in SAIT 에서 다시 불러와도 생기지 않고, 같은 사번으로 "직접 추가"하면 다시 넣을 수 있습니다.')
+
+
+@callback(Output('ld-msg', 'children', allow_duplicate=True), Output('ld-msg', 'is_open', allow_duplicate=True),
+          Output('ld-msg', 'color', allow_duplicate=True), Output('ld-refresh', 'data', allow_duplicate=True),
+          Output('ld-table', 'selected_row_ids'),
+          Input('ld-delete-confirm', 'submit_n_clicks'), State('ld-table', 'selected_row_ids'),
+          State('ld-refresh', 'data'), prevent_initial_call=True)
+def delete(n, ids, r):
+    if not n or not ids:
+        return (no_update,) * 5
+    res = leaders.delete_leaders(ids, by=auth.current_name())
+    parts = []
+    if res['deleted']:
+        parts.append(f"{len(res['deleted'])}명을 지웠습니다: {', '.join(res['deleted'][:10])}")
+    if res['execs']:
+        parts.append(f"임원은 지우지 않았습니다(임원 화면에서): {', '.join(res['execs'])}")
+    for name, why in res['blocked']:
+        parts.append(f'{name} — {why}')
+    color = 'success' if res['deleted'] and not res['blocked'] else 'warning'
+    return html.Div([html.Div(x) for x in parts]), True, color, (r or 0) + 1, []
 
 
 @callback(Output('ld-picked', 'children'), Output('ld-xlsx', 'disabled'), Output('ld-mail', 'disabled'),

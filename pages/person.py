@@ -346,7 +346,12 @@ def edit_person(n_open, _c, _s, _d, n_toggle, pid, name, position, org, aliases,
         return (nu,) * 11
     try:
         if trig == 'pe-delete':
-            store.delete_person(pid)
+            if p['role'] == 'leader':  # 다시 불러와도 생기지 않게 (services/leaders.py delete_leaders)
+                res = leaders.delete_leaders([pid], by=auth.current_name())
+                if res['blocked']:
+                    raise ValueError(res['blocked'][0][1])
+            else:
+                store.delete_person(pid)
             return (False,) + (nu,) * 5 + ('', False, nu, '/leaders' if p['role'] == 'leader' else '/people', nu)
         store.update_person(pid, name=name, position=position or '', org=org or '', aliases=aliases or '',
                             note=note or '', assignment=assignment or '')
