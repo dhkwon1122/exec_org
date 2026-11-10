@@ -30,7 +30,7 @@ from datetime import date, datetime
 from sqlalchemy import select
 
 from services import db, people_sync, profile
-from services.db import Person, PersonLeadership
+from services.db import LeaderExclusion, Person, PersonLeadership
 from services.people_sync import (HR_FIELDS, SyncError, _canonical_positions, _chunks, _cols, _existing_keys,
                                   _fetch_careers, _fetch_education, _people_db, _rows, _s, _table, _ym, save_careers)
 
@@ -365,9 +365,20 @@ def _leadership(engine, sids) -> dict[str, list[dict]]:
     return out
 
 
-def sync_leaders() -> dict:
-    """리더급(보직장·R.Master) 대로 리더를 추가·갱신하고, 빠진 리더는 '지난 리더'로. 리더급 현황 칸은 임원·직접 추가한
-    리더에게도 채운다. 경력·평가·리더십진단도 옮긴다. People in SAIT 를 못 읽으면 아무것도 바꾸지 않고 SyncError."""
+def _diff_label(name: str, changes: list[tuple[str, str, str]], note: str = '') -> str:
+    parts = [f'{label} {old or "(없음)"} → {new or "(없음)"}' for label, old, new in changes]
+    return f"{name}{note}: " + ' · '.join(parts)
+
+
+_FIELD_LABELS = {'name': '이름', 'position': '직급', 'org': '조직', 'org_path': '상위 조직', 'assignment': '직책',
+                 **people_sync.HR_FIELDS}
+
+
+def _run(keys=None, apply: bool = True) -> dict:
+    """불러오기 한 번 — keys 가 None 이면 모두, 아니면 고른 제안만 반영. apply=False 면 제안만 만들고 되돌린다.
+    → {'items': [{'key','kind','label'}], 'total', 'execs', 'added', 'updated', 'former', 'skipped_exec',
+       'career_added', 'eval_changed', 'leadership_changed'}"""
+    chosen = (lambda k: True) if keys is None else (lambda k, ks=set(keys): k in ks)
     with db.SessionLocal() as s:
         people = list(s.scalars(select(Person)))
     manual = {p.source_id for p in people if p.role == 'leader' and p.source_id}
@@ -384,13 +395,20 @@ def sync_leaders() -> dict:
         lead = _leadership(engine, sids)
     statuses.update({L['source_id']: L['status'] for L in leaders})
     now = datetime.now().replace(microsecond=0)
+    items: list[dict] = []
     added, updated, former, skipped_exec = [], [], [], []
+    from services.leaders import FROM_DB, STATUS_COLUMNS, _loads
     with db.SessionLocal() as s:
         by_sid = {p.source_id: p for p in s.scalars(select(Person)) if p.source_id}
+        excluded = set(s.scalars(select(LeaderExclusion.source_id)))
         seen = set()
+        pending: dict[str, list] = {}  # sid → [(라벨, 옛 값, 새 값)] 칸 변경 (한 사람 = 제안 하나)
+        apply_fields: dict[str, dict] = {}
         for L in leaders:
             sid = L['source_id']
             p = by_sid.get(sid)
+            if p is None and sid in excluded:  # 리더 명단에서 지운 사람 — 다시 추가하지 않는다
+                continue
             if L['exec'] or (p is not None and p.role != 'leader'):  # 임원 — 임원 불러오기에서, 현황 칸만
                 if p is None:
                     skipped_exec.append(L['name'])
@@ -399,45 +417,73 @@ def sync_leaders() -> dict:
             fields = {'name': L['name'], 'position': L['position'], 'org': L['org'], 'org_path': L['org_path'],
                       'assignment': L['assignment'], **{f: L[f] for f in HR_FIELDS}}
             if p is None:
-                p = Person(source_id=sid, role='leader', hr_state='current', active=True, synced_at=now, aliases='',
-                           **{k: v for k, v in fields.items() if v or k in ('position', 'org')})
-                if not p.name:
+                if not L['name']:
                     continue
-                s.add(p)
-                by_sid[sid] = p
-                added.append(p.name)
+                info = ' · '.join(x for x in (L['name'], L['assignment'], L['org'], L['position']) if x)
+                items.append({'key': f'add:{sid}', 'kind': 'add', 'label': info})
+                if chosen(f'add:{sid}'):
+                    p = Person(source_id=sid, role='leader', hr_state='current', active=True, synced_at=now,
+                               aliases='', leader_info=json.dumps(statuses.get(sid, {}), ensure_ascii=False),
+                               **{k: v for k, v in fields.items() if v or k in ('position', 'org')})
+                    s.add(p)
+                    by_sid[sid] = p
+                    added.append(p.name)
                 continue
-            changed = [k for k, v in fields.items() if v and (getattr(p, k) or '') != v]
-            for k in changed:
-                setattr(p, k, fields[k])
+            ch = [(k, getattr(p, k) or '', v) for k, v in fields.items() if v and (getattr(p, k) or '') != v]
+            pending.setdefault(sid, []).extend((_FIELD_LABELS.get(k, k), old, new) for k, old, new in ch)
+            apply_fields[sid] = {k: new for k, _, new in ch}
             if p.hr_state != 'current':
-                p.hr_state = 'current'
-                changed.append('hr_state')
-            p.synced_at = now
-            if changed:
+                pending[sid].append(('상태', '지난 리더', '지금 리더'))
+                apply_fields[sid]['hr_state'] = 'current'
+        for sid, p in by_sid.items():
+            if p.role == 'leader' and sid not in seen and sid in manual - found:
+                r = extra.get(sid)
+                if r:  # 직접 추가한 리더 — 빈 칸만 채운다
+                    vals = {'position': _s(r.get('position')), 'org': _s(r.get('department')),
+                            **{f: _s(r.get(f)) for f in HR_FIELDS if f != 'education'}, 'education': extra_edu.get(sid, '')}
+                    fill = {k: v for k, v in vals.items() if v and not (getattr(p, k) or '')}
+                    if fill:
+                        pending.setdefault(sid, []).extend((_FIELD_LABELS.get(k, k), '', v) for k, v in fill.items())
+                        apply_fields.setdefault(sid, {}).update(fill)
+            st = statuses.get(sid)
+            if st is not None and p.id is not None:  # 현황 칸 — 화면에서 고친 칸은 고친 값이 보이므로 빼고
+                old, manual_cols = _loads(p.leader_info), _loads(p.leader_manual)
+                diff = [(c, str(old.get(c) or ''), str(st.get(c) or '')) for c in STATUS_COLUMNS
+                        if c not in ('사원번호', '성명') and (c in FROM_DB or c not in manual_cols)
+                        and str(old.get(c) or '') != str(st.get(c) or '')]
+                if diff or not p.leader_info:
+                    pending.setdefault(sid, []).extend(diff)
+                    apply_fields.setdefault(sid, {})['leader_info'] = json.dumps(st, ensure_ascii=False)
+        for sid, ch in pending.items():
+            p = by_sid[sid]
+            fields = apply_fields.get(sid, {})
+            if not fields:
+                continue
+            visible = [c for c in ch if c[1] != c[2]]
+            if not visible:  # 처음 현황 칸을 채우는 것 등 — 보여 줄 변경이 없으면 묻지 않고
+                for k, v in fields.items():
+                    setattr(p, k, v)
+                continue
+            note = ' (임원)' if p.role != 'leader' else ''
+            items.append({'key': f'set:{sid}', 'kind': 'set', 'label': _diff_label(p.name, visible, note)})
+            if chosen(f'set:{sid}'):
+                for k, v in fields.items():
+                    setattr(p, k, v)
+                p.synced_at = now
                 updated.append(p.name)
         for sid, p in by_sid.items():
-            st = statuses.get(sid)
-            if st is not None:
-                p.leader_info = json.dumps(st, ensure_ascii=False)
-            if p.role != 'leader' or sid in seen:
-                continue
-            if p.hr_state == 'current':  # 불러온 리더가 리더급에서 빠짐
-                p.hr_state = 'former'
-                former.append(p.name)
-            r = extra.get(sid)
-            if r:  # 직접 추가한 리더 — 빈 칸만 채운다
-                vals = {'position': _s(r.get('position')), 'org': _s(r.get('department')),
-                        **{f: _s(r.get(f)) for f in HR_FIELDS if f != 'education'}, 'education': extra_edu.get(sid, '')}
-                for k, v in vals.items():
-                    if v and not (getattr(p, k) or ''):
-                        setattr(p, k, v)
-                p.synced_at = now
+            if p.role == 'leader' and sid not in seen and p.hr_state == 'current' and p.id is not None:
+                items.append({'key': f'former:{sid}', 'kind': 'former',
+                              'label': f'{p.name} {p.assignment or ""} — 리더급(보직장·R.Master)에서 빠짐 → 지난 리더로'.strip()})
+                if chosen(f'former:{sid}'):
+                    p.hr_state = 'former'
+                    former.append(p.name)
         s.flush()
         existing = _existing_keys(s, None)
         career_added = eval_changed = lead_n = 0
+        do_extras = not apply or chosen('extras')  # 제안 때는 세어 보고 되돌린다
         for sid, p in by_sid.items():
-            if p.role != 'leader':
+            if not do_extras or p.role != 'leader' or p.id is None:
                 continue
             career_added += save_careers(s, p, careers, existing)
             for year, kind, grade in evals.get(sid, []):
@@ -453,7 +499,28 @@ def sync_leaders() -> dict:
                 elif row.scores != scores:
                     row.scores = scores
                     lead_n += 1
-        s.commit()
-    return {'total': len(leaders), 'execs': sum(L['exec'] for L in leaders), 'added': added, 'updated': updated, 'former': former,
-            'skipped_exec': skipped_exec, 'career_added': career_added, 'eval_changed': eval_changed,
-            'leadership_changed': lead_n}
+        if career_added or eval_changed or lead_n:
+            items.append({'key': 'extras', 'kind': 'extras',
+                          'label': f'경력·발령 {career_added}건 · 평가 {eval_changed}건 · 리더십진단 {lead_n}건 새로 들어오거나 바뀜'})
+        if apply:
+            s.commit()
+        else:
+            s.rollback()
+    return {'items': items, 'total': len(leaders), 'execs': sum(L['exec'] for L in leaders), 'added': added,
+            'updated': updated, 'former': former, 'skipped_exec': skipped_exec, 'career_added': career_added,
+            'eval_changed': eval_changed, 'leadership_changed': lead_n}
+
+
+def plan_leaders() -> dict:
+    """불러올 내용을 '제안'만 — DB 는 그대로. People in SAIT 를 못 읽으면 SyncError."""
+    return _run(apply=False)
+
+
+def apply_leaders(keys) -> dict:
+    """plan_leaders 의 제안 중 keys 로 고른 것만 반영 (그 사이 바뀐 것은 지금 값으로 다시 맞춰 고른 것만)."""
+    return _run(list(keys or []), apply=True)
+
+
+def sync_leaders() -> dict:
+    """제안을 모두 반영 (테스트·스크립트용)."""
+    return _run(None, apply=True)

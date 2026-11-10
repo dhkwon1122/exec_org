@@ -338,6 +338,17 @@ class PersonEvaluation(Base):
     updated_at = Column(DateTime, default=_now, onupdate=_now)
 
 
+class LeaderExclusion(Base):
+    """리더 명단에서 지운 사번 — 다음 리더 불러오기(services/leader_sync.py)에서 다시 추가하지 않는다.
+    같은 사번을 '직접 추가'하면 풀린다."""
+    __tablename__ = 'leader_exclusions'
+
+    source_id = Column(String(50), primary_key=True)
+    name = Column(String(100), default='')
+    excluded_by = Column(String(100), default='')
+    created_at = Column(DateTime, default=_now)
+
+
 class PersonLeadership(Base):
     """리더십진단 — People in SAIT leadership 표(연도·평가자 그룹별 역량 점수)를 리더 불러오기 때 옮겨 둔다.
     scores: JSON {역량: 점수} (미래통찰·성과창출·몰입촉진·인재육성·자기관리·저해행동)."""

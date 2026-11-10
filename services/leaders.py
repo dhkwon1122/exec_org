@@ -161,10 +161,50 @@ def add_leader(name: str, assignment: str = '', org: str = '', source_id: str = 
     """직접 추가 — 사번을 넣으면 다음 불러오기 때 인사 정보 빈 칸·경력·평가·리더십진단이 채워진다."""
     p = store.create_person(name, position=position, org=org, role='leader', assignment=assignment,
                             source_id=source_id)
+    if p['source_id']:  # 지웠던 사번을 다시 넣으면 제외를 푼다
+        from services.db import LeaderExclusion
+        with db.SessionLocal() as s:
+            x = s.get(LeaderExclusion, p['source_id'])
+            if x is not None:
+                s.delete(x)
+                s.commit()
     if p['source_id']:  # 사번이 있으면 Platform·그룹·부서명 등 현황 칸을 바로 (8자리로 맞춘 사번)
         from services import leader_sync
         leader_sync.refresh_status([p['source_id']])
     return p
+
+
+def delete_leaders(person_ids: list[int], by: str = '') -> dict:
+    """리더 명단에서 지운다 → {'deleted': [이름], 'blocked': [(이름, 이유)], 'execs': [이름]}.
+    임원은 지우지 않는다(임원 화면에서). People in SAIT 사번이 있는 리더는 다음 불러오기에서 다시 생기지 않게
+    사번을 제외 목록에 남긴다. 그 사람에게만 걸린 동향이 있으면 지우지 않는다(store.delete_person)."""
+    from services.db import LeaderExclusion
+    out = {'deleted': [], 'blocked': [], 'execs': []}
+    for pid in person_ids or []:
+        p = store.get_person(int(pid))
+        if p is None:
+            continue
+        if p['role'] != 'leader':
+            out['execs'].append(p['name'])
+            continue
+        try:
+            store.delete_person(p['id'])
+        except ValueError as e:
+            out['blocked'].append((p['name'], str(e).replace('이 임원에게만', '이 사람에게만')))
+            continue
+        if p['source_id']:
+            with db.SessionLocal() as s:
+                if s.get(LeaderExclusion, p['source_id']) is None:
+                    s.add(LeaderExclusion(source_id=p['source_id'], name=p['name'], excluded_by=by or ''))
+                    s.commit()
+        out['deleted'].append(p['name'])
+    return out
+
+
+def excluded_sids() -> set[str]:
+    from services.db import LeaderExclusion
+    with db.SessionLocal() as s:
+        return set(s.scalars(select(LeaderExclusion.source_id)))
 
 
 def is_leader(person_id: int) -> bool:
