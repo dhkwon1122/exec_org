@@ -145,18 +145,18 @@ class _Orgs:
         return len(ids - {exclude})
 
     def order(self, dep: str) -> list:
-        """조직 편제 순 정렬 열쇠 — 맨 위 조직부터 [조직코드(숫자면 숫자로), 이름] 를 이어 붙인 것."""
+        """조직코드 순 정렬 열쇠 — 그 조직의 조직코드(dep_code, 숫자면 숫자로). 조직코드가 비어 있으면 가장 가까운
+        상위 조직의 조직코드 바로 뒤에. → [숫자 또는 큰 수, 조직코드, 이름]"""
         if dep in self._order:
             return self._order[dep]
-        chain, cur, seen = [], dep, set()
-        while cur in self.nodes and cur not in seen:
+        cur, seen, depth = dep, set(), 0
+        while cur in self.nodes and cur not in seen and not _s(self.nodes[cur].get('dep_code')):
             seen.add(cur)
-            chain.append(cur)
             cur = _s(self.nodes[cur].get('upper_dep_id'))
-        key = []
-        for d in reversed(chain):
-            code = _s(self.nodes[d].get('dep_code'))
-            key.append([int(code) if code.isdigit() else 10 ** 12, code, self.name(d)])
+            depth += 1
+        code = _s(self.nodes.get(cur, {}).get('dep_code'))
+        num = int(code) if code.isdigit() else 10 ** 12
+        key = [num, code, depth, self.name(dep)]
         self._order[dep] = key
         return key
 
@@ -292,7 +292,7 @@ def _status(sid: str, r: dict, orgs: _Orgs, deps: list[str], kind: str, task: st
         '보직장': 'O' if deps else '', **{h: 'O' if n in layers else '' for n, h in LAYER_HEADS.items()},
         '과제명': task, '보직 수행시작일': min((orgs.since(d, sid) for d in deps if orgs.since(d, sid)), default=''),
         '부서원 수': str(orgs.headcount(deps, sid)) if deps else '',
-        '_order': orgs.order(home) if home else [],  # 조직 편제 순 (services/leaders.py list_status 정렬)
+        '_order': orgs.order(home) if home else [],  # 조직코드 순 (services/leaders.py list_status 정렬)
     }
 
 
@@ -529,6 +529,11 @@ def _run(keys=None, apply: bool = True) -> dict:
                     setattr(p, k, v)
                 p.synced_at = now
                 updated.append(p.name)
+            elif 'leader_info' in fields:  # 고르지 않아도 정렬 열쇠(안 보이는 값)는 새로
+                info = _loads(p.leader_info)
+                new = json.loads(fields['leader_info'])
+                info.update({k: v for k, v in new.items() if k.startswith('_')})
+                p.leader_info = json.dumps(info, ensure_ascii=False)
         for sid, p in by_sid.items():
             if p.role == 'leader' and sid not in seen and p.hr_state == 'current' and p.id is not None:
                 items.append({'key': f'former:{sid}', 'kind': 'former',
