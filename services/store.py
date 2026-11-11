@@ -245,6 +245,104 @@ def delete_task(task_id: int) -> None:
         _remove_upload(f)
 
 
+def merge_tasks(src_id: int, dst_id: int, by: str = '') -> dict:
+    """src 업무를 dst 업무로 합친다 — src 에 걸린 것을 모두 dst 로 옮기고 src 는 지운다.
+    옮기는 것: 하위 업무, 담당자, 이력(함께 걸친 기록 포함), 참고자료, 연결 업무, 받은 메일·보낸 메일 연결,
+    메일 규칙의 상위 업무. 설명은 이어 붙이고 태그는 합치고, 기간은 넓게(시작은 이른 날, 마감은 늦은 날),
+    비어 있는 칸(담당·메일 출처)만 src 값으로 채운다. 상태는 dst 그대로. AI 요약은 다시 만들게 지운다.
+    dst 에 '업무 합침' 기록을 남긴다. → {'src_title', 'dst_id', 'history', 'children', 'references', 'mails'}"""
+    from services.db import MailRule, OutboundMail, TaskSummary, Todo
+    if src_id == dst_id:
+        raise ValueError('같은 업무끼리는 합칠 수 없습니다.')
+    with db.SessionLocal() as s:
+        src, dst = s.get(Task, src_id), s.get(Task, dst_id)
+        if src is None or dst is None:
+            raise ValueError('업무를 찾을 수 없습니다.')
+        out = {'src_title': src.title, 'dst_id': dst.id, 'history': 0, 'children': 0, 'references': 0, 'mails': 0}
+        # 하위 업무 — dst 가 src 아래에 있었으면 dst 는 src 의 자리로 올린다
+        if dst.parent_id == src.id:
+            dst.parent_id = src.parent_id if src.parent_id != dst.id else None
+        for c in s.scalars(select(Task).where(Task.parent_id == src.id)):
+            if c.id != dst.id:
+                c.parent_id = dst.id
+                out['children'] += 1
+        # 담당자
+        have = {a.name for a in s.scalars(select(TaskAssignee).where(TaskAssignee.task_id == dst.id))}
+        for a in list(s.scalars(select(TaskAssignee).where(TaskAssignee.task_id == src.id))):
+            if a.name not in have:
+                s.add(TaskAssignee(task_id=dst.id, name=a.name, user_id=a.user_id, pos=len(have)))
+                have.add(a.name)
+            s.delete(a)
+        # 이력 — 원래 이력, 함께 걸친 기록
+        for h in s.scalars(select(HistoryEntry).where(HistoryEntry.task_id == src.id)):
+            h.task_id = dst.id
+            out['history'] += 1
+        for link in list(s.scalars(select(HistoryTask).where(HistoryTask.task_id == src.id))):
+            h = s.get(HistoryEntry, link.history_id)
+            dup = s.get(HistoryTask, (link.history_id, dst.id))
+            s.delete(link)
+            if h is not None and h.task_id != dst.id and dup is None:
+                s.add(HistoryTask(history_id=link.history_id, task_id=dst.id))
+                out['history'] += 1
+        s.flush()
+        for link in list(s.scalars(select(HistoryTask).where(HistoryTask.task_id == dst.id))):  # 원래 업무와 겹친 것
+            h = s.get(HistoryEntry, link.history_id)
+            if h is not None and h.task_id == dst.id:
+                s.delete(link)
+        # 참고자료·옛 할 일
+        for r in s.scalars(select(Reference).where(Reference.task_id == src.id)):
+            r.task_id = dst.id
+            out['references'] += 1
+        for td in s.scalars(select(Todo).where(Todo.task_id == src.id)):
+            td.task_id = dst.id
+        # 연결 업무 — 자기 자신·겹치는 연결은 지운다
+        pairs = {(lk.src_id, lk.dst_id) for lk in s.scalars(select(TaskLink).where(
+            or_(TaskLink.src_id == dst.id, TaskLink.dst_id == dst.id)))}
+        for lk in list(s.scalars(select(TaskLink).where(or_(TaskLink.src_id == src.id, TaskLink.dst_id == src.id)))):
+            a_, b_ = (dst.id if lk.src_id == src.id else lk.src_id), (dst.id if lk.dst_id == src.id else lk.dst_id)
+            if a_ == b_ or (a_, b_) in pairs or (b_, a_) in pairs:
+                s.delete(lk)
+                continue
+            lk.src_id, lk.dst_id = a_, b_
+            pairs.add((a_, b_))
+        for rule in s.scalars(select(MailRule).where(MailRule.parent_task_id == src.id)):
+            rule.parent_task_id = dst.id
+        # 받은 메일의 업무 목록, 보낸 메일(업무 공유)
+        for m in s.scalars(select(InboundMail).where(InboundMail.task_ids.like(f'%{src.id}%'))):
+            ids = [x for x in (m.task_ids or '').split(',') if x.strip()]
+            if str(src.id) in ids:
+                ids = [str(dst.id) if x == str(src.id) else x for x in ids]
+                m.task_ids = ','.join(dict.fromkeys(ids))
+                out['mails'] += 1
+        for o in s.scalars(select(OutboundMail).where(OutboundMail.related_kind == 'task',
+                                                      OutboundMail.related_id == str(src.id))):
+            o.related_id = str(dst.id)
+        # 업무 칸
+        if (src.description or '').strip() and (src.description or '').strip() not in (dst.description or ''):
+            dst.description = ((dst.description or '').rstrip() + f'\n\n[합친 업무 #{src.id} {src.title}]\n'
+                               + src.description.strip()).strip()
+        tags = list(dict.fromkeys(_tags(dst.tags) + _tags(src.tags)))
+        dst.tags = ', '.join(tags)
+        if src.start_date and (not dst.start_date or src.start_date < dst.start_date):
+            dst.start_date = src.start_date
+        if src.due_date and (not dst.due_date or src.due_date > dst.due_date):
+            dst.due_date = src.due_date
+        for f in ('owner', 'assignee_id', 'source_mail_id', 'source_history_id', 'source_mail_key'):
+            if not getattr(dst, f) and getattr(src, f):
+                setattr(dst, f, getattr(src, f))
+        for summ in s.scalars(select(TaskSummary).where(TaskSummary.task_id.in_([src.id, dst.id]))):
+            s.delete(summ)
+        s.flush()
+        s.expire(src)  # 옮긴 참고자료 등이 관계 정리(cascade)로 함께 지워지지 않게 다시 읽고 지운다
+        s.delete(src)
+        s.flush()
+        add_history(dst.id, f"업무 합침: '#{src_id} {out['src_title']}' 을(를) 이 업무로 합쳤습니다 "
+                    f"(이력 {out['history']}건, 하위 업무 {out['children']}건, 참고자료 {out['references']}건, "
+                    f"메일 {out['mails']}건 옮김)", '상태변경', author=by or '', session=s)
+        s.commit()
+    return out
+
+
 def list_tasks(query: str = '', status: str | list[str] | None = None, tag: str = '',
                owner: str = '', top_level: bool = False) -> list[dict]:
     """제목·설명·태그·이력 내용·참고자료 제목/메모까지 검색한다. top_level: 상위 업무가 없는 업무만."""

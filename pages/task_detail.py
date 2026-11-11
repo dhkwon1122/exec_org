@@ -17,6 +17,29 @@ def _opts(values):
     return [{'label': v, 'value': v} for v in values]
 
 
+def _merge_modal():
+    """업무 합치기 — 같은 일이 된 두 업무를 하나로 (store.merge_tasks)."""
+    return dbc.Modal([
+        dbc.ModalHeader(dbc.ModalTitle('업무 합치기')),
+        dbc.ModalBody([
+            dbc.Label('합칠 업무'),
+            dcc.Dropdown(id='mg-target', placeholder='업무 검색', className='mb-3'),
+            dbc.RadioItems(id='mg-dir', value='into_other', className='small mb-2', options=[
+                {'label': '이 업무를 고른 업무로 합치기 — 이 업무는 없어지고 고른 업무에 모입니다', 'value': 'into_other'},
+                {'label': '고른 업무를 이 업무로 합치기 — 고른 업무는 없어지고 이 업무에 모입니다', 'value': 'into_this'},
+            ]),
+            html.Div('옮겨지는 것: 이력(함께 걸친 기록 포함)·하위 업무·참고자료·연결 업무·담당자·메일 연결. 설명은 이어 붙이고 '
+                     '태그는 합치고 기간은 넓게 잡습니다. 상태·제목은 남는 업무 그대로이고, 남는 업무에 "업무 합침" 기록이 남습니다. '
+                     '되돌릴 수 없습니다.', className='small text-muted'),
+            dbc.Alert(id='mg-error', color='danger', is_open=False, className='small py-2 mt-2 mb-0'),
+        ]),
+        dbc.ModalFooter([
+            dbc.Button('취소', id='mg-cancel', color='secondary', outline=True),
+            dbc.Button([html.I(className='bi bi-intersect me-1'), '합치기'], id='mg-go', color='danger'),
+        ]),
+    ], id='mg-modal', is_open=False)
+
+
 def _edit_modal():
     return dbc.Modal([
         dbc.ModalHeader(dbc.ModalTitle('업무 수정')),
@@ -201,6 +224,7 @@ def layout(task_id=None, src=None, **_):
         dcc.Interval(id='td-poll', interval=3000, disabled=True),
         dcc.Location(id='td-redirect', refresh='callback-nav'),
         _edit_modal(),
+        _merge_modal(),
         _quick_history_modal(),
         _import_history_modal(),
         *_source_modals(tid, sources, src),
@@ -264,6 +288,8 @@ def render(_, _t, _h, _d, tid):
                        style={'width': '110px'}, className='me-2'),
             dbc.Button([html.I(className='bi bi-send me-1'), '메일로 공유'], id='td-mail', color='secondary',
                        outline=True, size='sm'),
+            dbc.Button([html.I(className='bi bi-intersect me-1'), '합치기'], id='mg-open', color='secondary',
+                       outline=True, size='sm', title='같은 일이 된 다른 업무와 하나로 합치기'),
             dbc.Button([html.I(className='bi bi-pencil me-1'), '수정'], id='ed-open', color='secondary',
                        outline=True, size='sm'),
         ], className='d-flex align-items-center gap-2 mb-2'),
@@ -700,3 +726,34 @@ def import_history(n, picked, tid, r):
         return '연결할 기록을 고르세요.', True, 'warning', no_update
     k = sum(store.link_history_task(int(hid), tid) for hid in picked)
     return f'기록 {k}건을 이 업무에 연결했습니다.', True, 'success', (r or 0) + 1
+
+
+@callback(Output('mg-modal', 'is_open'), Output('mg-target', 'options'), Output('mg-target', 'value'),
+          Output('mg-error', 'children'), Output('mg-error', 'is_open'),
+          Output('td-redirect', 'pathname', allow_duplicate=True), Output('td-refresh', 'data', allow_duplicate=True),
+          Input('mg-open', 'n_clicks'), Input('mg-cancel', 'n_clicks'), Input('mg-go', 'n_clicks'),
+          State('td-id', 'data'), State('mg-target', 'value'), State('mg-dir', 'value'), State('td-refresh', 'data'),
+          prevent_initial_call=True)
+def merge_task(n_open, _c, n_go, tid, target, direction, n):
+    """업무 합치기 — 남는 업무 화면으로 간다."""
+    nu = no_update
+    trig = ctx.triggered_id
+    if trig is None or not ctx.triggered[0]['value']:
+        return (nu,) * 7  # 머리말이 다시 그려지며 버튼이 새로 생길 때의 빈 트리거
+    if trig == 'mg-open':
+        tasks = sorted(store.list_tasks(), key=lambda x: (x['status'] == '완료', -x['id']))
+        opts = [{'label': f"#{x['id']} {x['title']}" + (' (완료)' if x['status'] == '완료' else ''), 'value': x['id']}
+                for x in tasks if x['id'] != tid]
+        return True, opts, None, '', False, nu, nu
+    if trig == 'mg-cancel':
+        return False, nu, nu, '', False, nu, nu
+    if not target:
+        return nu, nu, nu, '합칠 업무를 고르세요.', True, nu, nu
+    src, dst = (tid, int(target)) if direction == 'into_other' else (int(target), tid)
+    try:
+        store.merge_tasks(src, dst, by=auth.current_name())
+    except ValueError as e:
+        return nu, nu, nu, str(e), True, nu, nu
+    if dst == tid:  # 이 업무가 남음 — 같은 화면을 다시 그린다
+        return False, nu, nu, '', False, nu, (n or 0) + 1
+    return False, nu, nu, '', False, f'/task/{dst}', nu
