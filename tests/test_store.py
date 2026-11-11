@@ -219,3 +219,51 @@ def test_gantt_scales_and_paging():
             'done_at': '', 'created_at': '2026-01-01 09:00'}
     html_ = str(gantt.chart([{'task': base, 'level': 0}], today, 'week'))
     assert 'outside' in html_ and "'오늘'" in html_  # 보이는 기간 밖 업무는 끝에 흐리게
+
+
+def test_merge_tasks_moves_everything_and_deletes_source():
+    from services.db import InboundMail, OutboundMail, TaskLink
+    a = store.create_task('예산 편성', description='A 설명', tags='예산', owner='김', start_date='2026-03-01',
+                          due_date='2026-05-01')
+    b = store.create_task('예산안 작성', description='B 설명', tags='보고', owner='이', start_date='2026-04-01',
+                          due_date='2026-04-30')
+    c = store.create_task('관련 업무')
+    child = store.create_task('세부', parent_id=a['id'])
+    h1 = store.add_history(a['id'], 'A 기록', '메모')
+    h2 = store.add_history(c['id'], '함께 걸친 기록', '메모', also_task_ids=[a['id'], b['id']])
+    h3 = store.add_history(c['id'], 'A 에만 걸친 기록', '메모', also_task_ids=[a['id']])
+    ref = store.add_reference(a['id'], 'link', title='자료', url='https://x')
+    store.link_tasks(a['id'], c['id'])
+    store.link_tasks(a['id'], b['id'])  # 합치면 자기 자신 연결 → 지움
+    with db.SessionLocal() as s:
+        s.add(InboundMail(uidl='u1', subject='메일', task_ids=f"{a['id']},{b['id']},1{a['id']}"))
+        s.add(OutboundMail(subject='공유', related_kind='task', related_id=str(a['id'])))
+        s.commit()
+    r = store.merge_tasks(a['id'], b['id'], by='나')
+    assert store.get_task(a['id']) is None
+    t = store.get_task(b['id'])
+    assert (t['start_date'], t['due_date']) == ('2026-03-01', '2026-05-01')
+    assert t['tags'] == ['보고', '예산'] and 'A 설명' in t['description'] and t['description'].startswith('B 설명')
+    assert {x['name'] for x in t['assignees']} == {'이', '김'}
+    assert store.get_task(child['id'])['parent_id'] == b['id']
+    hist_ids = {h['id'] for h in store.list_history(b['id'])}
+    assert {h1['id'], h2['id'], h3['id']} <= hist_ids
+    assert any('업무 합침' in h['content'] for h in store.list_history(b['id']))
+    assert [x['id'] for x in store.references_for_task(b['id'])] == [ref['id']]
+    with db.SessionLocal() as s:
+        links = {(lk.src_id, lk.dst_id) for lk in s.query(TaskLink)}
+        assert links == {(b['id'], c['id'])}
+        m = s.query(InboundMail).one()
+        assert m.task_ids == f"{b['id']},1{a['id']}"  # 다른 번호(1x)는 그대로
+        assert s.query(OutboundMail).one().related_id == str(b['id'])
+    assert r['children'] == 1 and r['references'] == 1 and r['mails'] == 1
+    with pytest.raises(ValueError):
+        store.merge_tasks(b['id'], b['id'])
+
+
+def test_merge_into_own_subtask_lifts_it():
+    parent = store.create_task('상위')
+    a = store.create_task('A', parent_id=parent['id'])
+    b = store.create_task('B', parent_id=a['id'])
+    store.merge_tasks(a['id'], b['id'])
+    assert store.get_task(b['id'])['parent_id'] == parent['id']
