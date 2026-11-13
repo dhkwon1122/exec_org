@@ -58,7 +58,7 @@ def _edit_modal():
             dbc.Alert(id='ed-error', color='danger', is_open=False, className='mt-3 mb-0'),
         ]),
         dbc.ModalFooter([
-            dbc.Button('삭제', id='ed-delete', color='danger', outline=True, className='me-auto'),
+            dbc.Button('휴지통으로 이동', id='ed-delete', color='danger', outline=True, className='me-auto'),
             dbc.Button('취소', id='ed-cancel', color='secondary', outline=True),
             dbc.Button('저장', id='ed-save', color='primary'),
         ]),
@@ -110,7 +110,7 @@ def _quick_history_modal():
 
 
 def _history_form(tid: int):
-    form = history_form('h')
+    form = history_form('h', draft_context=f'task:{tid}')
     # 여러 업무에 걸친 기록이면 다른 업무도 골라 둔다 — 그 업무들의 이력에도 같이 보인다
     form.insert(2, dcc.Dropdown(id='h-also', multi=True, options=task_options(exclude=tid), value=[],
                                 placeholder='함께 걸친 다른 업무 (여러 업무에 해당하는 기록이면 선택)',
@@ -162,7 +162,7 @@ def _source_modals(tid: int, src: dict, open_kind: str | None):
             else html.Span(className='me-auto')
         out.append(dbc.Modal([
             dbc.ModalHeader(dbc.ModalTitle([html.I(className='bi bi-stars me-2'), 'AI 요약에서 찾은 할 일 — 원래 메모'])),
-            dbc.ModalBody(dbc.ListGroup([ui.history_card(h, show_task=True, actions=False,
+            dbc.ModalBody(dbc.ListGroup([ui.history_card(h, show_task=True, actions=False, view='source',
                                                          added_todos=store.todos_for_history(h['id']))])),
             dbc.ModalFooter([go, dbc.Button('닫기', id='td-src-history-close', color='secondary', outline=True)]),
         ], id='td-src-history', is_open=open_kind == 'history', size='lg', scrollable=True))
@@ -232,10 +232,11 @@ def layout(task_id=None, src=None, **_):
         dbc.Row([
             dbc.Col([
                 dbc.Tabs([
-                    dbc.Tab([_history_form(tid),
+                    dbc.Tab([html.Details([html.Summary('기록 추가', className='composer-toggle'), _history_form(tid)], className='record-composer mb-3'),
                              html.Div(dbc.Button([html.I(className='bi bi-box-arrow-in-down me-1'), '기존 이력 연결'],
                                                  id='hx-open', color='link', size='sm', className='p-0'),
                                       className='text-end mb-1'),
+                             dbc.Checkbox(id='td-show-auto', label='자동 기록 포함', value=False, className='small mb-2'),
                              html.Div(id='td-history'), ui.pager('td-hist-page')], label='이력', tab_id='history'),
                     dbc.Tab([dbc.Card(dbc.CardBody(todo_ui.add_form('tt', with_task=False)), className='mb-3'),
                              html.Div(id='td-todos')], label='하위 업무', tab_id='todos', id='td-todo-tab'),
@@ -252,21 +253,25 @@ def layout(task_id=None, src=None, **_):
 
 @callback(Output('td-history', 'children'), Output('td-hist-page', 'max_value'), Output('td-hist-page', 'style'),
           Input('td-refresh', 'data'), Input('todo-changed', 'data'), Input('history-changed', 'data'),
-          Input('td-hist-page', 'active_page'), State('td-id', 'data'))
-def render_history(_, _t, _h, page, tid):
+          Input('td-hist-page', 'active_page'), State('td-id', 'data'), Input('td-show-auto', 'value'))
+def render_history(_, _t, _h, page, tid, include_auto=False):
     """이력 목록만 따로 — 쪽을 바꿔도 업무 화면 전체를 다시 그리지 않게. 최근 것부터 한 쪽(30건)씩."""
     if store.get_task(tid) is None:
         return None, *ui.pager_state(0)
     hist = store.list_history(tid)
+    if not include_auto:
+        hist = [h for h in hist if h['entry_type'] not in store.AUTO_ENTRY_TYPES]
     rows, _ = ui.page_of(hist, page)
-    history = dbc.ListGroup([
-        ui.history_card(h, added_todos=store.todos_for_history(h['id']) if h['ai_todos'] else None,
-                        context_task_id=tid)
-        for h in rows]) if hist else html.Div('이력이 없습니다.', className='text-muted small')
+    history = ui.history_stream(rows, context_task_id=tid) if hist else html.Div('이력이 없습니다.', className='text-muted small')
     return history, *ui.pager_state(len(hist))
 
 
 ui.scroll_to_top_on_page('td-hist-page', 'td-history')
+
+
+@callback(Output('td-hist-page', 'active_page'), Input('td-show-auto', 'value'), prevent_initial_call=True)
+def reset_history_page(_):
+    return 1
 
 
 @callback(Output('td-header', 'children'), Output('td-side', 'children'),
@@ -292,7 +297,7 @@ def render(_, _t, _h, _d, tid):
                        outline=True, size='sm', title='같은 일이 된 다른 업무와 하나로 합치기'),
             dbc.Button([html.I(className='bi bi-pencil me-1'), '수정'], id='ed-open', color='secondary',
                        outline=True, size='sm'),
-        ], className='d-flex align-items-center gap-2 mb-2'),
+        ], className='task-heading d-flex align-items-center flex-wrap gap-2 mb-2'),
         html.Div([ui.status_badge(t['status']), *ui.tag_badges(t['tags'])], className='mb-2'),
         ui.multiline(t['description']) if t['description'] else html.Div('설명 없음', className='text-muted small'),
     ]))
@@ -472,8 +477,8 @@ def edit_task(n_open, _c, _s, _d, tid, title, desc, assignees, extra, tags, star
     if trig == 'ed-cancel':
         return (False,) + (nu,) * 8 + ('', False, nu, nu, nu, nu)
     if trig == 'ed-delete':
-        store.delete_task(tid)
-        return (False,) + (nu,) * 8 + ('', False, nu, '/', nu, nu)
+        store.delete_task(tid, actor=author)
+        return (False,) + (nu,) * 8 + ('', False, nu, '/trash', nu, nu)
     try:
         current = store.get_task(tid)['assignees']
         store.update_task(tid, author=author or '', title=title, description=desc or '',

@@ -83,7 +83,7 @@ def test_search_covers_history_and_references():
     assert store.list_tasks(status='완료') == []
 
 
-def test_delete_task_cascades():
+def test_delete_task_preserves_files_until_purged():
     a = store.create_task('a')
     b = store.create_task('b', parent_id=a['id'])
     f = store.add_reference(a['id'], 'file', file_name='x.txt', file_bytes=b'x')
@@ -92,6 +92,10 @@ def test_delete_task_cascades():
     assert store.get_task(a['id']) is None
     assert store.get_task(b['id'])['parent_id'] is None
     assert store.linked_tasks(b['id']) == []
+    assert store.upload_abspath(f['file_path']) is not None
+    assert store.get_reference(f['id']) is None
+    from services import records
+    records.purge('task', a['id'])
     assert store.upload_abspath(f['file_path']) is None
 
 

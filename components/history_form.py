@@ -4,6 +4,7 @@ import base64
 import dash_bootstrap_components as dbc
 from dash import Input, Output, State, callback, dcc, html, no_update
 
+from components import drafts
 from services import confluence, db, enrich, llm, store
 
 # 유형별 기록 양식 — 빈 칸에서 '양식' 버튼을 누르면 채워진다. 나중에 검색·회고할 때 필요한 것
@@ -54,7 +55,7 @@ def people_options() -> list[dict]:
 
 
 def history_form(prefix: str = 'h', compact: bool = False, people_value: list[int] | None = None,
-                 default_type: str = '메모'):
+                 default_type: str = '메모', draft_context: str | None = None):
     """이력 입력 폼 (업무 상세·홈 빠른 기록·임원 화면에서 같이 씀). 원문을 그대로 붙여넣는 용도."""
     ai_on = llm.is_configured()
     # compact: 좁은 칸(홈 오른쪽)에서는 유형·일시를 한 줄, 파일 버튼을 다음 줄로
@@ -98,6 +99,7 @@ def history_form(prefix: str = 'h', compact: bool = False, people_value: list[in
             dbc.Button('이력 추가', id=f'{prefix}-add', color='primary', size='sm'),
         ], className='d-flex align-items-center flex-wrap'),
         dbc.Alert(id=f'{prefix}-error', color='danger', is_open=False, className='mt-2 mb-0 py-2'),
+        drafts.widget(prefix, draft_context or prefix),
     ]
 
 
@@ -166,3 +168,8 @@ def _register_template(prefix: str):
         if not n or (content or '').strip():  # 이미 쓴 내용(붙여넣은 원문)은 덮어쓰지 않는다
             return no_update
         return TEMPLATES.get(etype, '') or no_update
+
+
+for _prefix, _extra in (('h', 'h-also'), ('pp', 'pp-task'), ('qr', 'qr-task')):
+    drafts.register(_prefix, [f'{_prefix}-content', f'{_prefix}-type', f'{_prefix}-when',
+        f'{_prefix}-people', f'{_prefix}-links', f'{_prefix}-ai', _extra])

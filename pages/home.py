@@ -50,6 +50,7 @@ def layout(view: str = '', **_):
         dcc.Location(id='home-redirect', refresh='callback-nav'),
         _new_task_modal(),
         ui.page_head('업무', _today_label()),
+        html.A([html.I(className='bi bi-plus-lg me-1'), '기록하기'], href='#home-quick-record', className='btn btn-primary mobile-record-action'),
         dbc.Row([
             dbc.Col([
                 dbc.Row([
@@ -127,7 +128,7 @@ def layout(view: str = '', **_):
                         dbc.Alert(id='qr-ok', color='success', is_open=False, duration=5000,
                                   className='mt-2 mb-0 py-2 small'),
                     ]),
-                ], className='mb-3'),
+                ], id='home-quick-record', className='mb-3'),
                 html.H6('최근 이력', className='text-muted'),
                 html.Div(id='recent-history'),
             ]),
@@ -173,8 +174,8 @@ def _task_row(t: dict, level: int = 0, n_children: int = 0, n_done: int = 0, n_h
 @callback(Output('task-list', 'children'), Output('recent-history', 'children'), Output('f-tag', 'options'),
           Input('q', 'value'), Input('f-status', 'value'), Input('f-tag', 'value'), Input('home-refresh', 'data'),
           Input('home-depth', 'value'), Input('todo-changed', 'data'), Input('home-show-done', 'value'),
-          Input('home-view', 'value'), Input('gantt-scale', 'value'), Input('gantt-offset', 'data'))
-def render_list(q, statuses, tag, _, depth, _t, show_done=True, view='list', scale='month', offset=0):
+          Input('home-view', 'value'), Input('gantt-scale', 'value'), Input('gantt-offset', 'data'), Input('history-changed', 'data'))
+def render_list(q, statuses, tag, _, depth, _t, show_done=True, view='list', scale='month', offset=0, _h=None):
     if view == 'mine':  # 내 업무 보기는 render_mine 이 그린다 — 최근 이력·태그 목록만
         return None, _recent_view(), store.all_tags()
     hide_done = not show_done and '완료' not in (statuses or [])  # 상태에서 '완료'를 고르면 그대로 보인다
@@ -207,8 +208,8 @@ def _recent_view():
         dbc.ListGroupItem([
             html.Div([html.I(className=f"bi {ui.ENTRY_ICON.get(h['entry_type'], 'bi-dot')} me-1"),
                       html.Span(h['entry_type'], className='fw-semibold me-2'),
-                      dcc.Link(h['task_title'], href=f"/task/{h['task_id']}", className='small')]),
-            html.Div(h['title'] or h['content'][:120], className='small', style={'whiteSpace': 'pre-wrap'}),
+                      dcc.Link(h['task_title'], href=f"/task/{h['task_id']}", className='small') if h['task_id'] else None]),
+            dcc.Link(h['title'] or h['content'][:120], href=f"/history/{h['id']}", className='small task-title', style={'whiteSpace': 'pre-wrap'}),
             html.Div(f"{h['occurred_at']} {h['author']}", className='small text-muted'),
         ], className='py-2') for h in recent
     ], flush=True) if recent else html.Div('아직 이력이 없습니다.', className='small text-muted')
