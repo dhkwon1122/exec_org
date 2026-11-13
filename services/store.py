@@ -13,11 +13,11 @@ import re
 import uuid
 from datetime import date, datetime, timedelta
 
-from sqlalchemy import false, func, or_, select, update
-from sqlalchemy.orm import aliased
+from sqlalchemy import and_, false, func, or_, select, update
+from sqlalchemy.orm import aliased, object_session
 
-from services import db
-from services.db import HistoryEntry, HistoryPerson, HistoryReference, HistoryTask, InboundMail, TaskAssignee, Person, PersonCareer, Reference, Task, TaskLink
+from services import db, records
+from services.db import HistoryBookmark, HistoryEntry, HistoryPerson, HistoryReference, HistoryTask, InboundMail, TaskAssignee, Person, PersonCareer, Reference, Task, TaskLink
 
 STATUSES = ['예정', '진행중', '보류', '완료']
 ENTRY_TYPES = ['메모', '피드백', '동향', '회의', '결정', '진행', '이슈', '요청']
@@ -35,10 +35,21 @@ def _tags(s: str) -> list[str]:
     return [t.strip() for t in (s or '').split(',') if t.strip()]
 
 
+def _visible_parent(t: Task):
+    if not t.parent_id:
+        return None
+    s = object_session(t)
+    cache = s.info.setdefault('visible_parents', {})
+    if t.parent_id not in cache:
+        parent = s.get(Task, t.parent_id)
+        cache[t.parent_id] = bool(parent and parent.deleted_at is None)
+    return t.parent_id if cache[t.parent_id] else None
+
+
 def _task_dict(t: Task) -> dict:
     return {
         'id': t.id, 'title': t.title, 'description': t.description or '', 'status': t.status,
-        'owner': t.owner or '', 'tags': _tags(t.tags), 'parent_id': t.parent_id,
+        'owner': t.owner or '', 'tags': _tags(t.tags), 'parent_id': _visible_parent(t),
         'start_date': t.start_date or '', 'due_date': t.due_date or '',
         'assignee_id': t.assignee_id or '', 'assignees': _assignee_list(t), 'done_at': _dt(t.done_at),
         'source_history_id': t.source_history_id, 'source_mail_id': t.source_mail_id,
@@ -96,6 +107,7 @@ def _history_dict(h: HistoryEntry) -> dict:
         'ai_token': h.ai_token or '',
         'ai_reference_date': h.ai_reference_date or '',
         'sections': _sections(h.sections),
+        'edit_version': h.edit_version or 0,
     }
 
 
@@ -221,28 +233,8 @@ def update_task(task_id: int, author: str = '', **fields) -> dict:
         return _task_dict(t)
 
 
-def delete_task(task_id: int) -> None:
-    with db.SessionLocal() as s:
-        t = s.get(Task, task_id)
-        if t is None:
-            return
-        # 다른 업무에도 걸친 이력은 지우지 않고 그 업무로 옮긴다 (거기 붙은 자료도 같이)
-        for h in s.scalars(select(HistoryEntry).where(HistoryEntry.task_id == task_id)):
-            link = s.scalars(select(HistoryTask).where(HistoryTask.history_id == h.id, HistoryTask.task_id != task_id)
-                             .order_by(HistoryTask.task_id)).first()
-            if link is None:
-                continue
-            h.task_id = link.task_id
-            for r in s.scalars(select(Reference).where(Reference.history_id == h.id)):
-                r.task_id = link.task_id
-            s.delete(link)
-        s.flush()
-        s.expire(t, ['references'])
-        files = [r.file_path for r in t.references if r.file_path]
-        s.delete(t)
-        s.commit()
-    for f in files:
-        _remove_upload(f)
+def delete_task(task_id: int, actor: str = '') -> None:
+    records.trash_task(task_id, actor)
 
 
 def merge_tasks(src_id: int, dst_id: int, by: str = '') -> dict:
@@ -251,16 +243,26 @@ def merge_tasks(src_id: int, dst_id: int, by: str = '') -> dict:
     메일 규칙의 상위 업무. 설명은 이어 붙이고 태그는 합치고, 기간은 넓게(시작은 이른 날, 마감은 늦은 날),
     비어 있는 칸(담당·메일 출처)만 src 값으로 채운다. 상태는 dst 그대로. AI 요약은 다시 만들게 지운다.
     dst 에 '업무 합침' 기록을 남긴다. → {'src_title', 'dst_id', 'history', 'children', 'references', 'mails'}"""
-    from services.db import MailRule, OutboundMail, TaskSummary, Todo
+    from services.db import FollowupConversion, MailRule, OutboundMail, TaskSummary, Todo
     if src_id == dst_id:
         raise ValueError('같은 업무끼리는 합칠 수 없습니다.')
     with db.SessionLocal() as s:
         src, dst = s.get(Task, src_id), s.get(Task, dst_id)
         if src is None or dst is None:
             raise ValueError('업무를 찾을 수 없습니다.')
+        s.info['include_deleted'] = True  # 개별 삭제된 기록·하위 업무도 합칠 때 보존한다.
         out = {'src_title': src.title, 'dst_id': dst.id, 'history': 0, 'children': 0, 'references': 0, 'mails': 0}
         # 하위 업무 — dst 가 src 아래에 있었으면 dst 는 src 의 자리로 올린다
-        if dst.parent_id == src.id:
+        ancestor, seen = dst.parent_id, set()
+        below_source = False
+        while ancestor and ancestor not in seen:
+            if ancestor == src.id:
+                below_source = True
+                break
+            seen.add(ancestor)
+            node = s.get(Task, ancestor)
+            ancestor = node.parent_id if node else None
+        if below_source:
             dst.parent_id = src.parent_id if src.parent_id != dst.id else None
         for c in s.scalars(select(Task).where(Task.parent_id == src.id)):
             if c.id != dst.id:
@@ -274,8 +276,11 @@ def merge_tasks(src_id: int, dst_id: int, by: str = '') -> dict:
                 have.add(a.name)
             s.delete(a)
         # 이력 — 원래 이력, 함께 걸친 기록
-        for h in s.scalars(select(HistoryEntry).where(HistoryEntry.task_id == src.id)):
+        moved = list(s.scalars(select(HistoryEntry).where(HistoryEntry.task_id == src.id)))
+        for h in moved:
+            records.ensure_revision(s, h)
             h.task_id = dst.id
+            h.edit_version = (h.edit_version or 0) + 1
             out['history'] += 1
         for link in list(s.scalars(select(HistoryTask).where(HistoryTask.task_id == src.id))):
             h = s.get(HistoryEntry, link.history_id)
@@ -307,6 +312,7 @@ def merge_tasks(src_id: int, dst_id: int, by: str = '') -> dict:
             pairs.add((a_, b_))
         for rule in s.scalars(select(MailRule).where(MailRule.parent_task_id == src.id)):
             rule.parent_task_id = dst.id
+        s.execute(update(FollowupConversion).where(FollowupConversion.task_id == src.id).values(task_id=dst.id))
         # 받은 메일의 업무 목록, 보낸 메일(업무 공유)
         for m in s.scalars(select(InboundMail).where(InboundMail.task_ids.like(f'%{src.id}%'))):
             ids = [x for x in (m.task_ids or '').split(',') if x.strip()]
@@ -333,6 +339,8 @@ def merge_tasks(src_id: int, dst_id: int, by: str = '') -> dict:
         for summ in s.scalars(select(TaskSummary).where(TaskSummary.task_id.in_([src.id, dst.id]))):
             s.delete(summ)
         s.flush()
+        for h in moved:
+            records.save_revision(s, h, by, action='업무 합치기')
         s.expire(src)  # 옮긴 참고자료 등이 관계 정리(cascade)로 함께 지워지지 않게 다시 읽고 지운다
         s.delete(src)
         s.flush()
@@ -529,6 +537,7 @@ def add_history(task_id: int | None, content: str, entry_type: str = '메모', a
             if x is not None:
                 x.updated_at = datetime.now().replace(microsecond=0)
         s.flush()
+        records.save_revision(s, h, author, action='등록')
         return _decorate(s, [_history_dict(h)])[0]
 
 
@@ -536,6 +545,7 @@ def link_history_task(entry_id: int, task_id: int) -> bool:
     """이미 있는 기록을 업무에 연결 — 업무 없는 기록(동향)이면 그 업무가 기록의 업무가 되고, 아니면 함께 걸친 업무로.
     이미 걸려 있으면 False."""
     with db.transaction() as s:
+        s.execute(update(HistoryEntry).where(HistoryEntry.id == entry_id, HistoryEntry.deleted_at.is_(None)).values(id=HistoryEntry.id))
         h = s.get(HistoryEntry, entry_id)
         if h is None:
             raise ValueError('이력을 찾을 수 없습니다.')
@@ -543,10 +553,14 @@ def link_history_task(entry_id: int, task_id: int) -> bool:
             raise ValueError('업무를 찾을 수 없습니다.')
         if h.task_id == task_id or s.get(HistoryTask, (entry_id, task_id)) is not None:
             return False
+        records.ensure_revision(s, h)
+        h.edit_version = (h.edit_version or 0) + 1
         if h.task_id is None:
             h.task_id = task_id
         else:
             s.add(HistoryTask(history_id=entry_id, task_id=task_id))
+        s.flush()
+        records.save_revision(s, h, action='업무 연결 변경')
         return True
 
 
@@ -558,7 +572,7 @@ def reference_history_counts(task_id: int, ref_ids: list[int] | None = None) -> 
         ids = [r.id for r in refs]
         out = {r.id: 1 if r.history_id else 0 for r in refs}
         if ids:
-            for rid, n in s.execute(select(HistoryReference.reference_id, func.count())
+            for rid, n in s.execute(select(HistoryReference.reference_id, func.count()).join(HistoryEntry, HistoryEntry.id == HistoryReference.history_id)
                                     .where(HistoryReference.reference_id.in_(ids))
                                     .group_by(HistoryReference.reference_id)):
                 out[rid] += n
@@ -592,8 +606,9 @@ def _check_tasks(s, ids: list[int]) -> list[Task]:
 
 def _history_of_task(task_id: int):
     """그 업무의 이력 조건 — 업무에 속한 이력 + 다른 업무 이력인데 이 업무에도 걸친 것."""
-    return or_(HistoryEntry.task_id == task_id,
-               HistoryEntry.id.in_(select(HistoryTask.history_id).where(HistoryTask.task_id == task_id)))
+    return and_(select(Task.id).where(Task.id == task_id).exists(),
+                or_(HistoryEntry.task_id == task_id,
+                    HistoryEntry.id.in_(select(HistoryTask.history_id).where(HistoryTask.task_id == task_id))))
 
 
 def get_history(entry_id: int | None) -> dict | None:
@@ -604,15 +619,21 @@ def get_history(entry_id: int | None) -> dict | None:
         return _decorate(s, [_history_dict(h)])[0] if h else None
 
 
-def update_history(entry_id: int, *, session=None, **fields) -> dict:
+def update_history(entry_id: int, *, session=None, expected_version=None, actor='', actor_id='',
+                   revision_action='수정', **fields) -> dict:
     """사용자가 이력(원문·유형·일시·제목·요약·키워드·임원·걸친 업무 task_ids)을 고칠 때."""
     with db.transaction(session) as s:
-        h = s.get(HistoryEntry, entry_id)
-        if h is None:
-            raise ValueError('이력을 찾을 수 없습니다.')
+        claim = update(HistoryEntry).where(HistoryEntry.id == entry_id, HistoryEntry.deleted_at.is_(None))
+        if expected_version is not None:
+            claim = claim.where(func.coalesce(HistoryEntry.edit_version, 0) == expected_version)
+        result = s.execute(claim.values(ai_token=uuid.uuid4().hex,
+                            edit_version=func.coalesce(HistoryEntry.edit_version, 0) + 1))
+        if not result.rowcount:
+            raise ValueError('기록이 변경되었거나 휴지통으로 이동했습니다. 창을 다시 열어 최신 내용을 확인하세요.')
+        h = s.get(HistoryEntry, entry_id, populate_existing=True)
+        records.ensure_revision(s, h)
         old_content, old_when = h.content, h.occurred_at
         # 이 편집 전에 시작한 AI 작업은 원문·직접 고친 요약을 덮어쓸 수 없다.
-        h.ai_token = uuid.uuid4().hex
         if h.ai_status == 'pending':
             h.ai_status, h.ai_error = '', ''
         if 'content' in fields:
@@ -628,9 +649,9 @@ def update_history(entry_id: int, *, session=None, **fields) -> dict:
             v = datetime.fromisoformat(v) if isinstance(v, str) else v
             # 수정 창의 일시 칸은 분 단위라 초가 빠진다 — 같은 분이면 원래 값(초 포함)을 그대로 둬서
             # 같은 분에 기록된 이력들의 순서가 수정만으로 뒤바뀌지 않게 한다
-            if not (h.occurred_at and h.occurred_at.replace(second=0, microsecond=0) == v.replace(second=0, microsecond=0)):
+            if revision_action == '버전 복원' or not (h.occurred_at and h.occurred_at.replace(second=0, microsecond=0) == v.replace(second=0, microsecond=0)):
                 h.occurred_at = v
-        for k in ('title', 'summary'):
+        for k in ('title', 'summary', 'sections'):
             if k in fields:
                 setattr(h, k, (fields[k] or '').strip())
         if 'keywords' in fields:
@@ -638,7 +659,11 @@ def update_history(entry_id: int, *, session=None, **fields) -> dict:
         if 'task_ids' in fields:  # 이 이력이 걸친 업무 전체 — 지금 업무가 빠지면 남은 첫 업무가 이력의 업무가 된다
             ids = list(dict.fromkeys(int(v) for v in (fields['task_ids'] or [])))
             _check_tasks(s, ids)
-            primary = h.task_id if h.task_id in ids else (ids[0] if ids else None)
+            # 휴지통에 있는 업무의 연결은 편집 화면에 없으므로 보존한다.
+            task_table = Task.__table__.c
+            archived = list(s.scalars(select(HistoryTask.task_id).where(HistoryTask.history_id == entry_id,
+                HistoryTask.task_id.in_(select(task_table.id).where(task_table.deleted_at.is_not(None))))))
+            primary = h.task_id if h.task_id in ids and revision_action != '버전 복원' else (ids[0] if ids else None)
             has_people = bool(fields['person_ids']) if 'person_ids' in fields else bool(s.scalar(
                 select(func.count()).select_from(HistoryPerson).where(HistoryPerson.history_id == entry_id)))
             if primary is None and not has_people:
@@ -650,7 +675,7 @@ def update_history(entry_id: int, *, session=None, **fields) -> dict:
             for link in s.scalars(select(HistoryTask).where(HistoryTask.history_id == entry_id)):
                 s.delete(link)
             s.flush()
-            for tid in ids:
+            for tid in dict.fromkeys(ids + archived):
                 if tid != primary:
                     s.add(HistoryTask(history_id=entry_id, task_id=tid))
         if 'person_ids' in fields:
@@ -665,18 +690,23 @@ def update_history(entry_id: int, *, session=None, **fields) -> dict:
         if h.content != old_content or h.occurred_at != old_when:
             h.ai_todos, h.ai_reference_date = '', ''
         s.flush()
+        records.save_revision(s, h, actor, actor_id, revision_action)
         return _decorate(s, [_history_dict(h)])[0]
 
 
-def unlink_history_task(entry_id: int, task_id: int) -> None:
+def unlink_history_task(entry_id: int, task_id: int, actor: str = '') -> None:
     """이 업무에서 이력 빼기 — 다른 업무에도 걸친 이력에서 한 업무만 뗀다. 이력의 업무를 빼면
     함께 걸친 다음 업무가 이력의 업무가 된다(자료도 같이). 걸친 업무가 하나뿐이면 뺄 수 없다(삭제를 쓴다)."""
-    with db.SessionLocal() as s:
+    with db.transaction() as s:
+        s.execute(update(HistoryEntry).where(HistoryEntry.id == entry_id, HistoryEntry.deleted_at.is_(None))
+                  .values(edit_version=func.coalesce(HistoryEntry.edit_version, 0) + 1, ai_token=uuid.uuid4().hex))
         h = s.get(HistoryEntry, entry_id)
         if h is None:
             raise ValueError('이력을 찾을 수 없습니다.')
-        links = list(s.scalars(select(HistoryTask).where(HistoryTask.history_id == entry_id)
+        records.ensure_revision(s, h)
+        links = list(s.scalars(select(HistoryTask).join(Task, Task.id == HistoryTask.task_id).where(HistoryTask.history_id == entry_id)
                                .order_by(HistoryTask.task_id)))
+        h.ai_status = '' if h.ai_status == 'pending' else h.ai_status
         if h.task_id == task_id:
             if not links:
                 raise ValueError('이 업무에만 걸린 이력입니다 — 빼려면 삭제하세요.')
@@ -688,15 +718,18 @@ def unlink_history_task(entry_id: int, task_id: int) -> None:
             for link in links:
                 if link.task_id == task_id:
                     s.delete(link)
-        s.commit()
+        s.flush()
+        records.save_revision(s, h, actor, action='업무 연결 변경')
 
 
 def begin_history_ai(entry_id: int, status: str = 'pending') -> str | None:
     """새 요청 번호를 저장해 이전 AI 요청의 응답을 무효화한다."""
     token = uuid.uuid4().hex
     with db.transaction() as s:
-        result = s.execute(update(HistoryEntry).where(HistoryEntry.id == entry_id).values(
+        result = s.execute(update(HistoryEntry).where(HistoryEntry.id == entry_id, HistoryEntry.deleted_at.is_(None)).values(
             ai_token=token, ai_status=status, ai_error=''))
+        if result.rowcount:
+            records.ensure_revision(s, s.get(HistoryEntry, entry_id))
         return token if result.rowcount else None
 
 
@@ -719,10 +752,14 @@ def set_history_ai(entry_id: int, status: str, title: str | None = None, summary
             values['sections'] = json.dumps(sections, ensure_ascii=False)
         if reference_date is not None:
             values['ai_reference_date'] = reference_date
-        stmt = update(HistoryEntry).where(HistoryEntry.id == entry_id)
+        stmt = update(HistoryEntry).where(HistoryEntry.id == entry_id, HistoryEntry.deleted_at.is_(None))
         if token is not None:
             stmt = stmt.where(HistoryEntry.ai_token == token)
-        s.execute(stmt.values(**values))
+        if title is not None or summary is not None or keywords is not None or todos is not None:
+            values['edit_version'] = func.coalesce(HistoryEntry.edit_version, 0) + 1
+        result = s.execute(stmt.values(**values))
+        if result.rowcount and status == 'done':
+            records.save_revision(s, s.get(HistoryEntry, entry_id), 'AI 정리', action='AI 정리')
 
 
 def mark_ai_todo(entry_id: int, idx: int, task_id: int) -> None:
@@ -777,16 +814,8 @@ def list_history(task_id: int) -> list[dict]:
         return _decorate(s, [_history_dict(h) for h in rows])
 
 
-def delete_history(entry_id: int) -> None:
-    """이력을 지워도 거기 붙은 자료는 업무 참고자료로 남긴다."""
-    with db.SessionLocal() as s:
-        h = s.get(HistoryEntry, entry_id)
-        if h:
-            # 예전 DB 에 ALTER 로 추가된 컬럼엔 외래키(ON DELETE SET NULL)가 없을 수 있어 직접 끊는다
-            for r in s.scalars(select(Reference).where(Reference.history_id == entry_id)):
-                r.history_id = None
-            s.delete(h)
-            s.commit()
+def delete_history(entry_id: int, actor: str = '') -> None:
+    records.trash_history(entry_id, actor)
 
 
 def _history_match(like: str, other_task):
@@ -809,12 +838,15 @@ def _history_match(like: str, other_task):
 def search_history(query: str = '', entry_types: list[str] | None = None, author: str = '',
                    date_from: str = '', date_to: str = '', task_id: int | None = None,
                    person_id: int | None = None,
-                   include_auto: bool = False, limit: int = 200, ids: list[int] | None = None) -> list[dict]:
+                   include_auto: bool = False, limit: int = 200, ids: list[int] | None = None, bookmark_user: str | None = None) -> list[dict]:
     """이력 검색. 검색어가 여러 개면 모두 포함(AND)해야 하며, 각 검색어는
     원문·AI 제목·요약·키워드·작성자·업무명 중 어디에든 있으면 된다.
     include_auto=False 면 상태변경/연결/자료 같은 자동 이력은 뺀다. ids 를 주면 그 이력 중에서만 (의미 검색 결과 거르기)."""
     with db.SessionLocal() as s:
         stmt = select(HistoryEntry, Task.title).outerjoin(Task, Task.id == HistoryEntry.task_id)
+        if bookmark_user is not None:
+            stmt = stmt.where(HistoryEntry.id.in_(select(HistoryBookmark.history_id)
+                              .where(HistoryBookmark.user_id == bookmark_user)))
         other_task = aliased(Task)  # 함께 걸친 업무의 제목 (바깥 Task 와 섞이지 않게 별칭)
         from services import glossary
         for term in search_terms(query):  # 검색어마다 — 용어집의 같은 말 중 하나라도 있으면
@@ -1185,7 +1217,7 @@ def _todo_dict(t: Task, parent_title: str | None = None) -> dict:
     today = date.today().isoformat()
     done = t.status == '완료'
     return {
-        'id': t.id, 'task_id': t.parent_id, 'task_title': parent_title or '', 'title': t.title,
+        'id': t.id, 'task_id': _visible_parent(t), 'task_title': parent_title or '', 'title': t.title,
         'status': t.status, 'due_date': t.due_date or '', 'done': done, 'done_at': _dt(t.done_at),
         'assignee_id': t.assignee_id or '', 'assignee_name': t.owner or '', 'assignees': _assignee_list(t),
         'created_by': t.created_by or '', 'source_history_id': t.source_history_id,
@@ -1217,11 +1249,20 @@ def create_todo(title: str, task_id: int | None = None, due_date: str = '', assi
         s.add(t)
         s.flush()
         _set_assignees(s, t, assignees_of(assignees, assignee_name, assignee_id))
-        if source_history_id and s.get(HistoryEntry, source_history_id) is not None:
+        source = None
+        if source_history_id:
+            claim = s.execute(update(HistoryEntry).where(HistoryEntry.id == source_history_id,
+                HistoryEntry.deleted_at.is_(None)).values(edit_version=func.coalesce(HistoryEntry.edit_version, 0) + 1))
+            if not claim.rowcount:
+                raise ValueError('출처 기록이 없거나 휴지통에 있습니다.')
+            source = s.get(HistoryEntry, source_history_id)
+            records.ensure_revision(s, source)
             s.add(HistoryTask(history_id=source_history_id, task_id=t.id))  # 할 일을 찾은 기록이 새 업무 이력에도
         if parent:
             _log(s, parent.id, '할일', f'하위 업무 추가: {title}', created_by)
         s.flush()
+        if source:
+            records.save_revision(s, source, created_by, action='하위 업무 연결')
         return _todo_dict(t, parent.title if parent else '')
 
 
@@ -1481,6 +1522,7 @@ def delete_person(person_id: int) -> None:
     """이 임원에게만 연결된(업무도 없는) 동향이 있으면 지우지 않는다 — 기록이 어디에도 안 보이게 되므로.
     더 추적하지 않을 임원은 '추적 중지'(active=False)를 쓴다."""
     with db.SessionLocal() as s:
+        s.info['include_deleted'] = True  # 휴지통 동향의 연결도 보존한다.
         p = s.get(Person, person_id)
         if p is None:
             return

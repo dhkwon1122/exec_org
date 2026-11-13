@@ -108,8 +108,18 @@ def _people_table(people):
             html.Td([f"{p['count']}건", html.Div(p['last_at'][:10], className='text-muted')
                      if p['last_at'] else None], className='small text-nowrap'),
         ], className='text-muted' if not p['employed'] else None))
-    return dbc.Table([html.Thead(html.Tr([html.Th(h, className='text-nowrap') for h in _HEAD])), html.Tbody(rows)],
-                     hover=True, size='sm', responsive=True, className='align-middle mb-0 small')
+    for row in rows:
+        cells = row.children
+        row.children = [cells[3], *cells[:3], *cells[4:]]
+    headings = [_HEAD[3], *_HEAD[:3], *_HEAD[4:]]
+    table = dbc.Table([html.Thead(html.Tr([html.Th(h, className='text-nowrap') for h in headings])), html.Tbody(rows)],
+                     hover=True, size='sm', responsive=True, className='people-table align-middle mb-0 small')
+    cards = [dbc.Card(dbc.CardBody([
+        dcc.Link(f"{p['name']} {p['position']}", href=f"/people/{p['id']}", className='record-title'),
+        html.Div(p['org'], className='text-muted small'),
+        html.Div(f"기록 {p['count']}건 · 최근 {p['last_at'][:10] or '-'}", className='small mt-2'),
+    ]), className='mb-2') for p in people]
+    return html.Div([html.Div(table, className='people-desktop'), html.Div(cards, className='people-mobile')])
 
 
 @callback(Output('pl-all', 'data'), Input('pl-all-btn', 'n_clicks'), State('pl-all', 'data'),

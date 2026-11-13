@@ -22,7 +22,7 @@ def layout(person_id=None, **_):
         return dbc.Alert(['사람을 찾을 수 없습니다. ', dcc.Link('임원 목록으로', href='/people'), ' · ',
                           dcc.Link('리더 목록으로', href='/leaders')], color='warning')
 
-    form = history_form('pp', people_value=[pid], default_type='동향')
+    form = history_form('pp', people_value=[pid], default_type='동향', draft_context=f'person:{pid}')
     return html.Div([
         dcc.Store(id='pp-id', data=pid),
         dcc.Store(id='pp-refresh', data=0),
@@ -85,17 +85,17 @@ def layout(person_id=None, **_):
             dbc.ModalFooter([dbc.Button('취소', id='ev-cancel', color='secondary', outline=True),
                              dbc.Button('저장', id='ev-save', color='primary')]),
         ], id='ev-modal', is_open=False, size='lg'),
-        html.Div(id='pp-profile', className='mb-3'),
+        html.Details([html.Summary('임원 프로필 · 평가 · 경력', className='composer-toggle'), html.Div(id='pp-profile')], className='mb-3'),
         dbc.Row([
             dbc.Col([
-                dbc.Card(dbc.CardBody([
+                html.Details([html.Summary('기록 추가', className='composer-toggle'), dbc.Card(dbc.CardBody([
                     html.Div([html.I(className='bi bi-binoculars me-1'),
                               '이 리더에 대해 기록' if leaders.is_leader(pid) else '이 임원에 대해 기록'],
                              className='fw-semibold mb-2'),
                     dcc.Dropdown(id='pp-task', multi=True, className='mb-2',
                                  placeholder='관련 업무 — 여러 업무에 걸치면 모두 (동향이면 비워 두세요)'),
                     *form,
-                ]), className='mb-3'),
+                ]), className='mt-2')], className='record-composer mb-3'),
                 html.Div(id='pp-count', className='small text-muted mb-2'),
                 html.Div(id='pp-history'),
                 ui.pager('pp-hist-page'),
