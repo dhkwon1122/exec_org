@@ -326,7 +326,7 @@ def suggest_mapping(headers: list[str], rows: list[list[str]], use_ai: bool = Tr
         t = rule_match(h, attrs, role)
         db_col = role == 'leader' and t == 'ignore' and _norm(h) in {_norm(c) for c in _db_columns()}
         out.append({'index': i, 'header': h, 'target': t or f'attr:{h.strip()}', 'source': 'rule' if t else 'new',
-                    'reason': '사번으로 People in SAIT 에서 읽는 칸이라 올리지 않음' if db_col
+                    'reason': '자동으로 채우는 칸이라 올리지 않음 (사번으로 읽거나 계산)' if db_col
                     else '제목 규칙' if t else '맞는 칸이 없어 새 추가 항목으로',
                     'samples': [r[i] for r in rows if r[i]][:3]})
         if not t:
@@ -456,6 +456,9 @@ def run(table: dict, targets: list[str], create_missing: bool = False, apply: bo
                 elif pt[0] == 'status':
                     from services.leaders import _loads, _status_of
                     manual, info = _loads(p.leader_manual), _loads(p.leader_info)
+                    if pt[1] == '보직 수행시작일':
+                        from services.leaders import norm_start_date
+                        v = norm_start_date(v)
                     changed = _status_of(p)[0][pt[1]] != v  # 표에 보이는 값과 같으면 그대로 (양식을 그대로 올려도 0건)
                     if changed and apply:
                         if v == str(info.get(pt[1], '') or ''):

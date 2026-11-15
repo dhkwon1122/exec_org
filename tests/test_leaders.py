@@ -137,7 +137,7 @@ def test_status_rows_execs_and_manual_edits_survive_sync(env):
     assert (rows['김영수']['부서원 수'], rows['박팀장']['부서원 수'], rows['서마스터']['부서원 수']) == ('1', '1', '')
     assert rows['김영수']['직책구분'] == '임원/Master' and rows['김영수']['Platform'] == 'AI센터'
     assert rows['무사번']['직책구분'] == '일반' and rows['무사번']['부서명'] == '테스트파트'
-    assert list(leaders.list_status()[0])[:18] == leaders.STATUS_COLUMNS
+    assert list(leaders.list_status()[0])[:len(leaders.STATUS_COLUMNS)] == leaders.STATUS_COLUMNS
     park = rows['박팀장']['id']
     leaders.save_status(park, '과제구분', '국책')
     leaders.save_status(park, 'CL', 'CL5')
@@ -375,3 +375,21 @@ def test_sorted_by_org_code(env):
     people_sync.sync_people()
     leader_sync.sync_leaders()
     assert [x['성명'] for x in leaders.list_status()] == ['김영수', '박팀장', '서마스터', '한직접', '정그룹']
+
+
+def test_start_date_format_and_tenure_years(env):
+    from datetime import date
+    assert [leaders.norm_start_date(v) for v in ('2023.3.1', '20230301', '2023/3/1', '2023-03', '2023년 3월 1일',
+                                                 '2023-03-01', '모름', '')] == \
+        ['2023-03-01'] * 6 + ['모름', '']
+    assert leaders.tenure_years('2024-11-15', today=date(2026, 11, 15)) == '2.0년'
+    assert leaders.tenure_years('2026-05-15', today=date(2026, 11, 15)) == '0.5년'
+    assert leaders.tenure_years('모름') == ''
+    leader_sync.sync_leaders()
+    park = {x['성명']: x for x in leaders.list_status()}['박팀장']
+    assert park['보직 수행시작일'] == '2026-06-30' and park['보직 수행기간'].endswith('년')
+    leaders.save_status(park['id'], '보직 수행시작일', '2020.1.2')
+    park = {x['성명']: x for x in leaders.list_status()}['박팀장']
+    assert park['보직 수행시작일'] == '2020-01-02' and park['edited'] == ['보직 수행시작일']
+    with pytest.raises(ValueError):
+        leaders.save_status(park['id'], '보직 수행기간', '9.9년')

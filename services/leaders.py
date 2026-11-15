@@ -2,6 +2,7 @@
 리더는 people 표의 role='leader' 라 기록·경력·평가·주요 이력은 임원과 같은 함수(store·profile)를 쓴다."""
 import io
 import json
+import re
 from datetime import date
 
 from openpyxl import Workbook
@@ -16,10 +17,35 @@ from services.leader_sync import LEADERSHIP_DIMS
 OTHERS = '타인평균'  # 리더십진단 요약에 쓰는 평가자 그룹 (동료+상사+부서원 평균)
 # 리더급 현황 칸 — 불러온 값(Person.leader_info, services/leader_sync.py)에 화면에서 고친 값(leader_manual)을 덮는다
 STATUS_COLUMNS = ['사원번호', 'Platform', '그룹', '부서명', '과제/파트명', '성명', 'CL', 'Knox ID', '구분', '직책구분',
-                  '보직장', '플랫폼장/팀장', '그룹장/PL', 'PM/파트장', '과제구분', '과제명', '보직 수행시작일', '부서원 수']
+                  '보직장', '플랫폼장/팀장', '그룹장/PL', 'PM/파트장', '과제구분', '과제명', '보직 수행시작일', '보직 수행기간',
+                  '부서원 수']
 KIND_ORDER = {k: i for i, k in enumerate(['임원/Master', 'R.Master', '보직장', '일반'])}
 # 사번으로 People in SAIT 에서 읽는 칸 — 표·엑셀 업로드로 고치지 않는다 (고친 값이 있어도 무시)
-FROM_DB = ('Platform', '그룹', '부서명', '부서원 수')
+FROM_DB = ('Platform', '그룹', '부서명', '부서원 수', '보직 수행기간')  # 보직 수행기간은 시작일로 계산
+
+
+def norm_start_date(v) -> str:
+    """보직 수행시작일 → 'YYYY-MM-DD' (2023.3.1 · 20230301 · 2023/3/1 · 2023-03 → 2023-03-01). 못 읽으면 그대로."""
+    s = str(v if v is not None else '').strip()
+    m = re.fullmatch(r'(\d{4})(\d{2})(\d{2})', s) or \
+        re.fullmatch(r'(\d{4})\s*[.\-/년]\s*(\d{1,2})\s*(?:[.\-/월]\s*(\d{1,2})?\s*일?)?\.?', s)
+    if not m:
+        return s
+    y, mo, d = int(m.group(1)), int(m.group(2)), int(m.group(3) or 1)
+    try:
+        return date(y, mo, d).isoformat()
+    except ValueError:
+        return s
+
+
+def tenure_years(start: str, today: date | None = None) -> str:
+    """보직 수행기간 — 시작일부터 오늘까지 '3.2년' (소수 첫째 자리). 시작일을 못 읽으면 빈 칸."""
+    try:
+        d = date.fromisoformat(norm_start_date(start))
+    except ValueError:
+        return ''
+    days = ((today or date.today()) - d).days
+    return f'{max(days, 0) / 365:.1f}년'
 
 
 def _loads(raw) -> dict:
@@ -40,6 +66,8 @@ def _status_of(p: Person) -> tuple[dict, set]:
             return manual[c]
         return info.get(c) or base.get(c, '')
     row = {c: str(pick(c) or '') for c in STATUS_COLUMNS}
+    row['보직 수행시작일'] = norm_start_date(row['보직 수행시작일'])
+    row['보직 수행기간'] = tenure_years(row['보직 수행시작일']) if row['보직 수행시작일'] else ''
     return row, {c for c in manual if c in STATUS_COLUMNS and c not in FROM_DB}
 
 
@@ -76,8 +104,10 @@ def save_status(person_id: int, column: str, value: str) -> None:
     if column not in STATUS_COLUMNS:
         raise ValueError(f'없는 칸입니다: {column}')
     if column in FROM_DB:
-        raise ValueError(f'{column} 은(는) 사번으로 People in SAIT 에서 읽는 칸이라 고칠 수 없습니다.')
+        raise ValueError(f'{column} 은(는) 자동으로 채우는 칸(사번으로 읽거나 계산)이라 고칠 수 없습니다.')
     value = str(value if value is not None else '').strip()
+    if column == '보직 수행시작일':
+        value = norm_start_date(value)
     with db.SessionLocal() as s:
         p = s.get(Person, person_id)
         if p is None:
@@ -255,7 +285,7 @@ EXTRA_COLUMNS = {
 }
 EXTRA_SHEETS = {'career': '경력·발령 (시트)', 'evals': '평가 이력 (시트)', 'leadership': '리더십진단 상세 (시트)',
                 'history': '최근 기록 (시트, 사람마다 20건)'}
-_STATUS_WIDTHS = [10, 14, 16, 16, 18, 9, 7, 12, 8, 11, 7, 11, 9, 10, 9, 24, 13, 9]
+_STATUS_WIDTHS = [10, 14, 16, 16, 18, 9, 7, 12, 8, 11, 7, 11, 9, 10, 9, 24, 13, 10, 9]
 
 
 def export_filename(today: date | None = None) -> str:
