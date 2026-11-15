@@ -15,7 +15,7 @@ from urllib.parse import urlencode, urlparse
 import dash
 import dash_bootstrap_components as dbc
 import flask
-from dash import dcc, html
+from dash import Input, Output, State, callback, ctx, dcc, html
 from flask.sessions import SecureCookieSessionInterface
 
 import components.todo_ui  # noqa: F401  업무 체크/삭제 공용 콜백 등록
@@ -24,6 +24,7 @@ from components.history_actions import history_edit_modal, history_link_modal, t
 from components.mail_ui import compose_modal  # 메일 보내기 창 (화면은 'mail-draft' 에 초안을 넣어 연다)
 from components import doc_ui, ui  # doc_ui: 문서 합치기·나누기 창 (문서 카드의 단추가 연다), ui: 검색·자료 탭
 from services import auth, confluence_watch, doc_versions, doc_worker, embed, sso, store, users
+from components.record_tools import layout as record_tools_layout
 from services.db import DATA_DIR
 
 
@@ -312,6 +313,8 @@ def download_mail_file(att_id: int):
 
 _NAV = [  # (이름, 주소, 아이콘, 주소 맞춤 — 'find' 는 ui.FIND_PATHS 중 어디든, _mark_find_nav)
     ('업무', '/', 'bi-check2-square', 'exact'),
+    ('후속조치', '/followups', 'bi-list-check', 'exact'),
+    ('통합 보고서', '/reports', 'bi-file-earmark-text', 'exact'),
     ('캘린더', '/calendar', 'bi-calendar3', 'exact'),
     ('받은 메일', '/inbox', 'bi-inbox', 'exact'),
     ('임원', '/people', 'bi-people', 'partial'),
@@ -319,6 +322,8 @@ _NAV = [  # (이름, 주소, 아이콘, 주소 맞춤 — 'find' 는 ui.FIND_PAT
     ('검색·자료', '/search', 'bi-search', 'find'),  # 이력 검색·참고자료·컨플루언스 (화면 위 탭 — ui.find_tabs)
     ('용어집', '/glossary', 'bi-book', 'exact'),
     ('요약 형식', '/formats', 'bi-layout-text-sidebar', 'exact'),
+    ('북마크', '/bookmarks', 'bi-bookmark', 'exact'),
+    ('휴지통', '/trash', 'bi-trash3', 'exact'),
 ]
 
 
@@ -350,13 +355,15 @@ def _sidebar():
             n = _confluence_count()
             count = html.Span(n or '', id='nav-conf-count', className='nav-count hot' if n else 'nav-count',
                               title='안 본 컨플루언스 변경')
-        links.append(dbc.NavLink([html.I(className=f'bi {icon}'), html.Span(label), count], href=href,
+        links.append(dbc.NavLink([html.I(className=f'bi {icon}', **{'aria-hidden': 'true'}), html.Span(label), count], href=href,
                                  active=False if active == 'find' else active,
                                  **({'id': 'nav-find'} if active == 'find' else {})))
     return html.Aside([
         html.A([html.Span(html.I(className='bi bi-check2'), className='app-brand-mark'), html.Span('업무 기록')],
                href='/', className='app-brand'),
-        dbc.Nav(links, vertical=True, className='app-nav'),
+        html.Button([html.I(className='bi bi-list me-1'), '메뉴'], id='nav-toggle',
+                   className='btn btn-outline-secondary mobile-nav-toggle', **{'aria-label': '전체 메뉴', 'aria-expanded': 'false'}),
+        dbc.Collapse(dbc.Nav(links, vertical=True, className='app-nav'), id='nav-collapse', className='nav-collapse'),
         html.Div([
             html.Span(name[:1] or '?', className='avatar'),
             html.Span(name, className='user-name'),
@@ -380,11 +387,19 @@ def serve_layout():
         dcc.Interval(id='app-tick', interval=60_000),
         compose_modal(),
         doc_ui.doc_tools_modal(),
+        record_tools_layout(), dcc.Location(id='app-location', refresh=False),
         html.Div([
             _sidebar(),
             html.Main(dbc.Container(dash.page_container, fluid=True), className='app-main'),
         ], className='app-shell'),
     ])
+
+
+@callback(Output('nav-collapse', 'is_open'), Output('nav-toggle', 'aria-expanded'),
+          Input('nav-toggle', 'n_clicks'), Input('app-location', 'pathname'), State('nav-collapse', 'is_open'))
+def toggle_nav(clicks, path, opened):
+    value = not opened if ctx.triggered_id == 'nav-toggle' and clicks else False
+    return value, str(value).lower()
 
 
 app.layout = serve_layout

@@ -45,7 +45,7 @@ def layout(q: str = '', person: str = '', **_):
                     dbc.Input(id='s-q', value=q or '', type='search', debounce=True, autoFocus=True,
                               placeholder='검색어 (여러 단어는 모두 포함, "따옴표"는 구절 검색)'),
                 ], className='mb-2'),
-                dbc.Row([
+                html.Details([html.Summary('상세 검색 조건', className='composer-toggle'), dbc.Row([
                     dbc.Col(dcc.Dropdown(id='s-types', multi=True, placeholder='유형 (전체)',
                                          options=store.ENTRY_TYPES + store.AUTO_ENTRY_TYPES), md=2),
                     dbc.Col(dcc.Dropdown(id='s-person', placeholder='임원·리더', options=people_options(),
@@ -61,7 +61,8 @@ def layout(q: str = '', person: str = '', **_):
                                        style={} if embed.is_configured() else {'display': 'none'}),
                              _sem_status()],
                             md=2, className='d-flex align-items-center flex-wrap'),
-                ], className='g-2 mb-3'),
+                ], className='g-2 mt-1 mb-3')], open=bool(person), className='mb-3'),
+                dbc.Button('검색 조건 초기화', id='s-reset', color='link', size='sm', className='mb-2 p-0'),
                 html.Div(id='s-count', className='small text-muted mb-2'),
                 html.Div(id='s-results'),
                 ui.pager('s-page'),
@@ -100,8 +101,8 @@ ui.scroll_to_top_on_page('s-page', 's-count')
 
 @callback(Output('s-results', 'children'), Output('s-count', 'children'), Output('s-page', 'max_value'),
           Output('s-page', 'style'), Output('s-similar', 'children'),
-          *[State(i.component_id, i.component_property) for i in _FILTERS], Input('s-page', 'active_page'))
-def search(q, types, person_id, author, date_from, date_to, include_auto, semantic=True, page=1):
+          *[State(i.component_id, i.component_property) for i in _FILTERS], Input('s-page', 'active_page'), Input('history-changed', 'data'))
+def search(q, types, person_id, author, date_from, date_to, include_auto, semantic=True, page=1, _changed=None):
     """조건이 바뀌면 first_page 가 쪽을 1로 돌려 여기로 온다 (첫 화면은 쪽의 처음 값으로). 한 쪽에 30건."""
     terms = store.search_terms(q or '')
     groups = [glossary.expand(t) for t in terms]  # 용어집의 같은 말
@@ -207,3 +208,9 @@ def _docs_card(docs: list[dict]):
             html.Div(d['snippet'], className='text-muted mt-1') if d['snippet'] and not d['analyzed'] else None,
         ], className='small') for d in docs], flush=True),
     ]), className='mb-3')
+
+@callback(Output('s-q', 'value'), Output('s-types', 'value'), Output('s-person', 'value'),
+          Output('s-author', 'value'), Output('s-from', 'value'), Output('s-to', 'value'), Output('s-auto', 'value'),
+          Input('s-reset', 'n_clicks'), prevent_initial_call=True)
+def reset(_):
+    return '', [], None, None, None, None, False

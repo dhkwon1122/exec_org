@@ -10,7 +10,7 @@ from dash import ALL, Input, Output, State, callback, ctx, dash_table, dcc, html
 
 from components import todo_ui, ui
 from components.history_form import parse_uploads, people_options, register_form_callbacks, task_options
-from services import auth, confluence, db, enrich, llm, store
+from services import auth, confluence, db, enrich, followups, llm, store
 
 
 def _opts(values):
@@ -21,7 +21,7 @@ def history_edit_modal():
     return dbc.Modal([
         dbc.ModalHeader(dbc.ModalTitle('이력 수정')),
         dbc.ModalBody([
-            dcc.Store(id='he-id'),
+            dcc.Store(id='he-id'), dcc.Store(id='he-version'),
             dbc.Row([
                 dbc.Col([dbc.Label('유형'), dbc.Select(id='he-type', options=_opts(store.ENTRY_TYPES))]),
                 dbc.Col([dbc.Label('일시'), dbc.Input(id='he-when', type='datetime-local')]),
@@ -51,7 +51,7 @@ def history_edit_modal():
             dbc.Button('취소', id='he-cancel', color='secondary', outline=True),
             dbc.Button('저장', id='he-save', color='primary'),
         ]),
-    ], id='he-modal', is_open=False, size='lg')
+    ], id='he-modal', is_open=False, size='lg', scrollable=True)
 
 
 register_form_callbacks('he', template=False)
@@ -77,19 +77,19 @@ def _modal_refs(entry_id: int):
           Output('he-refs', 'children'), Output('he-links', 'value'), Output('he-attach', 'contents'),
           Output('he-attach', 'filename'), Output('he-attach-names', 'children', allow_duplicate=True),
           Output('he-people', 'value'), Output('he-people', 'options'),
-          Output('he-tasks', 'value'), Output('he-tasks', 'options'),
+          Output('he-tasks', 'value'), Output('he-tasks', 'options'), Output('he-version', 'data'),
           Input({'type': 'h-edit', 'id': ALL}, 'n_clicks'), Input('he-cancel', 'n_clicks'),
           Input('he-save', 'n_clicks'), Input('he-regen', 'n_clicks'),
           Input({'type': 'he-ref-del', 'id': ALL}, 'n_clicks'),
           State('he-id', 'data'), State('he-type', 'value'), State('he-when', 'value'), State('he-title', 'value'),
           State('he-summary', 'value'), State('he-keywords', 'value'), State('he-content', 'value'),
           State('he-links', 'value'), State('he-attach', 'contents'), State('he-attach', 'filename'),
-          State('he-people', 'value'), State('he-tasks', 'value'), State('history-changed', 'data'),
+          State('he-people', 'value'), State('he-tasks', 'value'), State('history-changed', 'data'), State('he-version', 'data'),
           prevent_initial_call=True)
 def edit_history(_e, _c, _s, _r, _d, eid, etype, when, title, summary, keywords, content, links, att, att_names,
-                 people, tasks, n):
+                 people, tasks, n, version=None):
     nu = no_update
-    none = (nu,) * 20
+    none = (nu,) * 21
     clear_new = (None, None, '')  # 첨부 입력칸 비우기
     trig = ctx.triggered_id
     if trig is None:  # 화면 이동으로 이력 카드가 다시 그려질 때 트리거 없이 호출된다 — 아무것도 하지 않는다
@@ -98,7 +98,7 @@ def edit_history(_e, _c, _s, _r, _d, eid, etype, when, title, summary, keywords,
         if not ctx.triggered[0]['value']:
             return none
         store.delete_reference(trig['id'])
-        return (nu,) * 10 + ((n or 0) + 1, _modal_refs(eid)) + (nu,) * 8
+        return (nu,) * 10 + ((n or 0) + 1, _modal_refs(eid)) + (nu,) * 9
     if isinstance(trig, dict):
         if not ctx.triggered[0]['value']:  # 목록이 다시 그려질 때의 빈 트리거
             return none
@@ -108,9 +108,9 @@ def edit_history(_e, _c, _s, _r, _d, eid, etype, when, title, summary, keywords,
         return ((True, h['id'], h['entry_type'], h['occurred_at'].replace(' ', 'T'), h['title'], h['summary'],
                  ', '.join(h['keywords']), h['content'], '', False, nu, _modal_refs(h['id']), '') + clear_new
                 + ([p['id'] for p in h['people']], people_options(),
-                   ([h['task_id']] if h['task_id'] else []) + [t['id'] for t in h['also_tasks']], task_options()))
+                   ([h['task_id']] if h['task_id'] else []) + [t['id'] for t in h['also_tasks']], task_options(), h['edit_version']))
     if trig == 'he-cancel':
-        return (False,) + (nu,) * 7 + ('', False, nu, nu, '') + clear_new + (nu,) * 4
+        return (False,) + (nu,) * 7 + ('', False, nu, nu, '') + clear_new + (nu,) * 5
     if trig not in ('he-save', 'he-regen') or not eid:
         return none
     try:
@@ -120,18 +120,19 @@ def edit_history(_e, _c, _s, _r, _d, eid, etype, when, title, summary, keywords,
         with db.transaction() as s:
             h = store.update_history(eid, entry_type=etype, occurred_at=when or None, title=title or '',
                                      summary=summary or '', keywords=keywords or '', content=content or '',
-                                     person_ids=people or [], task_ids=tasks or [], session=s)
+                                     person_ids=people or [], task_ids=tasks or [], session=s, expected_version=version,
+                                     actor=auth.current_name(), actor_id=(auth.current_user() or {}).get('user_id', ''))
             author = auth.current_name()
             store.attach_links(h['task_id'], eid, store.parse_links(links or ''), author=author, session=s)
             for name, data in parse_uploads(att, att_names):
                 store.add_reference(h['task_id'], 'file', title=name, file_name=name, file_bytes=data, author=author,
                                     history_id=eid, session=s)
     except ValueError as e:
-        return (True,) + (nu,) * 7 + (str(e), True) + (nu,) * 10
+        return (True,) + (nu,) * 7 + (str(e), True) + (nu,) * 11
     confluence.read_new_references_later()
     if trig == 'he-regen':
         enrich.submit(eid)
-    return (False,) + (nu,) * 7 + ('', False, (n or 0) + 1, nu, '') + clear_new + (nu,) * 4
+    return (False,) + (nu,) * 7 + ('', False, (n or 0) + 1, nu, '') + clear_new + (nu,) * 5
 
 
 @callback(Output('history-changed', 'data', allow_duplicate=True),
@@ -145,9 +146,9 @@ def regen_or_delete(_r, _d, _u, n):
     if trig['type'] == 'h-regen':
         enrich.submit(trig['id'])
     elif trig['type'] == 'h-unlink':  # 여러 업무에 걸친 기록을 이 업무에서만 뺀다
-        store.unlink_history_task(trig['id'], trig['task'])
+        store.unlink_history_task(trig['id'], trig['task'], actor=auth.current_name())
     else:
-        store.delete_history(trig['id'])
+        store.delete_history(trig['id'], actor=auth.current_name())
     return (n or 0) + 1
 
 
@@ -211,7 +212,7 @@ def review_todos(_one, _all, _c, _s, rows, parent, meta, n, hn):
             t = store.get_task(default)
             if t:
                 opts.insert(0, {'label': f"#{t['id']} {t['title']}", 'value': t['id']})
-        return True, rows, opts, default or None, {'hid': h['id']}, False, nu, nu, ''
+        return True, rows, opts, default or None, {'hid': h['id'], 'keys': {str(i): followups.suggestion_key(t) for i, t in enumerate(h['ai_todos'])}}, False, nu, nu, ''
     # 등록
     rows = [r for r in rows or [] if str(r.get('title') or '').strip()]
     if not rows:
@@ -223,12 +224,15 @@ def review_todos(_one, _all, _c, _s, rows, parent, meta, n, hn):
     by = auth.current_name()
     try:
         for r in rows:
-            t = store.create_todo(str(r['title']).strip(), task_id=int(parent) if parent else None,
-                                  due_date=str(r.get('due') or '').strip(),
-                                  assignees=todo_ui.assignees_from([], str(r.get('assignee') or '')),
-                                  created_by=by, source_history_id=(meta or {}).get('hid'))
-            if r.get('idx') is not None and meta:
-                store.mark_ai_todo(meta['hid'], int(r['idx']), t['id'])
+            key = (meta or {}).get('keys', {}).get(str(r.get('idx')))
+            if key:
+                followups.convert(meta['hid'], key, str(r['title']).strip(), str(r.get('due') or '').strip(),
+                    str(r.get('assignee') or ''), int(parent) if parent else None, by)
+            else:
+                store.create_todo(str(r['title']).strip(), task_id=int(parent) if parent else None,
+                    due_date=str(r.get('due') or '').strip(),
+                    assignees=todo_ui.assignees_from([], str(r.get('assignee') or '')),
+                    created_by=by, source_history_id=(meta or {}).get('hid'))
     except ValueError as e:  # 마감 형식 등 — 앞 줄은 이미 등록됐을 수 있어 목록을 새로 그린다
         return True, nu, nu, nu, nu, True, (n or 0) + 1, (hn or 0) + 1, f"'{r['title']}': {e}"
     return False, [], nu, nu, nu, False, (n or 0) + 1, (hn or 0) + 1, ''
