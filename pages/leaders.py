@@ -35,7 +35,7 @@ def layout(**_):
                               options=[{'label': v, 'value': k} for k, v in leaders.EXTRA_SHEETS.items()]),
                 html.Div(id='lx-file', className='small'),
                 html.Div('표에서 고친 칸(과제구분 등)을 고쳐 "엑셀 업로드"로 다시 올릴 수도 있습니다 '
-                         '(Platform·그룹·부서명·부서원 수는 사번으로 읽는 칸이라 올리지 않음).', className='small text-muted mt-2'),
+                         '(Platform·그룹·부서명·부서원 수·보직 수행기간은 자동으로 채우는 칸이라 올리지 않음).', className='small text-muted mt-2'),
             ]),
             dbc.ModalFooter([
                 dbc.Button('닫기', id='lx-close', color='secondary', outline=True, className='me-auto'),
@@ -109,7 +109,7 @@ def layout(**_):
                        color='primary', title='전체 명단 — 화면의 칸 그대로, 필요하면 항목을 더해서'),
         ], className='d-flex align-items-center flex-wrap gap-1 mb-2'),
         dash_table.DataTable(
-            id='ld-table', data=[], row_selectable='multi', selected_row_ids=[], page_size=50, editable=True,
+            id='ld-table', data=[], row_selectable='multi', selected_row_ids=[], page_action='none', editable=True,
             sort_action='native', filter_action='native', markdown_options={'link_target': '_self'},
             columns=[{'id': c, 'name': c, **({'editable': False} if c in leaders.FROM_DB else {})}
                      for c in leaders.STATUS_COLUMNS]
@@ -126,7 +126,8 @@ def layout(**_):
             css=[{'selector': '.dash-cell-value p', 'rule': 'margin: 0'}],
         ),
         html.Div(['칸을 누르고 고친 뒤 Enter — 바로 저장됩니다. 과제구분처럼 불러올 수 없는 칸을 채우세요. ',
-                  'Platform·그룹·부서명(회색)은 사번으로 People in SAIT 에서 읽는 칸이라 고치지 않습니다. ',
+                  'Platform·그룹·부서명·부서원 수(회색)는 사번으로 People in SAIT 에서 읽고, 보직 수행기간은 보직 수행시작일로 '
+                  '계산하는 칸이라 고치지 않습니다. 보직 수행시작일은 2023.3.1 · 20230301 처럼 넣어도 2023-03-01 로 맞춥니다. ',
                   '"상세"는 기록·경력·평가·리더십진단 화면. 표 머리 아래 칸에 글자를 넣으면 그 칸으로 거릅니다 (예: 직책구분에 보직장).'],
                  className='small text-muted mt-2'),
         html.Div(id='ld-saved', className='small text-success'),
