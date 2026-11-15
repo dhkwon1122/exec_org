@@ -10,7 +10,7 @@ from dash import Input, Output, State, callback, dcc, html
 
 from components import doc_ui, ui
 from components.history_form import people_options
-from services import doc_summary, embed, glossary, store
+from services import doc_summary, embed, glossary, graph, store
 
 dash.register_page(__name__, path='/search', name='이력 검색', title='업무 기록 · 이력 검색')
 
@@ -56,6 +56,8 @@ def layout(q: str = '', person: str = '', **_):
                     dbc.Col(dbc.InputGroup([dbc.InputGroupText('까지'), dbc.Input(id='s-to', type='date')],
                                            size='sm'), md=2),
                     dbc.Col([dbc.Checkbox(id='s-auto', label='자동 기록 포함', value=False, className='me-3'),
+                             html.Span(dbc.Checkbox(id='s-graph-on', label='연결로 넓히기', value=True, className='me-3'),
+                                       title='찾은 기록에 걸린 업무·사람·키워드를 따라가 관련 기록도 함께 찾기'),
                              html.Span(dbc.Checkbox(id='s-sem', label='의미 검색', value=True),
                                        title='글자가 같지 않아도 뜻이 가까운 이력·문서를 함께 찾기',
                                        style={} if embed.is_configured() else {'display': 'none'}),
@@ -66,8 +68,10 @@ def layout(q: str = '', person: str = '', **_):
                 html.Div(id='s-results'),
                 ui.pager('s-page'),
                 html.Div(id='s-similar'),
+                html.Div(id='s-graph'),
             ], lg=9),
             dbc.Col([
+                html.Div(id='s-graph-side'),
                 html.H6('자주 나온 키워드', className='text-muted'),
                 html.Div([
                     dcc.Link(f'#{k} {n}', href=ui.search_href(k),
@@ -86,7 +90,8 @@ def layout(q: str = '', person: str = '', **_):
 
 
 _FILTERS = [Input('s-q', 'value'), Input('s-types', 'value'), Input('s-person', 'value'), Input('s-author', 'value'),
-            Input('s-from', 'value'), Input('s-to', 'value'), Input('s-auto', 'value'), Input('s-sem', 'value')]
+            Input('s-from', 'value'), Input('s-to', 'value'), Input('s-auto', 'value'), Input('s-sem', 'value'),
+            Input('s-graph-on', 'value')]
 
 
 @callback(Output('s-page', 'active_page'), *_FILTERS, prevent_initial_call=True)
@@ -99,9 +104,10 @@ ui.scroll_to_top_on_page('s-page', 's-count')
 
 
 @callback(Output('s-results', 'children'), Output('s-count', 'children'), Output('s-page', 'max_value'),
-          Output('s-page', 'style'), Output('s-similar', 'children'),
+          Output('s-page', 'style'), Output('s-similar', 'children'), Output('s-graph', 'children'),
+          Output('s-graph-side', 'children'),
           *[State(i.component_id, i.component_property) for i in _FILTERS], Input('s-page', 'active_page'))
-def search(q, types, person_id, author, date_from, date_to, include_auto, semantic=True, page=1):
+def search(q, types, person_id, author, date_from, date_to, include_auto, semantic=True, graph_on=True, page=1):
     """조건이 바뀌면 first_page 가 쪽을 1로 돌려 여기로 온다 (첫 화면은 쪽의 처음 값으로). 한 쪽에 30건."""
     terms = store.search_terms(q or '')
     groups = [glossary.expand(t) for t in terms]  # 용어집의 같은 말
@@ -119,7 +125,7 @@ def search(q, types, person_id, author, date_from, date_to, include_auto, semant
         except embed.EmbedError as e:
             sem_note = dbc.Alert(f'의미 검색을 하지 못했습니다 — {e}', color='warning', className='small py-1 px-2')
     if not rows and not docs and not similar and not sim_docs and not sim_refs:
-        return [sem_note, dbc.Alert('조건에 맞는 이력이 없습니다.', color='light')], '', *ui.pager_state(0), None
+        return [sem_note, dbc.Alert('조건에 맞는 이력이 없습니다.', color='light')], '', *ui.pager_state(0), None, None, None
     shown, page = ui.page_of(rows, page)
     label = f'{len(rows)}건' + (' (최대 200건까지)' if len(rows) >= 200 else '') + ui.page_note(len(rows), page)
     if docs:
@@ -133,8 +139,55 @@ def search(q, types, person_id, author, date_from, date_to, include_auto, semant
         label += f' · 뜻이 비슷한 이력 {len(similar)}건' + (f', 문서·자료 {len(sim_docs) + len(sim_refs)}건'
                                                        if sim_docs or sim_refs else '')
     cards = dbc.ListGroup([ui.history_card(h, terms=terms, show_task=True, actions=False) for h in shown])
+    g = None
+    if graph_on and terms and (rows or similar):  # 찾은 기록에서 연결을 따라가 넓힌다 (services/graph.py)
+        g = graph.expand(graph.seed_weights([h['id'] for h in rows], [(h['id'], h['score']) for h in similar]),
+                         terms=terms, filters=filters)
+        if g['related']:
+            label += f" · 연결로 찾은 기록 {len(g['related'])}건"
     return ([sem_note, _docs_card(docs) if docs else None, cards], label, *ui.pager_state(len(rows)),
-            _similar_section(similar, sim_docs, sim_refs))
+            _similar_section(similar, sim_docs, sim_refs), _graph_section(g), _graph_side(g))
+
+
+def _graph_side(g: dict | None):
+    """오른쪽 — 찾은 기록들이 많이 가리키는 업무·사람·키워드·자료 (누르면 그쪽으로)."""
+    if not g or not (g['tasks'] or g['people'] or g['keywords'] or g['refs']):
+        return None
+
+    def block(title, items):
+        return [html.Div(title, className='small fw-semibold text-muted mt-2 mb-1'), html.Div(items)] if items else []
+    hits = lambda n: html.Span(f' {n}', className='text-muted', title=f'찾은 기록 {n}건에 걸림')  # noqa: E731
+    tasks = [html.Div([ui.task_link({'id': t['id'], 'title': t['title']}), hits(t['hits']) if t['hits'] else None],
+                      className='small text-truncate') for t in g['tasks']]
+    people = [html.Div([dcc.Link(p['name'], href=f"/people/{p['id']}"),
+                        html.Span(f" {p['assignment'] or p['position']}", className='text-muted'), hits(p['hits'])],
+                       className='small') for p in g['people']]
+    kws = [dcc.Link(f"#{k['keyword']}", href=ui.search_href(k['keyword']),
+                    className='badge rounded-pill text-bg-light border text-decoration-none me-1 mb-1')
+           for k in g['keywords']]
+    refs = [html.Div([html.I(className=f"bi {ui.REF_ICON.get(r['kind'], 'bi-paperclip')} me-1"),
+                      dcc.Link(r['title'] or '(제목 없음)', href=f"/task/{r['task_id']}") if r['task_id']
+                      else html.Span(r['title'])], className='small text-truncate') for r in g['refs']]
+    return dbc.Card(dbc.CardBody([
+        html.Div([html.I(className='bi bi-diagram-3 me-1'), '연결로 본 검색 결과'], className='fw-semibold small'),
+        html.Div('찾은 기록들이 많이 걸린 순', className='small text-muted'),
+        *block('업무', tasks), *block('사람', people), *block('함께 나온 키워드', kws), *block('자료', refs),
+    ]), className='mb-3')
+
+
+def _graph_section(g: dict | None):
+    """아래 — 검색어는 없지만 찾은 기록과 같은 업무·사람·키워드로 이어진 기록 (이유와 함께)."""
+    if not g or not g['related']:
+        return None
+    return html.Div([
+        html.H6([html.I(className='bi bi-diagram-3 me-1'), '연결로 찾은 기록',
+                 html.Span(' — 검색어는 없지만 찾은 기록과 같은 업무·사람·키워드로 이어진 것', className='small text-muted fw-normal')],
+                className='mt-4 mb-2'),
+        dbc.ListGroup([html.Div([
+            html.Div([dbc.Badge(w, color='light', text_color='dark', className='border me-1') for w in h['why'][:3]],
+                     className='mb-1'),
+            ui.history_card(h, show_task=True, actions=False)], className='mb-1') for h in g['related']]),
+    ])
 
 
 def _semantic(q: str, filters: dict, shown: set[int], docs: list[dict]):
