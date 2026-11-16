@@ -11,7 +11,7 @@ dash.register_page(__name__, path='/formats', name='요약 형식', title='업�
 
 def layout(**_):
     return html.Div([
-        ui.page_head('요약 형식', 'AI 가 정리할 때 채울 칸 — 기록 유형·문서 종류마다'),
+        ui.settings_tabs('/formats'), ui.page_head('요약 형식', 'AI 가 정리할 때 채울 칸 — 기록 유형·문서 종류마다'),
         dbc.Alert([
             html.Div('형식을 정해 두면 AI 정리 때 요약 글과 함께 그 칸을 채워, 기록 카드와 문서 요약에 칸별로 보여 줍니다.'),
             html.Ul([

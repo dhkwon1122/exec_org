@@ -168,8 +168,3 @@ def _register_template(prefix: str):
         if not n or (content or '').strip():  # 이미 쓴 내용(붙여넣은 원문)은 덮어쓰지 않는다
             return no_update
         return TEMPLATES.get(etype, '') or no_update
-
-
-for _prefix, _extra in (('h', 'h-also'), ('pp', 'pp-task'), ('qr', 'qr-task')):
-    drafts.register(_prefix, [f'{_prefix}-content', f'{_prefix}-type', f'{_prefix}-when',
-        f'{_prefix}-people', f'{_prefix}-links', f'{_prefix}-ai', _extra])

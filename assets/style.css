@@ -450,3 +450,16 @@ body {
 .report-preview h2 { font-size: 1.15rem; margin: 24px 0 12px; }
 .draft-widget .btn { min-height: 36px; }
 @media (max-width: 767.98px) { .draft-widget .btn, #fu-results .btn { min-height: 44px; } }
+
+/* 주메뉴는 영역별로, 각 영역의 하위 화면은 같은 탭으로 이동한다. */
+.section-tabs { gap: 4px; flex-wrap: wrap; margin-bottom: 20px; padding-bottom: 10px; border-bottom: 1px solid var(--app-border); }
+.section-tabs .nav-link { padding: 6px 13px; font-size: .9rem; color: #3f4450; border-radius: 7px; }
+.section-tabs .nav-link.active { background: var(--app-accent); color: white; }
+.nav-utilities { border-top: 1px solid var(--app-border); padding-top: 12px; }
+#ms-categories { overflow-x: auto; }
+.digest-preview { border-radius: 8px; }
+@media (max-width: 767.98px) { .section-tabs .nav-link { min-height: 44px; display: flex; align-items: center; } }
+
+.work-control { display: flex; }
+/* 드롭다운의 투명한 키보드 포커스 입력이 좁은 칸의 너비를 넘기지 않게 한다. */
+.dash-dropdown-wrapper > .dash-dropdown-focus-target { width: 1px; height: 1px; padding: 0; border: 0; }

@@ -9,7 +9,7 @@ dash.register_page(__name__, path='/bookmarks', name='북마크', title='업무 
 
 
 def layout(**_):
-    return html.Div([ui.page_head('북마크', '내가 저장한 기록'),
+    return html.Div([ui.find_tabs('/bookmarks'), ui.page_head('북마크', '내가 저장한 기록'),
         dbc.Input(id='bookmarks-q', type='search', debounce=True, placeholder='저장한 기록 검색', className='mb-3'),
         html.Div(id='bookmarks-results')])
 

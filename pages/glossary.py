@@ -20,7 +20,7 @@ def _rows(terms: list[dict]) -> list[dict]:
 def layout(**_):
     cell = {'textAlign': 'left', 'whiteSpace': 'normal', 'height': 'auto', 'fontSize': '0.85rem', 'padding': '6px'}
     return html.Div([
-        ui.page_head('용어집', '같은 것을 여러 이름으로 부르는 사내 용어 — 사람은 임원 별칭에'),
+        ui.settings_tabs('/glossary'), ui.page_head('용어집', '같은 것을 여러 이름으로 부르는 사내 용어 — 사람은 임원 별칭에'),
         dbc.Alert([
             html.Div('여기 적은 같은 말은 세 곳에 쓰입니다.'),
             html.Ul([

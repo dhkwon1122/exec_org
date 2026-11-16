@@ -1,5 +1,5 @@
 """이력 검색 — 원문·AI 요약·키워드·업무명을 한 번에 찾는다. 메일 첨부 문서(파일 이름·요약·태그·본문)도 함께.
-임베딩 서버가 있으면(services/embed.py) '의미 검색'으로 글자는 달라도 뜻이 가까운 이력·문서·자료를 아래에 덧붙인다.
+직접 일치·의미·연결 검색 결과는 찾은 이유를 붙여 하나의 기록 목록에서 보여 준다.
 
 검색어를 공백으로 여러 개 넣으면 모두 포함된 이력만(AND), "따옴표"로 묶으면 한 덩어리로 찾는다.
 키워드 칩(#키워드)을 누르면 /search?q=키워드 로 바로 검색된다.
@@ -129,27 +129,39 @@ def search(q, types, person_id, author, date_from, date_to, include_auto, semant
             sem_note = dbc.Alert(f'의미 검색을 하지 못했습니다 — {e}', color='warning', className='small py-1 px-2')
     if not rows and not docs and not similar and not sim_docs and not sim_refs:
         return [sem_note, dbc.Alert('조건에 맞는 이력이 없습니다.', color='light')], '', *ui.pager_state(0), None, None, None
-    shown, page = ui.page_of(rows, page)
-    label = f'{len(rows)}건' + (' (최대 200건까지)' if len(rows) >= 200 else '') + ui.page_note(len(rows), page)
-    if docs:
-        label += f' · 첨부 문서 {len(docs)}건'
-    if extra:
-        label += f" · 용어집의 같은 말로도 찾음: {', '.join(extra)}"
-    terms = terms + extra  # 같은 말도 강조
-    if used_sem and sem_note is None and not (similar or sim_docs or sim_refs):
-        label += ' · 의미 검색: 더 찾은 기록 없음'
-    if similar or sim_docs or sim_refs:
-        label += f' · 뜻이 비슷한 이력 {len(similar)}건' + (f', 문서·자료 {len(sim_docs) + len(sim_refs)}건'
-                                                       if sim_docs or sim_refs else '')
-    cards = dbc.ListGroup([ui.history_card(h, terms=terms, show_task=True, actions=False) for h in shown])
+    terms = terms + extra
     g = None
-    if graph_on and terms and (rows or similar):  # 찾은 기록에서 연결을 따라가 넓힌다 (services/graph.py)
+    if graph_on and terms and (rows or similar):
         g = graph.expand(graph.seed_weights([h['id'] for h in rows], [(h['id'], h['score']) for h in similar]),
                          terms=terms, filters=filters)
-        if g['related']:
-            label += f" · 연결로 찾은 기록 {len(g['related'])}건"
-    return ([sem_note, _docs_card(docs) if docs else None, cards], label, *ui.pager_state(len(rows)),
-            _similar_section(similar, sim_docs, sim_refs), _graph_section(g), _graph_side(g))
+    combined = merge_results(rows, similar, g['related'] if g else [])
+    shown, page = ui.page_of(combined, page)
+    label = f"기록 {len(combined)}건 · 직접 일치 {len(rows)} · 의미 {len(similar)} · 연결 {len(g['related']) if g else 0}"
+    if len(rows) >= 200:
+        label += ' (직접 일치 최대 200건)'
+    label += ui.page_note(len(combined), page)
+    if docs or sim_docs or sim_refs:
+        label += f' · 문서·자료 {len(docs) + len(sim_docs) + len(sim_refs)}건'
+    if extra:
+        label += f" · 용어집의 같은 말: {', '.join(extra)}"
+    cards = dbc.ListGroup([html.Div([
+        html.Div([dbc.Badge(reason, color='light', text_color='dark', className='border me-1')
+                  for reason in h['match_reasons']], className='small mb-1'),
+        ui.history_card(h, terms=terms, show_task=True, actions=False),
+    ], className='mb-2') for h in shown])
+    return ([sem_note, _docs_card(docs) if docs else None, cards], label, *ui.pager_state(len(combined)),
+            _similar_section([], sim_docs, sim_refs), None, _graph_side(g))
+
+
+def merge_results(direct, semantic, related):
+    """직접 일치 → 의미 → 연결 순서. 같은 기록은 한 번만 표시하고 찾은 이유를 합친다."""
+    found = {}
+    for rows, kind in ((direct, '검색 조건 일치'), (semantic, '뜻이 비슷함'), (related, '연결된 기록')):
+        for row in rows:
+            item = found.setdefault(row['id'], {**row, 'match_reasons': []})
+            reasons = [kind] + (row.get('why', [])[:3] if kind == '연결된 기록' else [])
+            item['match_reasons'] += [reason for reason in reasons if reason not in item['match_reasons']]
+    return list(found.values())
 
 
 def _graph_side(g: dict | None):
@@ -178,21 +190,6 @@ def _graph_side(g: dict | None):
     ]), className='mb-3')
 
 
-def _graph_section(g: dict | None):
-    """아래 — 검색어는 없지만 찾은 기록과 같은 업무·사람·키워드로 이어진 기록 (이유와 함께)."""
-    if not g or not g['related']:
-        return None
-    return html.Div([
-        html.H6([html.I(className='bi bi-diagram-3 me-1'), '연결로 찾은 기록',
-                 html.Span(' — 검색어는 없지만 찾은 기록과 같은 업무·사람·키워드로 이어진 것', className='small text-muted fw-normal')],
-                className='mt-4 mb-2'),
-        dbc.ListGroup([html.Div([
-            html.Div([dbc.Badge(w, color='light', text_color='dark', className='border me-1') for w in h['why'][:3]],
-                     className='mb-1'),
-            ui.history_card(h, show_task=True, actions=False)], className='mb-1') for h in g['related']]),
-    ])
-
-
 def _semantic(q: str, filters: dict, shown: set[int], docs: list[dict]):
     """키워드로 이미 나온 것은 빼고, 뜻이 가까운 이력(같은 거르기 조건)·메일 첨부·참고자료."""
     hits = embed.search(q, limit=30)
@@ -218,7 +215,7 @@ def _semantic(q: str, filters: dict, shown: set[int], docs: list[dict]):
 def _similar_section(similar: list[dict], sim_docs: list[dict], sim_refs: list[dict]):
     if not similar and not sim_docs and not sim_refs:
         return None
-    parts = [html.H6([html.I(className='bi bi-stars me-1'), '뜻이 비슷한 기록',
+    parts = [html.H6([html.I(className='bi bi-stars me-1'), '뜻이 비슷한 문서·자료',
                       html.Span(' — 검색어가 그대로 들어 있지는 않은 것', className='small text-muted fw-normal')],
                      className='mt-4 mb-2')]
     if similar:

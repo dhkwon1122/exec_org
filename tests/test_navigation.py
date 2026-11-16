@@ -75,3 +75,68 @@ def test_my_view_groups_only_my_tasks_by_due_date(monkeypatch):
     assert styles[3] == hide and styles[4] == {}  # 목록 대신 내 업무
     styles = home.switch_view('list')
     assert styles[3] == {} and styles[4] == hide
+
+
+def test_six_primary_sections_and_secondary_routes():
+    import app
+    from components import ui
+    assert [label for label, *_ in app._NAV] == ['업무','사람','메일','캘린더','검색·자료','통합 보고서']
+    assert app.section_active('/task/1')[0]
+    assert app.section_active('/followups')[0]
+    assert app.section_active('/people/1')[1]
+    assert app.section_active('/leaders')[1]
+    assert app.section_active('/outbox')[2]
+    assert app.section_active('/glossary')[-1]
+    assert app._mark_find_nav('/bookmarks')
+    assert '내 업무' in _text(ui.work_tabs('mine'))
+    assert '리더급 현황' in _text(ui.people_tabs('/leaders'))
+
+
+def test_old_drafts_are_available_only_to_owner_and_migrate_links():
+    from services import drafts
+    drafts.save('kim','task:2',{'h-content':'초안', 'h-also':[3,2], 'h-people':[1], 'h-type':'회의'})
+    drafts.save('park','qr',{'qr-content':'다른 사람의 초안'})
+    drafts.save('kim','report',{'rp-text':'보고서 초안'})
+    rows = drafts.legacy_records('kim')
+    assert [r['context'] for r in rows] == ['task:2']
+    migrated = drafts.migrate_record_payload(rows[0]['context'], rows[0]['payload'])
+    assert migrated['rc-tasks'] == [2,3] and migrated['rc-people'] == [1]
+    assert migrated['rc-content'] == '초안'
+    assert drafts.get('kim','task:2')  # 원본을 임의 삭제하지 않는다
+
+
+def test_unified_search_deduplicates_and_preserves_match_reasons():
+    import app  # noqa: F401
+    from pages.search import merge_results
+    rows = merge_results([{'id':1}], [{'id':2},{'id':1}], [{'id':2,'why':['같은 사람: 김임원']},{'id':3}])
+    assert [r['id'] for r in rows] == [1,2,3]
+    assert rows[0]['match_reasons'] == ['검색 조건 일치','뜻이 비슷함']
+    assert rows[1]['match_reasons'] == ['뜻이 비슷함','연결된 기록','같은 사람: 김임원']
+
+
+def test_common_composer_keeps_context_options_with_values_and_preserves_draft(monkeypatch):
+    from types import SimpleNamespace
+    import app  # noqa: F401
+    from components import record_compose as compose
+    task = store.create_task('연결 업무')
+    person = store.create_person('김임원')
+    ref = store.add_reference(task['id'], 'link', title='선택한 자료', url='https://example.com')
+    trigger = dict(type='record-compose', task=task['id'], other=0, person=person['id'], ref=ref['id'], context='test')
+    monkeypatch.setattr(compose, 'ctx', SimpleNamespace(triggered=[{'value':1}], triggered_id=trigger))
+    values = ['', '메모', None, [], '', False, [], [], None, None, 0, 0, 0]
+    out = compose.act([1],None,None,*values)
+    assert len(out)==19 and out[1]==[task['id']] and out[2]==[person['id']] and out[3]==[ref['id']]
+    assert task['id'] in {option['value'] for option in out[16]}
+    assert ref['id'] in {option['value'] for option in out[18]}
+    values[0]='이미 작성 중인 내용'
+    kept = compose.act([1],None,None,*values)
+    assert len(kept)==19 and kept[1] is compose.no_update and kept[3] is compose.no_update
+    monkeypatch.setattr(compose, 'ctx', SimpleNamespace(triggered=[{'value':1}], triggered_id='rc-add'))
+    values[0]=''
+    invalid = compose.act([],None,1,*values)
+    assert len(invalid)==19 and invalid[11] is True
+    values[0]='새 기록';values[6]=[task['id']];values[7]=[ref['id']]
+    monkeypatch.setattr(auth,'current_name',lambda:'검토 담당')
+    saved = compose.act([],None,1,*values)
+    assert len(saved)==19 and saved[0] is False and saved[12:15]==(1,1,1)
+    assert store.list_history(task['id'])[0]['content']=='새 기록'

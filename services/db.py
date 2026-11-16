@@ -549,6 +549,31 @@ class MailAttachment(Base):
     excluded = Column(Boolean, default=False)  # 참고자료 판 이력에서 뺌 (메일·파일은 그대로)
 
 
+class MorningDigestConfig(Base):
+    __tablename__ = 'morning_digest_config'
+    id = Column(Integer, primary_key=True)
+    enabled = Column(Boolean, nullable=False, default=False)
+    recipients = Column(Text, default='')
+    send_time = Column(String(5), default='07:00')
+    timezone = Column(String(100), default='Asia/Seoul')
+    weekdays_only = Column(Boolean, default=False)
+    app_url = Column(String(1000), default='')
+    updated_by = Column(String(100), default='')
+    updated_at = Column(DateTime, default=_now, onupdate=_now)
+
+
+class MorningDigestDelivery(Base):
+    __tablename__ = 'morning_digest_deliveries'
+    day = Column(String(10), primary_key=True)  # 발송일
+    status = Column(String(20), nullable=False, default='preparing')
+    recipients = Column(Text, default='')
+    timezone = Column(String(100), default='Asia/Seoul')
+    started_at = Column(DateTime, default=_now)
+    finished_at = Column(DateTime)
+    outbound_id = Column(Integer, nullable=True)
+    error = Column(Text, default='')
+
+
 class OutboundMail(Base):
     """이 시스템에서 보낸 메일 기록 (services/outbox.py). related_kind/id: 무엇을 보냈나 — task / schedule /
     absence / mail(회신) 과 그 id(일정·부재는 기간 'YYYY-MM-DD~YYYY-MM-DD')."""

@@ -18,7 +18,7 @@ _PLAN_KINDS = [('add', '새 리더'), ('set', '바뀐 정보'), ('former', '지�
 
 def layout(**_):
     return html.Div([
-        ui.page_head('리더급 현황', '보직장·R.Master·임원 — 칸을 눌러 고치면 저장되고(과제구분 등), 불러오기를 다시 해도 유지됩니다'),
+        ui.people_tabs('/leaders'), ui.page_head('리더급 현황', '보직장·R.Master·임원 — 칸을 눌러 고치면 저장되고(과제구분 등), 불러오기를 다시 해도 유지됩니다'),
         dcc.Store(id='ld-refresh', data=0),
         dcc.Download(id='ld-download'),
         dcc.Store(id='lp-plan'),

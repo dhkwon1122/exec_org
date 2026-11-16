@@ -14,7 +14,7 @@ KIND = {'task': '업무 공유', 'schedule': '원장님 일정', 'absence': '임
 def layout(**_):
     return html.Div([
         dcc.Store(id='ob-sel'),
-        ui.page_head('보낸 메일', '업무 공유·원장님 일정·임원 부재 현황·회신'),
+        ui.mail_tabs('/outbox'), ui.page_head('보낸 메일', '업무 공유·원장님 일정·임원 부재 현황·회신'),
         html.Div(dcc.Link([html.I(className='bi bi-arrow-left me-1'), '받은 메일'], href='/inbox',
                           className='small'), className='mb-2'),
         html.Div(None if mailer.is_configured() else dbc.Alert(
