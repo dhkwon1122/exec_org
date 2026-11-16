@@ -39,6 +39,14 @@ def relabel(rows: list[dict], owner: str) -> list[dict]:
     return [label(r) for r in rows]
 
 
+def table_rows(imp: dict) -> list[dict]:
+    """가져온 메일의 일정 표. AI 가 읽은 그대로면 기존 일정과 대조해 잘못 읽은 칸을 바로잡아 보여 주고,
+    사람이 고친(또는 반영한) 표면 고친 값을 그대로 두고 상태만 다시 매긴다 — 다시 열어도 AI 값으로 돌아가지 않게."""
+    if imp.get('edited'):
+        return relabel(imp['events'], imp['owner'])
+    return [label(r) for r in schedules.preview(imp['events'], imp['owner'])]
+
+
 def editor(p: str):
     """편집 칸 (표 위에 펼침) + '일정 추가' 단추. p: 표 id."""
     opts = [{'label': '구분 없음', 'value': ''}] + [{'label': c, 'value': c} for c in schedules.CATEGORIES]

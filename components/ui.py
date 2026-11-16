@@ -50,7 +50,8 @@ def people_tabs(active):
 
 
 def mail_tabs(active):
-    return section_tabs([('/inbox', '받은 메일', '/inbox'), ('/outbox', '보낸 메일', '/outbox')], active)
+    return section_tabs([('/inbox', '받은 메일', '/inbox'), ('/mail-series', '정기 메일', '/mail-series'),
+                         ('/outbox', '보낸 메일', '/outbox')], active)
 
 
 def settings_tabs(active):

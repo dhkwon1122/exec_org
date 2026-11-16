@@ -5,8 +5,8 @@ import dash_bootstrap_components as dbc
 from dash import ALL, Input, Output, State, callback, clientside_callback, ctx, dash_table, dcc, html, no_update
 
 from components import absence_ui, doc_ui, sched_edit, ui
-from services import (absences, auth, db, doc_versions, doc_worker, llm, mail_categories, mail_threads, mailbox,
-                      outbox, schedules, store)
+from services import (absences, auth, db, doc_versions, doc_worker, llm, mail_categories, mail_series, mail_threads,
+                      mailbox, outbox, schedules, store)
 
 dash.register_page(__name__, path='/inbox', name='받은 메일', title='업무 기록 · 받은 메일')
 
@@ -132,6 +132,7 @@ def layout(mail=None, **_):
                                            size='sm', color='secondary', outline=True), md=4),
                     ], className='g-2 mb-1'),
                     html.Div(id='ib-parent-hint', className='small mb-2'),
+                    html.Div(id='ib-tasks-edited'),
                     dash_table.DataTable(id='ib-tasks', editable=True, row_deletable=True, data=[],
                                          columns=[{'name': '업무', 'id': 'title'}, {'name': '기한(YYYY-MM-DD)', 'id': 'due'},
                                                   {'name': '담당 (쉼표로 여러 명)', 'id': 'assignee'}],
@@ -179,6 +180,7 @@ def layout(mail=None, **_):
                     html.H6([html.I(className='bi bi-person-dash me-1'), '임원 부재',
                              html.Span(id='ib-abs-done', className='ms-2')], className='mt-3'),
                     html.Div(id='ib-abs-note', className='small text-muted mb-1'),
+                    html.Div(id='ib-abs-edited'),
                     dash_table.DataTable(id='ib-abs', editable=True, row_deletable=True, data=[],
                                          columns=absence_ui.TABLE_COLUMNS,
                                          style_table={'overflowX': 'auto'}, style_cell={**cell, 'fontSize': '0.8rem'},
@@ -198,6 +200,7 @@ def layout(mail=None, **_):
                 html.Div(id='ib-person-box', style={'display': 'none'}, children=[
                     html.H6([html.I(className='bi bi-person-gear me-1'), '임원 정보 변경',
                              html.Span(id='ib-person-done', className='ms-2')], className='mt-3'),
+                    html.Div(id='ib-person-edited'),
                     dash_table.DataTable(id='ib-person', editable=True, row_deletable=True, data=[],
                                          columns=[{'name': '상태', 'id': 'state_label', 'editable': False},
                                                   {'name': '임원', 'id': 'person'}, {'name': '항목', 'id': 'field'},
@@ -439,6 +442,7 @@ def render_detail(sel, _, _new=None):
                   dbc.Badge(kind[0], color=kind[1], className='me-2') if kind else None,
                   html.Span(m['reason'], className='small')]),
         html.Div(['연결된 업무: ', *links], className='small mt-1') if links else None,
+        _series_line(m),
         html.Div([
             html.Span([html.I(className='bi bi-tags me-1'), '분류'], className='small text-muted me-2'),
             dbc.Select(id={'type': 'ib-cat-sel', 'id': m['id']}, size='sm', style={'width': '160px'},
@@ -463,7 +467,7 @@ def render_detail(sel, _, _new=None):
         imp = schedules.get_import(m['schedule_import_id'])
         owner = imp['owner'] if imp else None
         if imp and imp['status'] == 'done':
-            sched_rows = [sched_edit.label(r) for r in schedules.preview(imp['events'], imp['owner'])]
+            sched_rows = sched_edit.table_rows(imp)
             note = imp['error'] or ''
         elif imp:
             note = f"일정 정리 실패: {imp['error']}"
@@ -472,11 +476,22 @@ def render_detail(sel, _, _new=None):
     moved = bool(sug.get('schedule_as_absence'))  # 일정 표를 임원 부재로 옮겼음
     if moved:
         owner = 'absence'
-    parent = sug.get('parent_task_id')
+    parent = sug['parent_choice'] if 'parent_choice' in sug else sug.get('parent_task_id')  # 사람이 고른 상위 업무가 먼저
     return (head, show if wants_task and (open_ or tasks) else hide, tasks, _task_options(), parent,
             show if show_sched else hide, sched_rows, note, show,
             show if open_ else hide, show if open_ else hide, hide if open_ else show,
             m['body'], show, _parent_hint(sug), owner, hide if moved else show, show if moved else hide)
+
+
+def _series_line(m: dict):
+    """정기 메일 모음에 든 메일이면 그 모음으로, 아니면 이 메일로 모음 만들기."""
+    series = mail_series.get(m['series_id']) if m.get('series_id') else None
+    if series:
+        return html.Div([html.I(className='bi bi-collection me-1'), '정기 메일 모음: ',
+                         dcc.Link(f"{series['name']} ({series['count']}통)", href=f"/mail-series?series={series['id']}")],
+                        className='small mt-1')
+    return html.Div(dcc.Link([html.I(className='bi bi-collection me-1'), '정기 메일 모음 만들기 (주간보고처럼 매번 오는 메일)'],
+                             href=f"/mail-series?new={m['id']}", className='small'), className='mt-1')
 
 
 def _parent_hint(sug: dict):
@@ -733,6 +748,51 @@ def abs_actions(_a, sel, rows, n):
            + (f", 임원을 못 찾아 건너뜀 {r['unknown']}건" if r['unknown'] else '') + '. ',
            dcc.Link('부재 달력 보기', href='/calendar?tab=absence')]
     return (n or 0) + 1, msg, True, 'success' if r['added'] else 'secondary'
+
+
+# ── 추천 표를 고친 내용 저장 (다시 그려도 AI 추천으로 돌아가지 않게) ─────────
+
+_EDIT_TABLES = (('tasks', 'ib-tasks'), ('absences', 'ib-abs'), ('person_updates', 'ib-person'))
+
+
+def _edit_note(m, key):
+    note = mailbox.edit_note(m, key) if m else ''
+    if not note:
+        return None
+    return html.Div([html.I(className='bi bi-pencil-square me-1'), note,
+                     dbc.Button('AI 추천으로 되돌리기', id={'type': 'ib-restore', 'key': key}, color='link', size='sm',
+                                className='p-0 ms-2 align-baseline')],
+                    className='small text-primary mb-1')
+
+
+@callback(*[Output(f'{table}-edited', 'children') for _, table in _EDIT_TABLES],
+          Input('ib-sel', 'data'), Input('ib-refresh', 'data'),
+          *[Input(table, 'data_timestamp') for _, table in _EDIT_TABLES],
+          *[State(table, 'data') for _, table in _EDIT_TABLES])
+def save_table_edits(sel, _n, _t1, _t2, _t3, tasks, abs_rows, person_rows):
+    """표 칸을 고치거나 줄을 지우면 바로 메일에 저장 — 다른 메일을 봤다 와도, 반영한 뒤에도 고친 내용이 남는다."""
+    if not sel:
+        return None, None, None
+    trig = ctx.triggered_id
+    rows = dict(zip([t for _, t in _EDIT_TABLES], (tasks, abs_rows, person_rows)))
+    for key, table in _EDIT_TABLES:
+        if trig == table:
+            mailbox.save_edits(sel, key, rows[table])
+    m = mailbox.get_mail(sel)
+    return tuple(_edit_note(m, key) for key, _ in _EDIT_TABLES)
+
+
+@callback(Output('ib-refresh', 'data', allow_duplicate=True), Output('ib-msg', 'children', allow_duplicate=True),
+          Output('ib-msg', 'is_open', allow_duplicate=True), Output('ib-msg', 'color', allow_duplicate=True),
+          Input({'type': 'ib-restore', 'key': ALL}, 'n_clicks'), State('ib-sel', 'data'), State('ib-refresh', 'data'),
+          prevent_initial_call=True)
+def restore_ai(_, sel, n):
+    if not sel or not isinstance(ctx.triggered_id, dict) or not ctx.triggered[0]['value']:
+        return no_update, no_update, no_update, no_update
+    key = ctx.triggered_id['key']
+    if not mailbox.restore_ai(sel, key):
+        return no_update, '되돌릴 AI 추천이 없습니다.', True, 'secondary'
+    return (n or 0) + 1, f'{mailbox.EDIT_LABELS[key]} 표를 AI 추천으로 되돌렸습니다.', True, 'info'
 
 
 # ── 항목별 처리 ──────────────────────────────────────────────────────
