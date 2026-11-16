@@ -86,6 +86,8 @@ def test_six_primary_sections_and_secondary_routes():
     assert app.section_active('/people/1')[1]
     assert app.section_active('/leaders')[1]
     assert app.section_active('/outbox')[2]
+    assert app.section_active('/mail-series')[2]
+    assert '정기 메일' in _text(ui.mail_tabs('/mail-series'))
     assert app.section_active('/glossary')[-1]
     assert app._mark_find_nav('/bookmarks')
     assert '내 업무' in _text(ui.work_tabs('mine'))

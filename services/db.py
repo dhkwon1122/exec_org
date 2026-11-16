@@ -486,6 +486,8 @@ class ScheduleImport(Base):
     events = Column(Text, default='')  # JSON 목록
     error = Column(Text, default='')
     applied_at = Column(DateTime, nullable=True)
+    # 사람이 일정 표를 고친(또는 고친 표로 반영한) 시각 — 있으면 다시 열 때 고친 값을 그대로 보여 준다
+    edited_at = Column(DateTime, nullable=True)
     created_by = Column(String(100), default='')
     created_at = Column(DateTime, default=_now)
 
@@ -502,6 +504,8 @@ class InboundMail(Base):
     in_reply_to = Column(String(1000), default='')
     references_hdr = Column(Text, default='')
     thread_key = Column(String(300), default='', index=True)
+    # 정기 메일 모음 (services/mail_series.py) — 주간보고처럼 주기적으로 오는 메일을 한곳에 쌓아 본다
+    series_id = Column(Integer, ForeignKey('mail_series.id', ondelete='SET NULL'), nullable=True, index=True)
     subject = Column(String(500), default='')
     sender = Column(String(300), default='')
     mail_date = Column(String(10), default='')
@@ -592,6 +596,20 @@ class OutboundMail(Base):
     related_kind = Column(String(20), default='', index=True)
     related_id = Column(String(50), default='', index=True)
     sent_by = Column(String(100), default='')
+    created_at = Column(DateTime, default=_now)
+
+
+class MailSeries(Base):
+    """정기 메일 모음 — 보낸 사람·제목에 글자가 들어 있는 메일(회신 제외)을 한 모음으로 쌓는다.
+    file_away 면 모음에 들어온 새 메일은 AI 처리 없이 '처리 완료'로 (확인 필요에 쌓이지 않게)."""
+    __tablename__ = 'mail_series'
+
+    id = Column(Integer, primary_key=True)
+    name = Column(String(100), nullable=False)
+    sender_pattern = Column(String(300), default='')
+    subject_pattern = Column(String(300), default='')
+    file_away = Column(Boolean, nullable=False, default=True)
+    created_by = Column(String(100), default='')
     created_at = Column(DateTime, default=_now)
 
 

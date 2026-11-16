@@ -605,6 +605,7 @@ def _import_dict(x: ScheduleImport) -> dict:
     return {'id': x.id, 'owner': owner_of(x.owner), 'name': x.name or '', 'mail_date': x.mail_date or '',
             'status': x.status or '',
             'events': events, 'error': x.error or '', 'applied': x.applied_at is not None,
+            'edited': x.edited_at is not None,
             'applied_at': x.applied_at.strftime('%Y-%m-%d %H:%M') if x.applied_at else '',
             'created_at': x.created_at.strftime('%Y-%m-%d %H:%M') if x.created_at else '',
             'raw_text': x.raw_text or ''}
@@ -715,6 +716,7 @@ def save_import_events(import_id: int, events: list[dict]) -> bool:
         if x is None or x.applied_at is not None:
             return False
         x.events = json.dumps([ev for e in events if (ev := clean_event(e))], ensure_ascii=False)
+        x.edited_at = datetime.now().replace(microsecond=0)
         s.commit()
         return True
 
@@ -927,7 +929,7 @@ def apply_events(events: list[dict], import_id: int | None = None, by: str = '',
         if import_id:
             imp = s.get(ScheduleImport, import_id)
             if imp is not None:
-                imp.applied_at = datetime.now().replace(microsecond=0)
+                imp.applied_at = imp.edited_at = datetime.now().replace(microsecond=0)
                 imp.events = json.dumps([clean_event(e) for e in events if clean_event(e)], ensure_ascii=False)
         s.flush()
     return {'added': added, 'updated': updated, 'same': same, 'skipped': skipped}

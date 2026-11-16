@@ -699,3 +699,64 @@ def test_schedule_without_owner_hint_but_executive_absence_is_absence(monkeypatc
     assert m['kind'] == 'absence' and not m['schedule_import_id'] and '임원 부재로' in m['reason']
     assert m['suggestion']['absences'][0]['person'] == '김영수'
     assert by['원장님 주간 일정']['kind'] == 'schedule'  # 제목에 원장님 — 원장님 일정 그대로
+
+
+def test_edited_suggestion_tables_survive_redraw_and_can_be_restored():
+    m = _review_mail()
+    ai_tasks = mailbox.get_mail(m['id'])['suggestion'].get('tasks') or []
+    parent = store.create_task('상위 업무')
+    edited = [{'title': '직접 고친 보고서 준비', 'due': '2026-11-20', 'assignee': '김담당'}]
+    ids = mailbox.add_tasks(m['id'], edited, parent['id'], '담당자')
+    sug = mailbox.get_mail(m['id'])['suggestion']
+    assert sug['tasks'] == edited and sug['parent_choice'] == parent['id']  # 반영한 표 그대로 남는다
+    assert sug['ai_original']['tasks'] == ai_tasks and store.get_task(ids[0])['title'] == '직접 고친 보고서 준비'
+    assert '직접 고친' in mailbox.edit_note(mailbox.get_mail(m['id']), 'tasks')
+    # 같은 표로 다시 저장하면 바뀐 것 없음, 표 칸만 고쳐도 저장(계산 칸은 버림)
+    assert not mailbox.save_edits(m['id'], 'tasks', edited)
+    assert mailbox.save_edits(m['id'], 'absences', [{'person': '김임원', 'kind': '출장', 'state': 'new',
+                                                    'state_label': '신규', 'start_date': '2026-11-20'}])
+    rows = mailbox.get_mail(m['id'])['suggestion']['absences']
+    assert rows[0]['kind'] == '출장' and 'state' not in rows[0]
+    # 되돌리기 → AI 원본, 표시도 지운다
+    assert mailbox.restore_ai(m['id'], 'tasks')
+    sug = mailbox.get_mail(m['id'])['suggestion']
+    assert sug['tasks'] == ai_tasks and 'parent_choice' not in sug and 'tasks' not in sug['edited']
+    assert not mailbox.restore_ai(m['id'], 'tasks')
+    with pytest.raises(ValueError):
+        mailbox.save_edits(m['id'], 'unknown', [])
+
+
+def test_apply_absences_and_person_updates_keep_edited_rows():
+    m = _review_mail()
+    store.create_person('김임원', position='상무')
+    mailbox.apply_person_updates(m['id'], [{'person': '김임원', 'field': '직위', 'value': '전무',
+                                            'current': '상무', 'state': 'new'}], '담당자')
+    assert mailbox.get_mail(m['id'])['suggestion']['person_updates'] == [
+        {'person': '김임원', 'field': '직위', 'value': '전무', 'reason': ''}]
+    mailbox.apply_absences(m['id'], [{'person': '김임원', 'kind': '휴가', 'start_date': '2026-11-20',
+                                      'end_date': '2026-11-21'}], '담당자')
+    assert mailbox.get_mail(m['id'])['suggestion']['absences'][0]['end_date'] == '2026-11-21'
+
+
+def test_rerunning_ai_clears_the_edited_mark(monkeypatch):
+    m = _review_mail()
+    mailbox.save_edits(m['id'], 'tasks', [{'title': '사람이 고침'}])
+    monkeypatch.setattr(mailbox, 'task_candidates', lambda *a: [{'title': 'AI 새 후보', 'due': '', 'assignee': ''}])
+    mailbox.run_actions(m['id'], ['tasks'])
+    sug = mailbox.get_mail(m['id'])['suggestion']
+    assert sug['tasks'][0]['title'] == 'AI 새 후보' and 'tasks' not in sug['edited']
+
+
+def test_edited_schedule_table_is_shown_as_edited_not_ai_corrected():
+    from components import sched_edit
+    schedules.save({'date': '2026-11-20', 'start_time': '09:00', 'title': '주간 임원회의', 'category': '회의'})
+    iid = schedules.create_import('일정 메일', '2026-11-16', '11/20 09:00 주간 임원회의')
+    with db.SessionLocal() as s:
+        s.get(db.ScheduleImport, iid).status = 'done'
+        s.commit()
+    row = {'date': '2026-11-20', 'start_time': '09:00', 'title': '주간 임원회의', 'category': '보고'}
+    schedules.save_import_events(iid, [row])
+    imp = schedules.get_import(iid)
+    assert imp['edited']
+    assert schedules.preview(imp['events'], imp['owner'])[0]['category'] == '회의'  # AI 값 바로잡기는 기존 값으로
+    assert sched_edit.table_rows(imp)[0]['category'] == '보고'  # 사람이 고친 표는 고친 값 그대로

@@ -443,7 +443,7 @@ def section_active(path):
     path = path or '/'
     return (path == '/' or path == '/followups' or path.startswith('/task/'),
             path == '/leaders' or path.startswith('/leaders/') or path.startswith('/people'),
-            path in ('/inbox', '/outbox'), path == '/calendar', path == '/reports',
+            path in ('/inbox', '/outbox', '/mail-series'), path == '/calendar', path == '/reports',
             path in ('/settings', '/glossary', '/formats'))
 
 

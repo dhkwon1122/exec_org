@@ -134,7 +134,8 @@ def _mail_dict(m: InboundMail) -> dict:
             'error': m.error or '', 'received_at': m.received_at.strftime('%Y-%m-%d %H:%M') if m.received_at else '',
             'handled_at': m.handled_at.strftime('%Y-%m-%d %H:%M') if m.handled_at else '',
             'handled_by': m.handled_by or '', 'category_id': m.category_id,
-            'category_source': m.category_source or '', 'thread_key': m.thread_key or ''}
+            'category_source': m.category_source or '', 'thread_key': m.thread_key or '',
+            'series_id': m.series_id}
 
 
 def list_mails(status: list[str] | None = None, limit: int = 200, category: int | str | None = None) -> list[dict]:
@@ -809,6 +810,12 @@ def run_actions(mail_id: int, actions: list[str], by: str = '', feedback: str = 
         done['docs'] = r['done']
         if r['skipped']:
             sug['docs_skipped'] = [f'{name} — {why}' for name, why in r['skipped']]
+    fresh = {'absence': 'absences', 'tasks': 'tasks', 'person': 'person_updates'}
+    if 'summary' in actions and 'tasks' not in actions and r['todos']:  # 요약의 할 일이 업무 후보가 됨
+        fresh['summary'] = 'tasks'
+    for a, key in fresh.items():  # 새로 분석한 표는 AI 결과가 기준 — 예전에 고친 표시는 지운다
+        if a in actions:
+            _forget_edit(sug, key)
     sug['requested'] = sorted(asked_before | set(actions), key=list(AI_ACTIONS).index)
     if redo:  # 다시 분석한 기록 — 화면에 '지난 피드백'으로
         sug['feedback'] = (sug.get('feedback') or [])[-9:] + [{
@@ -841,6 +848,76 @@ def _mark(mail_id: int, key: str, n: int, by: str, **extra) -> None:
     _update(mail_id, suggestion=sug)
 
 
+# 추천 표를 사람이 고친 내용 — 반영하거나 표를 고칠 때 저장해, 화면을 다시 그려도 AI 추천으로 돌아가지 않게 한다.
+# suggestion['ai_original'][key] 에 AI 원본을 한 번만 남겨 'AI 추천으로 되돌리기'를 할 수 있다.
+EDIT_FIELDS = {'tasks': ('title', 'due', 'assignee'),
+               'absences': ('person', 'kind', 'start_date', 'end_date', 'time_range', 'place', 'content', 'note'),
+               'person_updates': ('person', 'field', 'value', 'reason')}
+EDIT_LABELS = {'tasks': '업무 후보', 'absences': '임원 부재', 'person_updates': '임원 정보 변경'}
+_KEEP = object()
+
+
+def _clean_rows(key: str, rows: list[dict] | None) -> list[dict]:
+    fields = EDIT_FIELDS[key]
+    out = [{f: str(r.get(f) or '').strip() for f in fields} for r in rows or [] if isinstance(r, dict)]
+    return [r for r in out if any(r.values())]
+
+
+def _forget_edit(sug: dict, key: str) -> None:
+    for name in ('ai_original', 'edited'):
+        d = dict(sug.get(name) or {})
+        d.pop(key, None)
+        sug[name] = d
+    if key == 'tasks':
+        sug.pop('parent_choice', None)
+
+
+def save_edits(mail_id: int, key: str, rows: list[dict] | None, parent_id=_KEEP) -> bool:
+    """추천 표(업무 후보·임원 부재·임원 정보 변경)를 사람이 고친 대로 저장. 바뀐 게 있으면 True.
+    parent_id: 업무 후보의 상위 업무 선택 (None 이면 최상위)."""
+    if key not in EDIT_FIELDS:
+        raise ValueError('고칠 수 없는 표입니다.')
+    m = get_mail(mail_id)
+    if m is None:
+        raise ValueError('메일을 찾을 수 없습니다.')
+    sug = dict(m['suggestion'])
+    rows = _clean_rows(key, rows)
+    parent_changed = parent_id is not _KEEP and key == 'tasks' and \
+        sug.get('parent_choice', sug.get('parent_task_id')) != parent_id
+    if rows == _clean_rows(key, sug.get(key)) and not parent_changed:
+        return False
+    original = dict(sug.get('ai_original') or {})
+    original.setdefault(key, sug.get(key) or [])
+    edited = dict(sug.get('edited') or {})
+    edited[key] = datetime.now().strftime('%Y-%m-%d %H:%M')
+    sug.update({key: rows, 'ai_original': original, 'edited': edited})
+    if parent_changed:
+        sug['parent_choice'] = parent_id
+    _update(mail_id, suggestion=sug)
+    return True
+
+
+def restore_ai(mail_id: int, key: str) -> bool:
+    """고친 표를 AI 추천으로 되돌린다. 되돌렸으면 True."""
+    m = get_mail(mail_id)
+    if m is None:
+        raise ValueError('메일을 찾을 수 없습니다.')
+    sug = dict(m['suggestion'])
+    original = sug.get('ai_original') or {}
+    if key not in original:
+        return False
+    sug[key] = original[key]
+    _forget_edit(sug, key)
+    _update(mail_id, suggestion=sug)
+    return True
+
+
+def edit_note(m: dict, key: str) -> str:
+    """'직접 고친 표' 안내 글 (고친 적 없으면 '')."""
+    at = (m['suggestion'].get('edited') or {}).get(key)
+    return f'{at} 직접 고친 내용입니다 (AI 추천과 다를 수 있음).' if at else ''
+
+
 def add_tasks(mail_id: int, items: list[dict], parent_id: int | None, by: str) -> list[int]:
     """업무 후보 표 → 업무로 등록 (메일 상태는 그대로 — 다 처리했으면 '처리 완료')."""
     m = get_mail(mail_id)
@@ -848,6 +925,7 @@ def add_tasks(mail_id: int, items: list[dict], parent_id: int | None, by: str) -
         raise ValueError('메일을 찾을 수 없습니다.')
     if not any(str(it.get('title') or '').strip() for it in items or []):
         raise ValueError('등록할 업무가 없습니다 — 표에 업무 이름을 적으세요.')
+    save_edits(mail_id, 'tasks', items, parent_id)  # 등록한 표 그대로 남겨 다시 열어도 고친 내용이 보이게
     ids = create_tasks(m, items or [], parent_id, by)  # 같은 메일에서 이미 만든 제목은 건너뛴다
     if not ids:
         raise ValueError('표의 업무는 이 메일로 이미 등록했습니다.')
@@ -971,6 +1049,7 @@ def apply_person_updates(mail_id: int, rows: list[dict], by: str) -> dict:
     m = get_mail(mail_id)
     if m is None:
         raise ValueError('메일을 찾을 수 없습니다.')
+    save_edits(mail_id, 'person_updates', rows)
     changed = skipped = 0
     for r in person_update_rows(rows):
         value = str(r['value'] or '').strip()
@@ -1026,6 +1105,7 @@ def apply_absences(mail_id: int, rows: list[dict], by: str) -> dict:
     m = get_mail(mail_id)
     if m is None:
         raise ValueError('메일을 찾을 수 없습니다.')
+    save_edits(mail_id, 'absences', rows)
     r = absences.apply_rows(rows or [], by, mail_id)
     _mark(mail_id, 'absence', r['added'], by)
     return r
@@ -1121,9 +1201,21 @@ def fetch_new(connect=None, process_now: bool = True) -> dict:
                 inherit_thread_tasks(mid)
         except Exception:  # noqa: BLE001 — 스레드 때문에 메일 처리를 멈추지 않게
             log.exception('메일 스레드 연결 실패')
+    filed = set()
+    if new_ids:  # 정기 메일 모음 — 모음에 바로 넣어 두는 메일은 AI 처리 없이 '처리 완료'
+        from services import mail_series
+        for mid in new_ids:
+            try:
+                series = mail_series.assign(mid)
+            except Exception:  # noqa: BLE001 — 모음 때문에 메일 처리를 멈추지 않게
+                log.exception('정기 메일 모음 넣기 실패 %s', mid)
+                series = None
+            if series and series['file_away']:
+                filed.add(mid)
     if process_now:
         for mid in new_ids:
-            process(mid)
+            if mid not in filed:
+                process(mid)
         if new_ids:  # 1차 분류 — 새 메일을 한 번에 (실패하면 쉬는 시간에 다시)
             from services import mail_categories
             try:

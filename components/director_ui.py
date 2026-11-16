@@ -570,7 +570,7 @@ def show_preview(sel, _list, shown):
     key = [imp['id'], imp['status'], imp['applied_at']]
     if ctx.triggered_id == 'dr-imp-list' and shown == key:
         return no_update, no_update, no_update, no_update  # 목록만 다시 그려진 것 — 고치던 표는 그대로
-    rows = [sched_edit.label(r) for r in schedules.preview(imp['events'], imp['owner'])]
+    rows = sched_edit.table_rows(imp)
     counts = {k: sum(r['state'] == k for r in rows) for k in _STATE}
     head = html.Div([
         html.Span(imp['name'], className='fw-semibold me-2'),
