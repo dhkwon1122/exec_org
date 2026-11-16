@@ -24,7 +24,7 @@ def status_badge(status: str):
 
 # 사이드바 '검색·자료' 메뉴 하나로 묶은 화면들 — 화면 위 탭으로 오간다 (app.py _NAV)
 FIND_TABS = [('이력 검색', '/search', 'bi-search'), ('참고자료', '/references', 'bi-folder2'),
-             ('컨플루언스', '/confluence', 'bi-journal-text')]
+             ('컨플루언스', '/confluence', 'bi-journal-text'), ('북마크', '/bookmarks', 'bi-bookmark')]
 FIND_PATHS = tuple(href for _, href, _ in FIND_TABS)
 
 
@@ -33,6 +33,35 @@ def find_tabs(active: str):
     return dbc.Nav([dbc.NavItem(dbc.NavLink([html.I(className=f'bi {icon} me-1'), label], href=href,
                                             active=href == active))
                     for label, href, icon in FIND_TABS], pills=True, className='find-tabs mb-3')
+
+
+def section_tabs(items, active):
+    return dbc.Nav([dbc.NavLink(label, href=href, active=key == active) for key, label, href in items],
+                   pills=True, className='section-tabs mb-3 flex-wrap')
+
+
+def work_tabs(active='all'):
+    return section_tabs([('all', '전체 업무', '/'), ('mine', '내 업무', '/?view=mine'),
+                         ('followups', '후속조치', '/followups')], active)
+
+
+def people_tabs(active):
+    return section_tabs([('/people', '임원 기록', '/people'), ('/leaders', '리더급 현황', '/leaders')], active)
+
+
+def mail_tabs(active):
+    return section_tabs([('/inbox', '받은 메일', '/inbox'), ('/outbox', '보낸 메일', '/outbox')], active)
+
+
+def settings_tabs(active):
+    return section_tabs([('digest', '아침 요약 메일', '/settings'), ('mail', '메일 자동 처리', '/settings?tab=mail'),
+        ('/glossary', '용어집', '/glossary'), ('/formats', '요약 형식', '/formats')], active)
+
+
+def record_button(task=0, person=0, ref=0, other=0, context='global', label='기록 추가', **kwargs):
+    return dbc.Button([html.I(className='bi bi-plus-lg me-1'), label],
+        id={'type':'record-compose','task':task,'person':person,'ref':ref,'other':other,'context':context},
+        color='primary', **kwargs)
 
 
 def score_badge(score: float):

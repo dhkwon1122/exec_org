@@ -7,7 +7,6 @@ from dash import ALL, Input, Output, State, callback, ctx, dcc, html, no_update
 from datetime import date, timedelta
 
 from components import gantt, task_summary_ui, todo_ui, ui
-from components.history_form import decode_text_upload, history_form, register_form_callbacks, save_history
 from services import auth, store
 
 dash.register_page(__name__, path='/', name='업무', title='업무 기록 · 업무')
@@ -49,8 +48,8 @@ def layout(view: str = '', **_):
         dcc.Store(id='home-refresh', data=0),
         dcc.Location(id='home-redirect', refresh='callback-nav'),
         _new_task_modal(),
-        ui.page_head('업무', _today_label()),
-        html.A([html.I(className='bi bi-plus-lg me-1'), '기록하기'], href='#home-quick-record', className='btn btn-primary mobile-record-action'),
+        ui.page_head('업무', _today_label()), ui.work_tabs('mine' if view == 'mine' else 'all'),
+        ui.record_button(context='home-float', label='기록하기', className='mobile-record-action'),
         dbc.Row([
             dbc.Col([
                 dbc.Row([
@@ -64,15 +63,14 @@ def layout(view: str = '', **_):
                 ], className='g-2 mb-2'),
                 html.Div([
                     dbc.RadioItems(id='home-view', value='mine' if view == 'mine' else 'list', inline=True,
-                                   className='d-flex me-3',
+                                   className='work-control me-3', style={'display': 'none'} if view == 'mine' else {},
                                    inputClassName='btn-check', labelClassName='btn btn-sm btn-outline-primary me-1',
-                                   labelCheckedClassName='active', persistence=True, persistence_type='local',
+                                   labelCheckedClassName='active', persistence='work-display-v2' if view != 'mine' else False, persistence_type='local',
                                    options=[{'label': html.Span([html.I(className='bi bi-list-ul me-1'), '목록']),
                                              'value': 'list'},
                                             {'label': html.Span([html.I(className='bi bi-bar-chart-steps me-1'), '간트']),
                                              'value': 'gantt'},
-                                            {'label': html.Span([html.I(className='bi bi-person-check me-1'), '내 업무']),
-                                             'value': 'mine'}]),
+                                   ]),
                     html.Div([
                         dbc.RadioItems(id='gantt-scale', value='month', inline=True, className='d-flex me-1',
                                        inputClassName='btn-check',
@@ -87,7 +85,7 @@ def layout(view: str = '', **_):
                                        color='secondary', outline=True, title='뒤로'),
                         ], id='gantt-nav', className='me-3'),
                         dcc.Store(id='gantt-offset', data=0),
-                    ], id='gantt-controls', className='d-flex align-items-center', style={'display': 'none'}),
+                    ], id='gantt-controls', className='work-control align-items-center flex-wrap', style={'display': 'none'}),
                     html.Div([
                         html.Span('하위 업무 펼치기', className='small text-muted me-2'),
                         dbc.RadioItems(id='home-depth', value=1, inline=True, className='d-flex',
@@ -97,7 +95,7 @@ def layout(view: str = '', **_):
                                        options=[{'label': '최상위만', 'value': 0}, {'label': '1단계', 'value': 1},
                                                 {'label': '2단계', 'value': 2}, {'label': '3단계', 'value': 3},
                                                 {'label': '전체', 'value': 99}]),
-                    ], id='home-depth-box', className='d-flex align-items-center'),
+                    ], id='home-depth-box', className='work-control align-items-center flex-wrap'),
                     dbc.Switch(id='home-show-done', label='완료 업무 표시', value=True, persistence=True,
                                persistence_type='local', className='small ms-auto mb-0 me-3'),
                     dbc.Checkbox(id='tp-show-done', label='최근 7일 완료 보기', value=False,
@@ -119,16 +117,7 @@ def layout(view: str = '', **_):
                                             className='d-flex'), className='small'),
                     html.Div(id='home-todos'),
                 ], className='mb-3'),
-                dbc.Card([
-                    dbc.CardHeader([html.I(className='bi bi-lightning-charge me-1'), '빠른 기록'], className='small'),
-                    dbc.CardBody([
-                        dcc.Dropdown(id='qr-task', multi=True, className='mb-2',
-                                     placeholder='관련 업무 — 여러 업무에 걸치면 모두 (임원 동향이면 비워도 됨)'),
-                        *history_form('qr', compact=True),
-                        dbc.Alert(id='qr-ok', color='success', is_open=False, duration=5000,
-                                  className='mt-2 mb-0 py-2 small'),
-                    ]),
-                ], id='home-quick-record', className='mb-3'),
+                dbc.Card(dbc.CardBody([html.H6('빠른 기록'), html.P('업무·사람·자료를 골라 공통 작성 창에서 기록합니다.', className='small text-muted'), ui.record_button(context='home')]), className='mb-3'),
                 html.H6('최근 이력', className='text-muted'),
                 html.Div(id='recent-history'),
             ]),
@@ -272,58 +261,6 @@ def render_my_todos(_, _r):
     if not todos:
         return html.Div('급한 업무가 없습니다.', className='small text-muted p-3')
     return dbc.ListGroup([todo_ui.todo_row(t) for t in todos[:8]], flush=True)
-
-
-@callback(Output('qr-task', 'options'), Input('home-refresh', 'data'))
-def quick_task_options(_):
-    return [{'label': f"#{t['id']} {t['title']}", 'value': t['id']}
-            for t in store.list_tasks(status=['예정', '진행중', '보류'])]
-
-
-@callback(Output('qr-content', 'value', allow_duplicate=True), Input('qr-file', 'contents'),
-          State('qr-content', 'value'), prevent_initial_call=True)
-def quick_load_file(contents, current):
-    if not contents:
-        return no_update
-    text = decode_text_upload(contents)
-    return f'{current.rstrip()}\n\n{text}' if (current or '').strip() else text
-
-
-register_form_callbacks('qr')
-
-
-@callback(Output('home-refresh', 'data'), Output('qr-content', 'value'), Output('qr-when', 'value'),
-          Output('qr-links', 'value'), Output('qr-attach', 'contents'), Output('qr-attach', 'filename'),
-          Output('qr-attach-names', 'children', allow_duplicate=True),
-          Output('qr-error', 'children'), Output('qr-error', 'is_open'),
-          Output('qr-ok', 'children'), Output('qr-ok', 'is_open'), Output('qr-people', 'value'),
-          Input('qr-add', 'n_clicks'), State('qr-task', 'value'), State('qr-type', 'value'),
-          State('qr-content', 'value'), State('qr-when', 'value'), State('qr-ai', 'value'),
-          State('qr-links', 'value'), State('qr-attach', 'contents'), State('qr-attach', 'filename'),
-          State('qr-people', 'value'), State('home-refresh', 'data'), prevent_initial_call=True)
-def quick_record(_, task_ids, etype, content, when, use_ai, links, att, att_names, people, n):
-    nu = no_update
-    task_ids = [int(x) for x in ([task_ids] if isinstance(task_ids, (int, str)) else task_ids or [])]
-    try:
-        h = save_history(None, etype, content, when, use_ai, links, att, att_names, auth.current_name(), people,
-                         also_task_ids=task_ids)
-    except ValueError as e:
-        msg = str(e)
-        if not task_ids and not people:
-            msg = '업무를 고르거나, 임원 동향이면 관련 임원을 고르세요 (원문에 등록된 임원 이름이 있으면 자동 연결).'
-        return (nu,) * 7 + (msg, True, nu, False, nu)
-    n_refs = len(h['refs'])
-    task_id = h['task_id']
-    where = [f"#{t} 업무" for t in task_ids]
-    where += [p['name'] for p in h['people']]
-    msg = [f"{', '.join(where)}에 기록했습니다" + (f' (관련 자료 {n_refs}건)' if n_refs else '') + '. ']
-    if task_id:
-        msg.append(dcc.Link('업무 열기', href=f'/task/{task_id}'))
-    elif h['people']:
-        msg.append(dcc.Link('임원 기록 보기', href=f"/people/{h['people'][0]['id']}"))
-    if use_ai:
-        msg.insert(1, 'AI 요약·키워드는 잠시 후 채워집니다. ')
-    return (n or 0) + 1, '', None, '', None, None, '', '', False, msg, True, []
 
 
 @callback(Output('new-modal', 'is_open'), Output('new-parent', 'options'), Output('new-error', 'children'),

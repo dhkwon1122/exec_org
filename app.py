@@ -23,8 +23,9 @@ from services import mailbox
 from components.history_actions import history_edit_modal, history_link_modal, todo_review_modal  # 이력 수정·삭제·AI 할 일 등록 공용 콜백
 from components.mail_ui import compose_modal  # 메일 보내기 창 (화면은 'mail-draft' 에 초안을 넣어 연다)
 from components import doc_ui, ui  # doc_ui: 문서 합치기·나누기 창 (문서 카드의 단추가 연다), ui: 검색·자료 탭
-from services import auth, confluence_watch, doc_versions, doc_worker, embed, sso, store, users
+from services import auth, confluence_watch, doc_versions, doc_worker, embed, morning_digest, sso, store, users
 from components.record_tools import layout as record_tools_layout
+from components.record_compose import layout as record_compose_layout
 from services.db import DATA_DIR
 
 
@@ -311,19 +312,13 @@ def download_mail_file(att_id: int):
     return flask.send_file(path, as_attachment=True, download_name=att['filename'])
 
 
-_NAV = [  # (이름, 주소, 아이콘, 주소 맞춤 — 'find' 는 ui.FIND_PATHS 중 어디든, _mark_find_nav)
-    ('업무', '/', 'bi-check2-square', 'exact'),
-    ('후속조치', '/followups', 'bi-list-check', 'exact'),
-    ('통합 보고서', '/reports', 'bi-file-earmark-text', 'exact'),
-    ('캘린더', '/calendar', 'bi-calendar3', 'exact'),
-    ('받은 메일', '/inbox', 'bi-inbox', 'exact'),
-    ('임원', '/people', 'bi-people', 'partial'),
-    ('리더', '/leaders', 'bi-person-workspace', 'exact'),
-    ('검색·자료', '/search', 'bi-search', 'find'),  # 이력 검색·참고자료·컨플루언스 (화면 위 탭 — ui.find_tabs)
-    ('용어집', '/glossary', 'bi-book', 'exact'),
-    ('요약 형식', '/formats', 'bi-layout-text-sidebar', 'exact'),
-    ('북마크', '/bookmarks', 'bi-bookmark', 'exact'),
-    ('휴지통', '/trash', 'bi-trash3', 'exact'),
+_NAV = [
+    ('업무', '/', 'bi-check2-square', 'work'),
+    ('사람', '/people', 'bi-people', 'people'),
+    ('메일', '/inbox', 'bi-inbox', 'mail'),
+    ('캘린더', '/calendar', 'bi-calendar3', 'calendar'),
+    ('검색·자료', '/search', 'bi-search', 'find'),
+    ('통합 보고서', '/reports', 'bi-file-earmark-text', 'reports'),
 ]
 
 
@@ -356,14 +351,16 @@ def _sidebar():
             count = html.Span(n or '', id='nav-conf-count', className='nav-count hot' if n else 'nav-count',
                               title='안 본 컨플루언스 변경')
         links.append(dbc.NavLink([html.I(className=f'bi {icon}', **{'aria-hidden': 'true'}), html.Span(label), count], href=href,
-                                 active=False if active == 'find' else active,
-                                 **({'id': 'nav-find'} if active == 'find' else {})))
+                                 active=False, id=f'nav-{active}'))
     return html.Aside([
         html.A([html.Span(html.I(className='bi bi-check2'), className='app-brand-mark'), html.Span('업무 기록')],
                href='/', className='app-brand'),
         html.Button([html.I(className='bi bi-list me-1'), '메뉴'], id='nav-toggle',
                    className='btn btn-outline-secondary mobile-nav-toggle', **{'aria-label': '전체 메뉴', 'aria-expanded': 'false'}),
-        dbc.Collapse(dbc.Nav(links, vertical=True, className='app-nav'), id='nav-collapse', className='nav-collapse'),
+        dbc.Collapse([ui.record_button(context='global', className='mb-3 w-100'), dbc.Nav(links, vertical=True, className='app-nav'),
+            dbc.Nav([dbc.NavLink([html.I(className='bi bi-gear me-2'), '설정'], href='/settings', id='nav-settings'),
+                     dbc.NavLink([html.I(className='bi bi-trash3 me-2'), '휴지통'], href='/trash', active='exact')],
+                    vertical=True, className='app-nav nav-utilities mt-4')], id='nav-collapse', className='nav-collapse'),
         html.Div([
             html.Span(name[:1] or '?', className='avatar'),
             html.Span(name, className='user-name'),
@@ -377,7 +374,7 @@ def serve_layout():
     return html.Div([
         dcc.Store(id='todo-changed', data=0),  # 업무 체크/추가/삭제 시 증가 (components/todo_ui.py)
         dcc.Store(id='history-changed', data=0),  # 이력 수정/삭제 시 증가 (components/history_actions.py)
-        history_edit_modal(),
+        history_edit_modal(), record_compose_layout(),
         todo_review_modal(),
         history_link_modal(),
         dcc.Store(id='mail-draft'),
@@ -430,12 +427,25 @@ def _refresh_conf_count(*_):
 
 # POP3 받은 메일 주기 확인 (MAIL_POP3_* 설정 시, 여러 워커 중 하나만)
 mailbox.start_poller()
+morning_digest.start()
 # 사용자 입력이 한동안 없으면 요약하지 않은 첨부 문서를 백그라운드에서 요약 (DOC_SUMMARY_IDLE_MINUTES, 0 이면 끔)
 doc_worker.start()
 # 지켜보는 컨플루언스 공간·페이지의 변경 확인 (CONFLUENCE_WATCH_MINUTES, 0 이면 끔)
 confluence_watch.start()
 # 의미 검색 색인 — 이력·첨부 문서·참고자료를 임베딩 서버로 벡터화해 둔다 (EMBED_BASE_URL, 비우면 끔)
 embed.start()
+
+
+
+@callback(*[Output('nav-' + name, 'active') for name in ('work', 'people', 'mail', 'calendar', 'reports', 'settings')],
+          Input('app-url', 'pathname'))
+def section_active(path):
+    path = path or '/'
+    return (path == '/' or path == '/followups' or path.startswith('/task/'),
+            path == '/leaders' or path.startswith('/leaders/') or path.startswith('/people'),
+            path in ('/inbox', '/outbox'), path == '/calendar', path == '/reports',
+            path in ('/settings', '/glossary', '/formats'))
+
 
 if __name__ == '__main__':
     app.run(debug=os.environ.get('DASH_DEBUG', '1') == '1', host='0.0.0.0', port=int(os.environ.get('PORT', 8050)))

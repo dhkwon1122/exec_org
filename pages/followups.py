@@ -14,7 +14,7 @@ dash.register_page(__name__, path='/followups', name='후속조치', title='업�
 
 def layout(**_):
     return html.Div([
-        ui.page_head('후속조치', '기록에서 찾은 요청을 업무로 이어가세요'),
+        ui.page_head('후속조치', '기록에서 찾은 요청을 업무로 이어가세요'), ui.work_tabs('followups'),
         dbc.Row([
             dbc.Col(dbc.Input(id='fu-q', type='search', placeholder='제안·업무 제목 검색', debounce=True), md=7),
             dbc.Col(dbc.Select(id='fu-view', value='pending', options=[

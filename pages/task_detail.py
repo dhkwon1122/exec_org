@@ -6,9 +6,7 @@ import dash_bootstrap_components as dbc
 from dash import ALL, Input, Output, State, callback, ctx, dcc, html, no_update
 
 from components import doc_ui, task_summary_ui, todo_ui, ui
-from components.history_form import (decode_text_upload, history_form, register_form_callbacks, save_history,
-                                     task_options)
-from services import auth, confluence, documents, llm, mailbox, outbox, store
+from services import auth, confluence, documents, mailbox, outbox, store
 
 dash.register_page(__name__, path_template='/task/<task_id>', name='업무 상세', title='업무 기록 · 상세')
 
@@ -82,40 +80,6 @@ def _import_history_modal():
             dbc.Button([html.I(className='bi bi-link-45deg me-1'), '연결'], id='hx-save', color='primary'),
         ]),
     ], id='hx-modal', is_open=False, size='lg', scrollable=True)
-
-
-def _quick_history_modal():
-    """참고자료·연결 업무 탭에서 바로 쓰는 기록 — 자료에 대한 기록이면 그 자료가 붙고, 연결 업무면 두 업무에 걸린다."""
-    ai_on = llm.is_configured()
-    return dbc.Modal([
-        dbc.ModalHeader(dbc.ModalTitle(id='tq-title')),
-        dbc.ModalBody([
-            dcc.Store(id='tq-meta'),
-            html.Div(id='tq-hint', className='small text-muted mb-2'),
-            dbc.Row([
-                dbc.Col(dbc.Select(id='tq-type', value='메모',
-                                   options=[{'label': t, 'value': t} for t in store.ENTRY_TYPES]), md=4),
-                dbc.Col(dbc.Input(id='tq-when', type='datetime-local'), md=5),
-            ], className='g-2 mb-2'),
-            dbc.Textarea(id='tq-content', rows=6, placeholder='기록할 내용 (검토 의견, 변경 사항, 회의 결과 등)'),
-            dbc.Switch(id='tq-ai', value=ai_on, disabled=not ai_on, className='mt-2 small',
-                       label='AI 요약·키워드 생성' if ai_on else 'AI 요약·키워드 (LLM 미설정)'),
-            dbc.Alert(id='tq-error', color='danger', is_open=False, className='small py-2 mt-2 mb-0'),
-        ]),
-        dbc.ModalFooter([
-            dbc.Button('취소', id='tq-cancel', color='secondary', outline=True),
-            dbc.Button([html.I(className='bi bi-check2 me-1'), '기록'], id='tq-save', color='primary'),
-        ]),
-    ], id='tq-modal', is_open=False)
-
-
-def _history_form(tid: int):
-    form = history_form('h', draft_context=f'task:{tid}')
-    # 여러 업무에 걸친 기록이면 다른 업무도 골라 둔다 — 그 업무들의 이력에도 같이 보인다
-    form.insert(2, dcc.Dropdown(id='h-also', multi=True, options=task_options(exclude=tid), value=[],
-                                placeholder='함께 걸친 다른 업무 (여러 업무에 해당하는 기록이면 선택)',
-                                className='mb-2'))
-    return dbc.Card(dbc.CardBody(form), className='mb-3')
 
 
 def _reference_form():
@@ -225,14 +189,13 @@ def layout(task_id=None, src=None, **_):
         dcc.Location(id='td-redirect', refresh='callback-nav'),
         _edit_modal(),
         _merge_modal(),
-        _quick_history_modal(),
         _import_history_modal(),
         *_source_modals(tid, sources, src),
         html.Div(id='td-header', className='mb-3'),
         dbc.Row([
             dbc.Col([
                 dbc.Tabs([
-                    dbc.Tab([html.Details([html.Summary('기록 추가', className='composer-toggle'), _history_form(tid)], className='record-composer mb-3'),
+                    dbc.Tab([ui.record_button(task=tid, context='task', className='mb-3'),
                              html.Div(dbc.Button([html.I(className='bi bi-box-arrow-in-down me-1'), '기존 이력 연결'],
                                                  id='hx-open', color='link', size='sm', className='p-0'),
                                       className='text-end mb-1'),
@@ -340,8 +303,7 @@ def render(_, _t, _h, _d, tid):
                 if r['via'] != 'self' else None,
                 html.Span(className='me-auto'),
                 html.Span(r['created_at'], className='small text-muted me-2'),
-                dbc.Button([html.I(className='bi bi-journal-plus me-1'), '이력'], id={'type': 'r-hist', 'id': r['id']},
-                           color='link', size='sm', className='p-0 me-2', title='이 자료에 대한 기록 남기기'),
+                ui.record_button(task=tid, ref=r['id'], context='reference', label='기록', size='sm', className='me-2'),
                 dbc.Button(html.I(className='bi bi-x'), id={'type': 'r-del', 'id': r['id']}, color='link',
                            size='sm', className='text-muted p-0', title='삭제'),
             ], className='d-flex align-items-center'),
@@ -377,9 +339,7 @@ def render(_, _t, _h, _d, tid):
                 html.Span(className='me-auto'),
                 html.Span(f"함께 걸친 기록 {n}건", className='small text-muted me-2')
                 if (n := store.shared_history_count(tid, l['id'])) else None,
-                dbc.Button([html.I(className='bi bi-journal-plus me-1'), '이력'], id={'type': 'l-hist', 'id': l['id']},
-                           color='link', size='sm', className='p-0 me-2',
-                           title='두 업무에 함께 걸리는 기록 남기기'),
+                ui.record_button(task=tid, other=l['id'], context='relation', label='기록', size='sm', className='me-2'),
                 dbc.Button(html.I(className='bi bi-x'), id={'type': 'l-del', 'id': l['link_id']}, color='link',
                            size='sm', className='text-muted p-0', title='연결 해제'),
             ], className='d-flex align-items-center'),
@@ -487,39 +447,6 @@ def edit_task(n_open, _c, _s, _d, tid, title, desc, assignees, extra, tags, star
     except ValueError as e:
         return (True,) + (nu,) * 8 + (str(e), True, nu, nu, nu, nu)
     return (False,) + (nu,) * 8 + ('', False, (n or 0) + 1, nu, nu, nu)
-
-
-# ── 이력 ─────────────────────────────────────────────────────────────
-
-@callback(Output('h-content', 'value', allow_duplicate=True), Input('h-file', 'contents'),
-          State('h-content', 'value'), prevent_initial_call=True)
-def load_text_file(contents, current):
-    if not contents:
-        return no_update
-    text = decode_text_upload(contents)
-    return f'{current.rstrip()}\n\n{text}' if (current or '').strip() else text
-
-
-register_form_callbacks('h')
-
-
-@callback(Output('td-refresh', 'data', allow_duplicate=True), Output('h-content', 'value'),
-          Output('h-when', 'value'), Output('h-links', 'value'), Output('h-attach', 'contents'),
-          Output('h-attach', 'filename'), Output('h-attach-names', 'children', allow_duplicate=True),
-          Output('h-error', 'children'), Output('h-error', 'is_open'), Output('h-people', 'value'),
-          Output('h-also', 'value'),
-          Input('h-add', 'n_clicks'), State('td-id', 'data'), State('h-type', 'value'),
-          State('h-content', 'value'), State('h-when', 'value'), State('h-ai', 'value'),
-          State('h-links', 'value'), State('h-attach', 'contents'), State('h-attach', 'filename'),
-          State('h-people', 'value'), State('h-also', 'value'), State('td-refresh', 'data'),
-          prevent_initial_call=True)
-def add_history(_, tid, etype, content, when, use_ai, links, att, att_names, people, also, n):
-    try:
-        save_history(tid, etype, content, when, use_ai, links, att, att_names, auth.current_name(), people,
-                     also_task_ids=also)
-    except ValueError as e:
-        return (no_update,) * 7 + (str(e), True, no_update, no_update)
-    return (n or 0) + 1, '', None, '', None, None, '', '', False, [], []
 
 
 @callback(Output('td-refresh', 'data', allow_duplicate=True),
@@ -648,49 +575,6 @@ def mail_task(n, tid):
     if not n:  # 머리가 다시 그려질 때의 빈 트리거
         return no_update
     return outbox.draft_task(tid)
-
-
-# ── 참고자료·연결 업무에서 바로 기록 ───────────────────────────────────
-
-@callback(Output('tq-modal', 'is_open'), Output('tq-title', 'children'), Output('tq-hint', 'children'),
-          Output('tq-meta', 'data'), Output('tq-content', 'value'), Output('tq-when', 'value'),
-          Output('tq-error', 'children'), Output('tq-error', 'is_open'),
-          Output('td-refresh', 'data', allow_duplicate=True), Output('tq-type', 'value'),
-          Input({'type': 'r-hist', 'id': ALL}, 'n_clicks'), Input({'type': 'l-hist', 'id': ALL}, 'n_clicks'),
-          Input('tq-cancel', 'n_clicks'), Input('tq-save', 'n_clicks'),
-          State('td-id', 'data'), State('tq-meta', 'data'), State('tq-type', 'value'), State('tq-when', 'value'),
-          State('tq-content', 'value'), State('tq-ai', 'value'), State('td-refresh', 'data'),
-          prevent_initial_call=True)
-def quick_history(_r, _l, _c, _s, tid, meta, etype, when, content, use_ai, n):
-    nu = no_update
-    trig = ctx.triggered_id
-    if trig is None or not ctx.triggered[0]['value']:  # 목록이 다시 그려질 때의 빈 트리거
-        return (nu,) * 10
-    if trig == 'tq-cancel':
-        return False, nu, nu, nu, nu, nu, '', False, nu, nu
-    if isinstance(trig, dict) and trig['type'] == 'r-hist':
-        r = store.get_reference(trig['id'])
-        if r is None:
-            return (nu,) * 10
-        return (True, [html.I(className=f"bi {ui.REF_ICON[r['kind']]} me-2"), r['title']],
-                '이 자료에 대한 기록 — 이 업무의 이력에 남고, 기록에 이 자료가 함께 붙습니다.',
-                {'kind': 'ref', 'id': r['id']}, '', None, '', False, nu, '메모')
-    if isinstance(trig, dict) and trig['type'] == 'l-hist':
-        t = store.get_task(trig['id'])
-        if t is None:
-            return (nu,) * 10
-        return (True, [html.I(className='bi bi-diagram-2 me-2'), f"#{t['id']} {t['title']} 와 함께 기록"],
-                '두 업무에 함께 걸리는 기록 — 이 업무와 연결 업무 양쪽 이력에 보입니다.',
-                {'kind': 'link', 'id': t['id']}, '', None, '', False, nu, '메모')
-    if not meta:
-        return (nu,) * 10
-    try:
-        save_history(tid, etype, content, when, use_ai, '', None, None, auth.current_name(),
-                     also_task_ids=[meta['id']] if meta['kind'] == 'link' else None,
-                     ref_ids=[meta['id']] if meta['kind'] == 'ref' else None)
-    except ValueError as e:
-        return True, nu, nu, nu, nu, nu, str(e), True, nu, nu
-    return False, nu, nu, None, '', None, '', False, (n or 0) + 1, nu
 
 
 # ── 기존 이력 연결 ────────────────────────────────────────────────────

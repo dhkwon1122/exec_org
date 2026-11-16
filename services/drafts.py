@@ -2,7 +2,7 @@
 import json
 import uuid
 
-from sqlalchemy import delete, update
+from sqlalchemy import delete, select, update
 from sqlalchemy.exc import IntegrityError
 
 from services import db
@@ -51,3 +51,32 @@ def clear(user_id, context, expected_token):
             UserDraft.context == context, UserDraft.token == expected_token))
         if not result.rowcount:
             raise ValueError('다른 창에서 초안이 변경됐습니다. 먼저 불러오기를 선택하세요.')
+
+
+def legacy_records(user_id):
+    """이전 화면(업무·임원·홈 빠른 기록)에 남은 초안. 내용이 깨진 초안은 목록에서 빼고 나머지는 보여 준다."""
+    if not user_id:
+        return []
+    out = []
+    with db.SessionLocal() as s:
+        for r in s.scalars(select(UserDraft).where(UserDraft.user_id == user_id)
+                           .order_by(UserDraft.updated_at.desc())):
+            if not (r.context == 'qr' or r.context.startswith(('task:', 'person:'))):
+                continue
+            try:
+                payload = json.loads(r.payload)
+            except (TypeError, ValueError):
+                continue
+            if isinstance(payload, dict):
+                out.append({'context': r.context, 'token': r.token, 'payload': payload,
+                            'at': r.updated_at.strftime('%m/%d %H:%M')})
+    return out
+
+
+def migrate_record_payload(context, payload):
+    prefix = 'h' if context.startswith('task:') else 'pp' if context.startswith('person:') else 'qr'
+    tasks = payload.get({'h':'h-also','pp':'pp-task','qr':'qr-task'}[prefix]) or []
+    if context.startswith('task:'):
+        tasks = [int(context.split(':')[1]), *tasks]
+    return {**{f'rc-{key}':payload.get(f'{prefix}-{key}') for key in ('content','type','when','people','links','ai')},
+            'rc-tasks': list(dict.fromkeys(tasks)), 'rc-refs':[]}

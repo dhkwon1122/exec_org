@@ -6,7 +6,6 @@ import dash_bootstrap_components as dbc
 from dash import Input, Output, State, callback, ctx, dash_table, dcc, html, no_update
 
 from components import absence_ui, ui
-from components.history_form import decode_text_upload, history_form, register_form_callbacks, save_history
 from pages.people import person_form
 from services import absences, auth, leader_sync, leaders, llm, profile, store
 
@@ -22,7 +21,6 @@ def layout(person_id=None, **_):
         return dbc.Alert(['사람을 찾을 수 없습니다. ', dcc.Link('임원 목록으로', href='/people'), ' · ',
                           dcc.Link('리더 목록으로', href='/leaders')], color='warning')
 
-    form = history_form('pp', people_value=[pid], default_type='동향', draft_context=f'person:{pid}')
     return html.Div([
         dcc.Store(id='pp-id', data=pid),
         dcc.Store(id='pp-refresh', data=0),
@@ -88,14 +86,7 @@ def layout(person_id=None, **_):
         html.Details([html.Summary('임원 프로필 · 평가 · 경력', className='composer-toggle'), html.Div(id='pp-profile')], className='mb-3'),
         dbc.Row([
             dbc.Col([
-                html.Details([html.Summary('기록 추가', className='composer-toggle'), dbc.Card(dbc.CardBody([
-                    html.Div([html.I(className='bi bi-binoculars me-1'),
-                              '이 리더에 대해 기록' if leaders.is_leader(pid) else '이 임원에 대해 기록'],
-                             className='fw-semibold mb-2'),
-                    dcc.Dropdown(id='pp-task', multi=True, className='mb-2',
-                                 placeholder='관련 업무 — 여러 업무에 걸치면 모두 (동향이면 비워 두세요)'),
-                    *form,
-                ]), className='mt-2')], className='record-composer mb-3'),
+                ui.record_button(person=pid, context='person', className='mb-3'),
                 html.Div(id='pp-count', className='small text-muted mb-2'),
                 html.Div(id='pp-history'),
                 ui.pager('pp-hist-page'),
@@ -103,9 +94,6 @@ def layout(person_id=None, **_):
             dbc.Col(html.Div(id='pp-side'), lg=4),
         ]),
     ])
-
-
-register_form_callbacks('pp')
 
 
 @callback(Output('pp-history', 'children'), Output('pp-count', 'children'), Output('pp-hist-page', 'max_value'),
@@ -129,14 +117,14 @@ def render_history(_, _h, _t, page, pid):
 ui.scroll_to_top_on_page('pp-hist-page', 'pp-count')
 
 
-@callback(Output('pp-header', 'children'), Output('pp-side', 'children'), Output('pp-task', 'options'),
+@callback(Output('pp-header', 'children'), Output('pp-side', 'children'),
           Output('pp-pending', 'data'), Output('pp-poll', 'disabled'),
           Input('pp-refresh', 'data'), Input('history-changed', 'data'), Input('todo-changed', 'data'),
           State('pp-id', 'data'))
 def render(_, _h, _t, pid):
     p = store.get_person(pid)
     if p is None:
-        return dbc.Alert('삭제된 임원입니다.', color='warning'), None, [], [], True
+        return dbc.Alert('삭제된 임원입니다.', color='warning'), None, [], True
     leader = p['role'] == 'leader'
     header = dbc.Card(dbc.CardBody([
         html.Div([
@@ -191,9 +179,8 @@ def render(_, _h, _t, pid):
             if tasks else dbc.CardBody('없음', className='small text-muted'),
         ]),
     ]
-    task_opts = [{'label': f"#{t['id']} {t['title']}", 'value': t['id']} for t in store.list_tasks()]
     pending = sorted(h['id'] for h in hist if h['ai_status'] == 'pending')
-    return header, side, task_opts, pending, not pending
+    return header, side, pending, not pending
 
 
 def _leadership_card(pid: int):
@@ -289,33 +276,6 @@ def poll_ai(_, pid, pending, n):
     if sorted(store.pending_ai_ids(person_id=pid)) == sorted(pending or []):
         return no_update
     return (n or 0) + 1
-
-
-@callback(Output('pp-content', 'value', allow_duplicate=True), Input('pp-file', 'contents'),
-          State('pp-content', 'value'), prevent_initial_call=True)
-def load_text_file(contents, current):
-    if not contents:
-        return no_update
-    text = decode_text_upload(contents)
-    return f'{current.rstrip()}\n\n{text}' if (current or '').strip() else text
-
-
-@callback(Output('pp-refresh', 'data', allow_duplicate=True), Output('pp-content', 'value'),
-          Output('pp-when', 'value'), Output('pp-links', 'value'), Output('pp-attach', 'contents'),
-          Output('pp-attach', 'filename'), Output('pp-attach-names', 'children', allow_duplicate=True),
-          Output('pp-error', 'children'), Output('pp-error', 'is_open'), Output('pp-people', 'value'),
-          Input('pp-add', 'n_clicks'), State('pp-id', 'data'), State('pp-task', 'value'), State('pp-type', 'value'),
-          State('pp-content', 'value'), State('pp-when', 'value'), State('pp-ai', 'value'),
-          State('pp-links', 'value'), State('pp-attach', 'contents'), State('pp-attach', 'filename'),
-          State('pp-people', 'value'), State('pp-refresh', 'data'), prevent_initial_call=True)
-def add_record(_, pid, task_ids, etype, content, when, use_ai, links, att, att_names, people, n):
-    people = sorted(set(people or []) | {pid})  # 이 화면에서 쓴 기록은 항상 이 임원에게 연결
-    try:
-        save_history(None, etype, content, when, use_ai, links, att, att_names, auth.current_name(),
-                     people, also_task_ids=task_ids or [])
-    except ValueError as e:
-        return (no_update,) * 7 + (str(e), True, no_update)
-    return (n or 0) + 1, '', None, '', None, None, '', '', False, [pid]
 
 
 @callback(Output('pe-modal', 'is_open'), Output('pe-name', 'value'), Output('pe-position', 'value'),
