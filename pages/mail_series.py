@@ -47,7 +47,9 @@ def _form():
             dbc.Input(id='ms2-f-sender', placeholder='예: report@company.com (비우면 누가 보내도)', className='mb-2'),
             dbc.Checkbox(id='ms2-f-file', value=True, className='mb-1',
                          label='새로 오는 메일은 AI 처리 없이 바로 모음에 넣고 처리 완료로 (확인 필요에 쌓이지 않음)'),
-            html.Div('두 칸을 다 적으면 둘 다 맞는 메일만 모읍니다. 회신·전달(RE:/FW:)은 모으지 않습니다.',
+            dbc.Checkbox(id='ms2-f-replies', value=False, className='mb-1',
+                         label='회신·전달 메일(RE:/FW:)도 모으기 — 제목만 맞으면 모으고, 확인 필요로 남겨 둠'),
+            html.Div('두 칸을 다 적으면 둘 다 맞는 메일만 모읍니다. 회신·전달은 보내는 사람이 달라 제목 조건만 봅니다.',
                      className='small text-muted'),
             html.Div(id='ms2-f-count', className='small mt-2'),
             dbc.Alert(id='ms2-f-error', color='danger', is_open=False, className='small py-2 mt-2 mb-0'),
@@ -126,6 +128,7 @@ def render_detail(sel, _):
     cond = ' · '.join(x for x in (f"제목에 '{series['subject_pattern']}'" if series['subject_pattern'] else '',
                                   f"보낸 사람에 '{series['sender_pattern']}'" if series['sender_pattern'] else '') if x)
     cond += ' · 새 메일은 바로 처리 완료' if series['file_away'] else ' · 새 메일도 확인 필요로'
+    cond += ' · 회신·전달도 모음 (확인 필요로 남김)' if series['include_replies'] else ''
     ok = llm.is_configured()
     n_out = len(series['excluded'])
     return {}, {'display': 'none'}, series['name'], cond, not ok, None if ok else 'LLM 이 설정돼 있어야 합니다', None, \
@@ -154,7 +157,8 @@ def render_mails(sel, q, page, _):
                       dcc.Link('받은 메일에서 열기', href=f"/inbox?mail={r['id']}")], className='small text-muted mb-2'),
             html.Pre(r['body'], className='small mb-0', style={'whiteSpace': 'pre-wrap', 'maxHeight': '60vh',
                                                               'overflowY': 'auto'}),
-        ], title=f"{r['mail_date']} · {r['subject']}", item_id=str(r['id'])), start_collapsed=True,
+        ], title=f"{r['mail_date']} · " + (f"↪ {r['reply']} · " if r['reply'] else '') + r['subject'],
+            item_id=str(r['id'])), start_collapsed=True,
             className='flex-grow-1', style={'minWidth': 0}),
     ], className='d-flex align-items-start mb-1') for r in rows]
     head = html.Div(f'{total}통' + (f' · {(page - 1) * PAGE + 1}–{min(page * PAGE, total)}번째' if pages > 1 else ''),
@@ -213,32 +217,33 @@ def export(n, sel):
 
 @callback(Output('ms2-form', 'is_open'), Output('ms2-edit', 'data'), Output('ms2-f-title', 'children'),
           Output('ms2-f-name', 'value'), Output('ms2-f-subject', 'value'), Output('ms2-f-sender', 'value'),
-          Output('ms2-f-file', 'value'), Output('ms2-f-error', 'is_open'),
+          Output('ms2-f-file', 'value'), Output('ms2-f-replies', 'value'), Output('ms2-f-error', 'is_open'),
           Input('ms2-new', 'n_clicks'), Input('ms2-edit-open', 'n_clicks'), Input('ms2-f-close', 'n_clicks'),
           Input('ms2-seed', 'data'), State('ms2-sel', 'data'))
 def open_form(_n, _e, _c, seed, sel):
     trig = ctx.triggered_id
     if trig == 'ms2-f-close':
-        return False, no_update, no_update, no_update, no_update, no_update, no_update, False
+        return False, no_update, no_update, no_update, no_update, no_update, no_update, no_update, False
     if trig == 'ms2-edit-open':
         s = mail_series.get(sel)
         if s is None:
-            return (no_update,) * 8
+            return (no_update,) * 9
         return True, s['id'], f"'{s['name']}' 조건 고치기", s['name'], s['subject_pattern'], s['sender_pattern'], \
-            s['file_away'], False
+            s['file_away'], s['include_replies'], False
     if trig == 'ms2-new' or (trig == 'ms2-seed' and seed) or (trig is None and seed):
         seed = seed if trig != 'ms2-new' else None
         seed = seed or {'name': '', 'subject_pattern': '', 'sender_pattern': '', 'file_away': True}
         return True, None, '정기 메일 모음 만들기', seed['name'], seed['subject_pattern'], seed['sender_pattern'], \
-            seed['file_away'], False
-    return (no_update,) * 8
+            seed['file_away'], bool(seed.get('include_replies')), False
+    return (no_update,) * 9
 
 
-@callback(Output('ms2-f-count', 'children'), Input('ms2-f-subject', 'value'), Input('ms2-f-sender', 'value'))
-def count_preview(subject, sender):
+@callback(Output('ms2-f-count', 'children'), Input('ms2-f-subject', 'value'), Input('ms2-f-sender', 'value'),
+          Input('ms2-f-replies', 'value'))
+def count_preview(subject, sender, replies):
     if not (subject or '').strip('* ') and not (sender or '').strip('* '):
         return None
-    n = mail_series.preview_count({'subject_pattern': subject, 'sender_pattern': sender})
+    n = mail_series.preview_count({'subject_pattern': subject, 'sender_pattern': sender, 'include_replies': replies})
     return html.Span([html.I(className='bi bi-collection me-1'), f'지금까지 받은 메일 중 {n}통이 모입니다.'],
                      className='text-primary')
 
@@ -248,13 +253,13 @@ def count_preview(subject, sender):
           Output('ms2-changed', 'data'),
           Input('ms2-f-save', 'n_clicks'), State('ms2-edit', 'data'), State('ms2-f-name', 'value'),
           State('ms2-f-subject', 'value'), State('ms2-f-sender', 'value'), State('ms2-f-file', 'value'),
-          State('ms2-changed', 'data'), prevent_initial_call=True)
-def save(n, sid, name, subject, sender, file_away, changed):
+          State('ms2-f-replies', 'value'), State('ms2-changed', 'data'), prevent_initial_call=True)
+def save(n, sid, name, subject, sender, file_away, replies, changed):
     if not n:
         return (no_update,) * 5
     try:
         s = mail_series.save({'name': name, 'subject_pattern': subject, 'sender_pattern': sender,
-                              'file_away': file_away}, sid, auth.current_name())
+                              'file_away': file_away, 'include_replies': replies}, sid, auth.current_name())
     except ValueError as e:
         return no_update, str(e), True, no_update, no_update
     return False, '', False, s['id'], (changed or 0) + 1

@@ -124,3 +124,25 @@ def test_exclude_wrong_mails_stays_out_on_refill_and_can_be_undone():
     assert mail_series.include_again(s['id']) == 2 and mail_series.get(s['id'])['excluded'] == []
     with pytest.raises(ValueError):
         mail_series.exclude(12345, [1])
+
+
+def test_replies_and_forwards_collected_by_subject_and_left_for_review(monkeypatch):
+    _fetch(_raw('[주간보고] 1주차', 'r@x.com', '본문 1', 'Mon, 2 Nov 2026', '<1@x>'),
+           _raw('RE: [주간보고] 1주차', 'boss@x.com', '과제 A 일정 확인 바랍니다', 'Tue, 3 Nov 2026', '<2@x>'),
+           _raw('FW: [주간보고] 1주차', 'r@x.com', '참고로 전달', 'Tue, 3 Nov 2026', '<3@x>'))
+    base = {'name': '주간', 'subject_pattern': '[주간보고]', 'sender_pattern': 'r@x.com', 'file_away': True}
+    assert mail_series.preview_count(base) == 1  # 기본은 원래 메일만
+    assert mail_series.preview_count({**base, 'include_replies': True}) == 3  # 회신은 보낸 사람이 달라도
+    s = mail_series.save({**base, 'include_replies': True})
+    rows, total = mail_series.mails(s['id'])
+    assert total == 3 and {r['reply'] for r in rows} == {'', '회신', '전달'}
+    assert s['include_replies']
+    # 새로 온 회신은 모음에 들어가되 확인 필요로 남는다 (원래 메일은 처리 완료)
+    monkeypatch.setattr(mailbox, 'process', lambda mid: None)
+    _fetch(_raw('[주간보고] 2주차', 'r@x.com', '본문 2', 'Mon, 9 Nov 2026', '<4@x>'),
+           _raw('Re: [주간보고] 2주차', 'boss@x.com', '좋습니다', 'Tue, 10 Nov 2026', '<5@x>'))
+    new = {r['subject']: r for r in mail_series.mails(s['id'])[0]}
+    assert new['[주간보고] 2주차']['status'] == 'done' and new['Re: [주간보고] 2주차']['status'] == 'review'
+    # 회신 메일로 모음을 만들면 회신 모으기가 켜진 채로 제안
+    seed = mail_series.suggest({'subject': 'RE: [월간보고] 10월', 'sender': 'a@x.com'})
+    assert seed['include_replies'] and seed['sender_pattern'] == '' and seed['subject_pattern'] == '[월간보고]'

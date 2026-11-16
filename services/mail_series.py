@@ -1,7 +1,8 @@
 """정기 메일 모음 — 주간보고·월간 실적처럼 주기적으로 받는 메일을 한 모음으로 쌓아 두고 지난 것과 함께 본다.
 
 모음 = 이름 + 보낸 사람에 들어 있는 글자 + 제목에 들어 있는 글자 (둘 중 하나 이상, '*' 는 아무 글자).
-- 회신·전달(RE:/FW:)은 원래 보고가 아니라 모으지 않는다.
+- 회신·전달(RE:/FW:)은 기본으로 모으지 않는다. include_replies 를 켜면 제목 조건만 맞으면 모은다
+  (회신은 보통 다른 사람이 보내므로 보낸 사람 조건은 보지 않음). 회신은 할 일이 있을 수 있어 처리 완료로 두지 않는다.
 - 새 메일을 받으면 assign() 이 맞는 모음에 넣는다. file_away 면 AI 처리 없이 '처리 완료'로 둔다 (확인 필요에 안 쌓임).
 - 모음을 만들거나 조건을 바꾸면 지난 메일도 다시 모은다 (refill).
 - 잘못 모인 메일은 '모음에서 빼기'(exclude) — 메일은 그대로 두고, 다시 모을 때도 넣지 않는다.
@@ -25,10 +26,22 @@ def _pattern(text: str) -> re.Pattern | None:
     return re.compile('.*'.join(re.escape(p) for p in text.split('*')), re.IGNORECASE)
 
 
+_FORWARD = re.compile(r'^\s*(\[[^\]]{0,20}\]\s*)*(fw|fwd|전달)\s*[:：]', re.I)
+
+
+def reply_kind(subject: str) -> str:
+    """'전달' / '회신' / '' (원래 메일)."""
+    if not mail_threads.is_reply(subject or ''):
+        return ''
+    return '전달' if _FORWARD.match(subject or '') else '회신'
+
+
 def matches(series: dict, subject: str, sender: str) -> bool:
-    if mail_threads.is_reply(subject or ''):
-        return False
     subj, snd = _pattern(series['subject_pattern']), _pattern(series['sender_pattern'])
+    if mail_threads.is_reply(subject or ''):
+        if not series.get('include_replies') or subj is None:
+            return False
+        return bool(subj.search(subject or ''))  # 회신·전달은 제목만 — 보낸 사람은 대개 다르다
     if subj is None and snd is None:
         return False
     return (subj is None or bool(subj.search(subject or ''))) and (snd is None or bool(snd.search(sender or '')))
@@ -41,7 +54,8 @@ def _ids(text: str | None) -> set[int]:
 def _dict(x: MailSeries, count: int = 0, latest: str = '') -> dict:
     return {'id': x.id, 'name': x.name, 'sender_pattern': x.sender_pattern or '',
             'subject_pattern': x.subject_pattern or '', 'file_away': bool(x.file_away), 'count': count,
-            'latest': latest or '', 'excluded': sorted(_ids(x.excluded))}
+            'latest': latest or '', 'excluded': sorted(_ids(x.excluded)),
+            'include_replies': bool(x.include_replies)}
 
 
 def list_series() -> list[dict]:
@@ -62,7 +76,7 @@ def _clean(values: dict) -> dict:
     out = {'name': str(values.get('name') or '').strip()[:100],
            'sender_pattern': str(values.get('sender_pattern') or '').strip()[:300],
            'subject_pattern': str(values.get('subject_pattern') or '').strip()[:300],
-           'file_away': bool(values.get('file_away'))}
+           'file_away': bool(values.get('file_away')), 'include_replies': bool(values.get('include_replies'))}
     if not out['name']:
         raise ValueError('모음 이름을 적으세요.')
     if not out['sender_pattern'].strip('* ') and not out['subject_pattern'].strip('* '):
@@ -72,7 +86,8 @@ def _clean(values: dict) -> dict:
 
 def preview_count(values: dict) -> int:
     """이 조건이면 지금까지 받은 메일 중 몇 통이 모이는지 (저장 전 확인용)."""
-    series = {'sender_pattern': values.get('sender_pattern') or '', 'subject_pattern': values.get('subject_pattern') or ''}
+    series = {'sender_pattern': values.get('sender_pattern') or '', 'subject_pattern': values.get('subject_pattern') or '',
+              'include_replies': bool(values.get('include_replies'))}
     with db.SessionLocal() as s:
         return sum(matches(series, subj, snd) for subj, snd in s.execute(
             select(InboundMail.subject, InboundMail.sender).where(InboundMail.status != 'skipped')))
@@ -134,7 +149,7 @@ def assign(mail_id: int) -> dict | None:
         if found is None:
             return None
         m.series_id = found['id']
-        if found['file_away'] and m.status in ('review', 'failed', None, ''):
+        if found['file_away'] and m.status in ('review', 'failed', None, '') and not reply_kind(m.subject):
             m.status, m.reason = 'done', f"정기 메일 모음: {found['name']}"
             m.handled_at, m.handled_by = datetime.now().replace(microsecond=0), FILED_BY
     return found
@@ -181,7 +196,8 @@ def mails(series_id: int, query: str = '', limit: int = 30, offset: int = 0) -> 
         rows = s.scalars(stmt.order_by(InboundMail.mail_date.desc(), InboundMail.id.desc())
                          .offset(offset).limit(limit))
         return [{'id': m.id, 'subject': m.subject or '(제목 없음)', 'sender': m.sender or '',
-                 'mail_date': m.mail_date or '', 'body': m.body or '', 'status': m.status} for m in rows], total
+                 'mail_date': m.mail_date or '', 'body': m.body or '', 'status': m.status,
+                 'reply': reply_kind(m.subject)} for m in rows], total
 
 
 def suggest(mail: dict) -> dict:
@@ -196,8 +212,10 @@ def suggest(mail: dict) -> dict:
         pattern = max(words, key=len).strip() if words else subject
     addr = re.search(r'[\w.+-]+@[\w-]+(\.[\w-]+)+', mail.get('sender') or '')
     name = re.sub(r'[\[\]]', '', pattern).strip() or subject[:30]
-    return {'name': name[:100], 'subject_pattern': pattern[:300], 'sender_pattern': addr.group(0) if addr else '',
-            'file_away': True}
+    reply = bool(reply_kind(mail.get('subject') or ''))  # 회신·전달의 보낸 사람은 원래 보고를 보낸 사람이 아니다
+    return {'name': name[:100], 'subject_pattern': pattern[:300],
+            'sender_pattern': addr.group(0) if addr and not reply else '',
+            'file_away': True, 'include_replies': bool(reply_kind(mail.get('subject') or ''))}
 
 
 TREND_SYSTEM = """너는 임원조직 담당자의 비서다. 같은 정기 보고 메일(예: 주간보고)의 최근 여러 회차를 받아,
