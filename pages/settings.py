@@ -158,9 +158,10 @@ def digest_action(_s, _p, to, at, zone, weekdays, enabled, url):
     config = _config(to, at, zone, weekdays, enabled, url)
     try:
         if ctx.triggered_id == 'dg-save':
-            morning_digest.save(config, auth.current_name())
+            saved = morning_digest.save(config, auth.current_name())
             return (
-                '설정을 저장했습니다.',
+                '설정을 저장했습니다.'
+                + (f" {saved['active_from']}부터 발송합니다." if saved['enabled'] else ''),
                 True,
                 'success',
                 no_update,

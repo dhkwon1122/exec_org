@@ -54,13 +54,23 @@ def clear(user_id, context, expected_token):
 
 
 def legacy_records(user_id):
+    """이전 화면(업무·임원·홈 빠른 기록)에 남은 초안. 내용이 깨진 초안은 목록에서 빼고 나머지는 보여 준다."""
     if not user_id:
         return []
+    out = []
     with db.SessionLocal() as s:
-        return [{'context': r.context, 'token':r.token, 'payload':json.loads(r.payload),
-                 'at':r.updated_at.strftime('%m/%d %H:%M')} for r in s.scalars(select(UserDraft)
-            .where(UserDraft.user_id == user_id).order_by(UserDraft.updated_at.desc()))
-            if r.context == 'qr' or r.context.startswith(('task:', 'person:'))]
+        for r in s.scalars(select(UserDraft).where(UserDraft.user_id == user_id)
+                           .order_by(UserDraft.updated_at.desc())):
+            if not (r.context == 'qr' or r.context.startswith(('task:', 'person:'))):
+                continue
+            try:
+                payload = json.loads(r.payload)
+            except (TypeError, ValueError):
+                continue
+            if isinstance(payload, dict):
+                out.append({'context': r.context, 'token': r.token, 'payload': payload,
+                            'at': r.updated_at.strftime('%m/%d %H:%M')})
+    return out
 
 
 def migrate_record_payload(context, payload):

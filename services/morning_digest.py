@@ -23,6 +23,8 @@ from services.db import (
 log = logging.getLogger(__name__)
 _started = False
 LIMIT = 100
+# 발송 중 바뀌면 그날 발송을 멈출 설정 — 수정한 사람·시작일 같은 기록용 값은 비교하지 않는다.
+SEND_KEYS = ('enabled', 'recipients', 'send_time', 'timezone', 'weekdays_only', 'app_url')
 
 
 def settings():
@@ -36,10 +38,11 @@ def settings():
             'weekdays_only': bool(row and row.weekdays_only),
             'app_url': row.app_url if row else os.environ.get('APP_PUBLIC_URL', ''),
             'updated_by': row.updated_by if row else '',
+            'active_from': (row.active_from or '') if row else '',
         }
 
 
-def save(values, by=''):
+def save(values, by='', now=None):
     recipients, bad = outbox.parse_addrs(values.get('recipients') or '')
     if bad:
         raise ValueError('수신 주소를 확인하세요: ' + ', '.join(bad))
@@ -60,11 +63,19 @@ def save(values, by=''):
         raise ValueError(
             '서버에 메일 API 설정을 먼저 적용하세요 (.env.example의 메일 보내기).'
         )
+    now = now or datetime.now(timezone.utc)
     with db.transaction() as s:
         row = s.get(MorningDigestConfig, 1)
         if row is None:
             row = MorningDigestConfig(id=1)
             s.add(row)
+        if enabled and (
+            not row.enabled
+            or not row.active_from
+            or row.send_time != at
+            or row.timezone != zone
+        ):
+            row.active_from = _first_day(now, at, zone)
         row.enabled, row.recipients, row.send_time, row.timezone = (
             enabled,
             ', '.join(recipients),
@@ -74,6 +85,13 @@ def save(values, by=''):
         row.weekdays_only = bool(values.get('weekdays_only'))
         row.app_url, row.updated_by = app_url, by
     return settings()
+
+
+def _first_day(now, at, zone):
+    """켜거나 발송 시각을 바꾼 시점에 오늘 발송 시각이 이미 지났으면 다음 날부터 보낸다."""
+    local = now.astimezone(ZoneInfo(zone))
+    day = local.date() + timedelta(days=1 if local.strftime('%H:%M') >= at else 0)
+    return day.isoformat()
 
 
 def validate_app_url(value):
@@ -289,13 +307,11 @@ def dispatch_due(now=None):
         not config['enabled']
         or local.strftime('%H:%M') < config['send_time']
         or (config['weekdays_only'] and local.weekday() >= 5)
+        or local.date().isoformat() < config['active_from']
         or not mailer.is_configured()
     ):
         return False
-    day, utc = (
-        local.date().isoformat(),
-        now.astimezone(timezone.utc).replace(tzinfo=None),
-    )
+    day = local.date().isoformat()
     try:
         with db.transaction() as s:
             s.add(
@@ -304,7 +320,7 @@ def dispatch_due(now=None):
                     status='preparing',
                     recipients=config['recipients'],
                     timezone=config['timezone'],
-                    started_at=utc,
+                    started_at=db._now(),
                 )
             )
     except IntegrityError:
@@ -312,7 +328,7 @@ def dispatch_due(now=None):
     try:
         message = preview(local.date(), config)
         latest = settings()
-        if latest != config or not latest['enabled']:
+        if any(latest[k] != config[k] for k in SEND_KEYS) or not latest['enabled']:
             raise ValueError('요약 생성 중 발송 설정이 변경되어 발송하지 않았습니다.')
         with db.transaction() as s:
             s.execute(
@@ -353,7 +369,7 @@ def dispatch_due(now=None):
                 status=status,
                 error=error,
                 outbound_id=outbound_id,
-                finished_at=datetime.now(timezone.utc).replace(tzinfo=None),
+                finished_at=db._now(),
             )
         )
     return True
@@ -361,11 +377,8 @@ def dispatch_due(now=None):
 
 def start():
     global _started
-    if (
-        _started
-        or not mailer.is_configured()
-        or os.environ.get('MORNING_DIGEST_WORKER', '1') == '0'
-    ):
+    # 메일 설정은 서버가 켜진 뒤에 할 수도 있으니 여기서는 보지 않는다 — dispatch_due 가 매번 확인한다.
+    if _started or os.environ.get('MORNING_DIGEST_WORKER', '1') == '0':
         return False
     _started = True
 

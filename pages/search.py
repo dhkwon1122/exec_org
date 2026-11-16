@@ -145,8 +145,9 @@ def search(q, types, person_id, author, date_from, date_to, include_auto, semant
     if extra:
         label += f" · 용어집의 같은 말: {', '.join(extra)}"
     cards = dbc.ListGroup([html.Div([
-        html.Div([dbc.Badge(reason, color='light', text_color='dark', className='border me-1')
-                  for reason in h['match_reasons']], className='small mb-1'),
+        html.Div([ui.score_badge(h['similarity']) if h.get('similarity') is not None else None]
+                 + [dbc.Badge(reason, color='light', text_color='dark', className='border me-1')
+                    for reason in h['match_reasons']], className='small mb-1'),
         ui.history_card(h, terms=terms, show_task=True, actions=False),
     ], className='mb-2') for h in shown])
     return ([sem_note, _docs_card(docs) if docs else None, cards], label, *ui.pager_state(len(combined)),
@@ -161,6 +162,8 @@ def merge_results(direct, semantic, related):
             item = found.setdefault(row['id'], {**row, 'match_reasons': []})
             reasons = [kind] + (row.get('why', [])[:3] if kind == '연결된 기록' else [])
             item['match_reasons'] += [reason for reason in reasons if reason not in item['match_reasons']]
+            if kind == '뜻이 비슷함' and row.get('score') is not None:
+                item['similarity'] = row['score']  # 의미 검색 유사도 — 직접 일치로 먼저 들어온 기록에도 표시
     return list(found.values())
 
 

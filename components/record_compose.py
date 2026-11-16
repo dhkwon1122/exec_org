@@ -18,6 +18,12 @@ FIELDS = ('content', 'type', 'when', 'people', 'links', 'ai', 'tasks', 'refs')
 
 
 def layout():
+    return html.Div([_modal(), dbc.Toast(
+        id='rc-toast', header='기록 저장', icon='success', is_open=False, dismissable=True,
+        duration=6000, style={'position': 'fixed', 'bottom': 16, 'right': 16, 'zIndex': 1080})])
+
+
+def _modal():
     return dbc.Modal(
         [
             dbc.ModalHeader(dbc.ModalTitle('기록 추가')),
@@ -81,6 +87,21 @@ register_form_callbacks('rc')
 draft_ui.register('rc', [f'rc-{field}' for field in FIELDS])
 
 
+OUTS = ('open', 'tasks', 'people', 'refs', 'note', 'content', 'when', 'links', 'attach', 'attach_names',
+        'error', 'error_open', 'hn', 'tn', 'dn', 'type', 'task_opts', 'people_opts', 'ref_opts', 'toast',
+        'toast_open')
+
+
+def _out(**values):
+    return tuple(values.get(key, no_update) for key in OUTS)
+
+
+def _merge(current, new):
+    """작성 중인 초안의 대상에 새로 고른 대상을 덧붙인다 (기존 대상은 지우지 않음)."""
+    current = list(current or [])
+    return current + [x for x in new if x not in current]
+
+
 @callback(
     Output('rc-modal', 'is_open'),
     Output('rc-tasks', 'value', allow_duplicate=True),
@@ -101,6 +122,8 @@ draft_ui.register('rc', [f'rc-{field}' for field in FIELDS])
     Output('rc-tasks', 'options'),
     Output('rc-people', 'options'),
     Output('rc-refs', 'options'),
+    Output('rc-toast', 'children'),
+    Output('rc-toast', 'is_open'),
     Input(
         {
             'type': 'record-compose',
@@ -140,37 +163,27 @@ def act(
     tn,
     dn,
 ):
-    nu = no_update
     if not ctx.triggered or not ctx.triggered[0]['value']:
-        return (nu,) * 19
+        return _out()
     trigger = ctx.triggered_id
     if trigger == 'rc-close':
-        return (False,) + (nu,) * 18
+        return _out(open=False)
     if isinstance(trigger, dict):
+        new_tasks = list(dict.fromkeys(t for t in (trigger['task'], trigger['other']) if t))
+        new_people = [trigger['person']] if trigger['person'] else []
+        new_refs = [trigger['ref']] if trigger['ref'] else []
+        options = {'task_opts': task_options(), 'people_opts': people_options(), 'ref_opts': reference_options()}
         if (content or '').strip():
-            return (
-                True,
-                nu,
-                nu,
-                nu,
-                '작성 중인 초안을 이어서 엽니다. 관련 업무·사람·자료를 확인하세요.',
-                *(nu,) * 14,
-            )
-        tasks = list(dict.fromkeys(t for t in (trigger['task'], trigger['other']) if t))
-        people = [trigger['person']] if trigger['person'] else []
-        refs = [trigger['ref']] if trigger['ref'] else []
-        return (
-            True,
-            tasks,
-            people,
-            refs,
-            '선택한 대상과 연결해 기록합니다. 초안과 첨부는 저장 전에 확인하세요.',
-            *(nu,) * 10,
-            '동향' if people and not tasks else '메모',
-            task_options(),
-            people_options(),
-            reference_options(),
-        )
+            merged = {'tasks': _merge(tasks, new_tasks), 'people': _merge(people, new_people),
+                      'refs': _merge(refs, new_refs)}
+            added = merged != {'tasks': list(tasks or []), 'people': list(people or []), 'refs': list(refs or [])}
+            return _out(open=True, **merged, **options, note=(
+                '작성 중인 초안을 이어서 엽니다. 이번에 고른 대상을 관련 목록에 덧붙였습니다 — '
+                '이전 대상이 이 기록에도 맞는지 확인하고, 아니면 빼 주세요.' if added else
+                '작성 중인 초안을 이어서 엽니다. 관련 업무·사람·자료를 확인하세요.'))
+        return _out(open=True, tasks=new_tasks, people=new_people, refs=new_refs, **options,
+                    note='선택한 대상과 연결해 기록합니다. 초안과 첨부는 저장 전에 확인하세요.',
+                    type='동향' if new_people and not new_tasks else '메모')
     try:
         tasks = tasks or []
         saved = save_history(
@@ -188,28 +201,13 @@ def act(
             ref_ids=refs or [],
         )
     except ValueError as error:
-        return (True,) + (nu,) * 9 + (str(error), True, nu, nu, nu, nu, nu, nu, nu)
-    return (
-        False,
-        [],
-        [],
-        [],
-        f'기록 #{saved["id"]} 저장 완료',
-        '',
-        None,
-        '',
-        None,
-        None,
-        '',
-        False,
-        (hn or 0) + 1,
-        (tn or 0) + 1,
-        (dn or 0) + 1,
-        '메모',
-        nu,
-        nu,
-        nu,
-    )
+        return _out(open=True, error=str(error), error_open=True)
+    task_id = saved.get('task_id')
+    toast = [f'기록 #{saved["id"]} 저장 완료. ',
+             dcc.Link('업무 열기', href=f'/task/{task_id}') if task_id else None]
+    return _out(open=False, tasks=[], people=[], refs=[], note='', content='', when=None, links='',
+                attach=None, attach_names=None, error='', error_open=False, hn=(hn or 0) + 1,
+                tn=(tn or 0) + 1, dn=(dn or 0) + 1, type='메모', toast=toast, toast_open=True)
 
 
 @callback(

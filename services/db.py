@@ -559,6 +559,8 @@ class MorningDigestConfig(Base):
     weekdays_only = Column(Boolean, default=False)
     app_url = Column(String(1000), default='')
     updated_by = Column(String(100), default='')
+    # 이 날(설정 시간대의 YYYY-MM-DD)부터 발송. 발송 시각이 지난 뒤 켜거나 시각을 바꾸면 다음 날부터.
+    active_from = Column(String(10), default='')
     updated_at = Column(DateTime, default=_now, onupdate=_now)
 
 
