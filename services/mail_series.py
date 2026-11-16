@@ -4,6 +4,7 @@
 - 회신·전달(RE:/FW:)은 원래 보고가 아니라 모으지 않는다.
 - 새 메일을 받으면 assign() 이 맞는 모음에 넣는다. file_away 면 AI 처리 없이 '처리 완료'로 둔다 (확인 필요에 안 쌓임).
 - 모음을 만들거나 조건을 바꾸면 지난 메일도 다시 모은다 (refill).
+- 잘못 모인 메일은 '모음에서 빼기'(exclude) — 메일은 그대로 두고, 다시 모을 때도 넣지 않는다.
 """
 import io
 import re
@@ -33,10 +34,14 @@ def matches(series: dict, subject: str, sender: str) -> bool:
     return (subj is None or bool(subj.search(subject or ''))) and (snd is None or bool(snd.search(sender or '')))
 
 
+def _ids(text: str | None) -> set[int]:
+    return {int(t) for t in (text or '').split(',') if t.strip().isdigit()}
+
+
 def _dict(x: MailSeries, count: int = 0, latest: str = '') -> dict:
     return {'id': x.id, 'name': x.name, 'sender_pattern': x.sender_pattern or '',
             'subject_pattern': x.subject_pattern or '', 'file_away': bool(x.file_away), 'count': count,
-            'latest': latest or ''}
+            'latest': latest or '', 'excluded': sorted(_ids(x.excluded))}
 
 
 def list_series() -> list[dict]:
@@ -110,7 +115,7 @@ def refill(series_id: int) -> int:
         ids = [mid for mid, subj, snd in s.execute(
             select(InboundMail.id, InboundMail.subject, InboundMail.sender).where(
                 InboundMail.status != 'skipped', InboundMail.series_id.is_(None)))
-            if matches(series, subj, snd)]
+            if matches(series, subj, snd) and mid not in series['excluded']]
         if ids:
             s.execute(update(InboundMail).where(InboundMail.id.in_(ids)).values(series_id=series_id))
     return len(ids)
@@ -133,6 +138,35 @@ def assign(mail_id: int) -> dict | None:
             m.status, m.reason = 'done', f"정기 메일 모음: {found['name']}"
             m.handled_at, m.handled_by = datetime.now().replace(microsecond=0), FILED_BY
     return found
+
+
+def exclude(series_id: int, mail_ids: list[int]) -> int:
+    """잘못 모인 메일을 모음에서 뺀다 (메일은 받은 메일에 남음). 모음이 바로 '처리 완료'로 둔 메일은
+    '확인 필요'로 돌려 놓는다 — 모음 때문에 AI 처리를 건너뛰었으니 받은 메일에서 다시 보게. 뺀 수."""
+    ids = {int(i) for i in mail_ids or []}
+    with db.transaction() as s:
+        x = s.get(MailSeries, series_id)
+        if x is None:
+            raise ValueError('모음을 찾을 수 없습니다.')
+        mails_ = list(s.scalars(select(InboundMail).where(InboundMail.id.in_(ids or [0]),
+                                                          InboundMail.series_id == series_id)))
+        for m in mails_:
+            m.series_id = None
+            if m.handled_by == FILED_BY and m.status == 'done':
+                m.status, m.handled_at, m.handled_by = 'review', None, ''
+                m.reason = f'정기 메일 모음({x.name})에서 뺌 — 확인 필요'
+        x.excluded = ','.join(str(i) for i in sorted(_ids(x.excluded) | {m.id for m in mails_}))
+    return len(mails_)
+
+
+def include_again(series_id: int) -> int:
+    """뺀 메일을 모두 다시 받아들인다 — 조건에 맞으면 다시 모인다. 다시 모인 수."""
+    with db.transaction() as s:
+        x = s.get(MailSeries, series_id)
+        if x is None:
+            raise ValueError('모음을 찾을 수 없습니다.')
+        x.excluded = ''
+    return refill(series_id)
 
 
 def mails(series_id: int, query: str = '', limit: int = 30, offset: int = 0) -> tuple[list[dict], int]:

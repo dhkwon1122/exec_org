@@ -609,6 +609,7 @@ class MailSeries(Base):
     sender_pattern = Column(String(300), default='')
     subject_pattern = Column(String(300), default='')
     file_away = Column(Boolean, nullable=False, default=True)
+    excluded = Column(Text, default='')  # 사람이 '모음에서 빼기' 한 메일 id (쉼표) — 다시 모을 때도 넣지 않는다
     created_by = Column(String(100), default='')
     created_at = Column(DateTime, default=_now)
 

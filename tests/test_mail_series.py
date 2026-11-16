@@ -103,3 +103,24 @@ def test_trend_sends_recent_mails_oldest_first(monkeypatch):
     monkeypatch.setattr(llm, 'chat', lambda system, user: seen.setdefault('text', user) and '## 계속되는 주제')
     assert mail_series.trend(s['id']).startswith('## 계속되는')
     assert seen['text'].index('첫 주') < seen['text'].index('둘째 주')
+
+
+def test_exclude_wrong_mails_stays_out_on_refill_and_can_be_undone():
+    _fetch(_raw('[주간보고] 1주차', 'r@x.com', '본문 1', 'Mon, 2 Nov 2026', '<1@x>'),
+           _raw('[주간보고] 안내 — 양식 변경', 'r@x.com', '양식 안내', 'Mon, 2 Nov 2026', '<2@x>'))
+    s = mail_series.save({'name': '주간', 'subject_pattern': '[주간보고]', 'file_away': True})
+    rows, _ = mail_series.mails(s['id'])
+    wrong = next(r for r in rows if '양식' in r['subject'])
+    # 모음이 처리 완료로 둔 메일이라고 가정 (새로 받은 메일과 같은 상태)
+    with db.transaction() as sess:
+        m = sess.get(db.InboundMail, wrong['id'])
+        m.status, m.handled_by = 'done', mail_series.FILED_BY
+    assert mail_series.exclude(s['id'], [wrong['id'], 99999]) == 1  # 모음에 없는 id 는 무시
+    after = mailbox.get_mail(wrong['id'])
+    assert after['series_id'] is None and after['status'] == 'review' and '뺌' in after['reason']
+    assert mail_series.get(s['id'])['count'] == 1 and mail_series.get(s['id'])['excluded'] == [wrong['id']]
+    s = mail_series.save({'name': '주간', 'subject_pattern': '[주간보고]', 'file_away': True}, s['id'])
+    assert s['count'] == 1  # 조건을 다시 저장해도 뺀 메일은 다시 모으지 않는다
+    assert mail_series.include_again(s['id']) == 2 and mail_series.get(s['id'])['excluded'] == []
+    with pytest.raises(ValueError):
+        mail_series.exclude(12345, [1])
