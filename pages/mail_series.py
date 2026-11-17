@@ -4,20 +4,33 @@ import dash_bootstrap_components as dbc
 from dash import ALL, Input, Output, State, callback, ctx, dcc, html, no_update
 
 from components import ui
-from services import auth, llm, mail_series, mailbox
+from services import auth, llm, mail_series, mailbox, store, tracking
 
 dash.register_page(__name__, path='/mail-series', name='정기 메일', title='업무 기록 · 정기 메일')
 
 PAGE = 20
 
 
-def layout(new=None, series=None, **_):
-    seed = mailbox.get_mail(int(new)) if str(new or '').isdigit() else None
+def _task_options():
+    """연결할 업무 — '추적' 업무를 먼저, 그다음 진행 중인 다른 업무."""
+    rows = tracking.tracking_tasks() + [t for t in store.list_tasks(status=store.ACTIVE_STATUSES)
+                                        if t['status'] != store.TRACKING]
+    return [{'label': ('[추적] ' if t['status'] == store.TRACKING else '') + f"#{t['id']} {t['title']}",
+             'value': t['id']} for t in rows]
+
+
+def layout(new=None, series=None, task=None, **_):
+    mail = mailbox.get_mail(int(new)) if str(new or '').isdigit() else None
+    seed = mail_series.suggest(mail) if mail else None
+    t = store.get_task(int(task)) if str(task or '').isdigit() else None
+    if t:  # 업무 화면에서 '자동으로 모을 메일 조건 추가'
+        seed = {**(seed or {'name': t['title'], 'subject_pattern': '', 'sender_pattern': '', 'file_away': True,
+                            'include_replies': False}), 'task_id': t['id']}
     return html.Div([
         dcc.Store(id='ms2-sel', data=int(series) if str(series or '').isdigit() else None),
         dcc.Store(id='ms2-edit'),  # 고치는 모음 id (None 이면 새 모음)
         dcc.Store(id='ms2-changed', data=0),
-        dcc.Store(id='ms2-seed', data=mail_series.suggest(seed) if seed else None),
+        dcc.Store(id='ms2-seed', data=seed),
         dcc.Download(id='ms2-download'),
         ui.mail_tabs('/mail-series'),
         ui.page_head('정기 메일', '주간보고·월간 실적처럼 주기적으로 받는 메일을 모음으로 쌓아 지난 회차와 함께 봅니다'),
@@ -47,6 +60,11 @@ def _form():
             dbc.Input(id='ms2-f-sender', placeholder='예: report@company.com (비우면 누가 보내도)', className='mb-2'),
             dbc.Checkbox(id='ms2-f-file', value=True, className='mb-1',
                          label='새로 오는 메일은 AI 처리 없이 바로 모음에 넣고 처리 완료로 (확인 필요에 쌓이지 않음)'),
+            dbc.Label('모은 메일을 연결할 업무 (선택)', className='mt-1'),
+            dcc.Dropdown(id='ms2-f-task', placeholder='업무를 고르면 모인 메일이 그 업무 기록으로 자동 연결됩니다',
+                         className='mb-1'),
+            dbc.Checkbox(id='ms2-f-newtask', value=False, className='mb-2',
+                         label="모음 이름으로 '추적' 업무를 새로 만들어 연결 — 주기 자료를 받아 쌓고 업데이트를 지켜보는 업무"),
             dbc.Checkbox(id='ms2-f-replies', value=False, className='mb-1',
                          label='회신·전달 메일(RE:/FW:)도 모으기 — 제목만 맞으면 모으고, 확인 필요로 남겨 둠'),
             html.Div('두 칸을 다 적으면 둘 다 맞는 메일만 모읍니다. 회신·전달은 보내는 사람이 달라 제목 조건만 봅니다.',
@@ -129,6 +147,10 @@ def render_detail(sel, _):
                                   f"보낸 사람에 '{series['sender_pattern']}'" if series['sender_pattern'] else '') if x)
     cond += ' · 새 메일은 바로 처리 완료' if series['file_away'] else ' · 새 메일도 확인 필요로'
     cond += ' · 회신·전달도 모음 (확인 필요로 남김)' if series['include_replies'] else ''
+    task = store.get_task(series['task_id']) if series['task_id'] else None
+    cond = [cond, html.Div([html.I(className='bi bi-link-45deg me-1'), '모인 메일을 이 업무에 자동 연결: ',
+                            ui.task_link(task), ' ', ui.status_badge(task['status'])], className='mt-1')
+            if task else None]
     ok = llm.is_configured()
     n_out = len(series['excluded'])
     return {}, {'display': 'none'}, series['name'], cond, not ok, None if ok else 'LLM 이 설정돼 있어야 합니다', None, \
@@ -218,24 +240,26 @@ def export(n, sel):
 @callback(Output('ms2-form', 'is_open'), Output('ms2-edit', 'data'), Output('ms2-f-title', 'children'),
           Output('ms2-f-name', 'value'), Output('ms2-f-subject', 'value'), Output('ms2-f-sender', 'value'),
           Output('ms2-f-file', 'value'), Output('ms2-f-replies', 'value'), Output('ms2-f-error', 'is_open'),
+          Output('ms2-f-task', 'options'), Output('ms2-f-task', 'value'), Output('ms2-f-newtask', 'value'),
           Input('ms2-new', 'n_clicks'), Input('ms2-edit-open', 'n_clicks'), Input('ms2-f-close', 'n_clicks'),
           Input('ms2-seed', 'data'), State('ms2-sel', 'data'))
 def open_form(_n, _e, _c, seed, sel):
     trig = ctx.triggered_id
     if trig == 'ms2-f-close':
-        return False, no_update, no_update, no_update, no_update, no_update, no_update, no_update, False
+        return (False, no_update, no_update, no_update, no_update, no_update, no_update, no_update, False,
+                no_update, no_update, no_update)
     if trig == 'ms2-edit-open':
         s = mail_series.get(sel)
         if s is None:
-            return (no_update,) * 9
+            return (no_update,) * 12
         return True, s['id'], f"'{s['name']}' 조건 고치기", s['name'], s['subject_pattern'], s['sender_pattern'], \
-            s['file_away'], s['include_replies'], False
+            s['file_away'], s['include_replies'], False, _task_options(), s['task_id'], False
     if trig == 'ms2-new' or (trig == 'ms2-seed' and seed) or (trig is None and seed):
         seed = seed if trig != 'ms2-new' else None
         seed = seed or {'name': '', 'subject_pattern': '', 'sender_pattern': '', 'file_away': True}
         return True, None, '정기 메일 모음 만들기', seed['name'], seed['subject_pattern'], seed['sender_pattern'], \
-            seed['file_away'], bool(seed.get('include_replies')), False
-    return (no_update,) * 9
+            seed['file_away'], bool(seed.get('include_replies')), False, _task_options(), seed.get('task_id'), False
+    return (no_update,) * 12
 
 
 @callback(Output('ms2-f-count', 'children'), Input('ms2-f-subject', 'value'), Input('ms2-f-sender', 'value'),
@@ -253,13 +277,15 @@ def count_preview(subject, sender, replies):
           Output('ms2-changed', 'data'),
           Input('ms2-f-save', 'n_clicks'), State('ms2-edit', 'data'), State('ms2-f-name', 'value'),
           State('ms2-f-subject', 'value'), State('ms2-f-sender', 'value'), State('ms2-f-file', 'value'),
-          State('ms2-f-replies', 'value'), State('ms2-changed', 'data'), prevent_initial_call=True)
-def save(n, sid, name, subject, sender, file_away, replies, changed):
+          State('ms2-f-replies', 'value'), State('ms2-f-task', 'value'), State('ms2-f-newtask', 'value'),
+          State('ms2-changed', 'data'), prevent_initial_call=True)
+def save(n, sid, name, subject, sender, file_away, replies, task_id, new_task, changed):
     if not n:
         return (no_update,) * 5
     try:
         s = mail_series.save({'name': name, 'subject_pattern': subject, 'sender_pattern': sender,
-                              'file_away': file_away, 'include_replies': replies}, sid, auth.current_name())
+                              'file_away': file_away, 'include_replies': replies, 'task_id': task_id,
+                              'new_task': new_task}, sid, auth.current_name())
     except ValueError as e:
         return no_update, str(e), True, no_update, no_update
     return False, '', False, s['id'], (changed or 0) + 1

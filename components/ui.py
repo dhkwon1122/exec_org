@@ -8,7 +8,7 @@ import dash_bootstrap_components as dbc
 from dash import dcc, html
 from services import auth, records, store
 
-STATUS_COLOR = {'예정': 'secondary', '진행중': 'primary', '보류': 'warning', '완료': 'success'}
+STATUS_COLOR = {'예정': 'secondary', '진행중': 'primary', '보류': 'warning', '추적': 'info', '완료': 'success'}
 ENTRY_ICON = {
     '메모': 'bi-sticky', '피드백': 'bi-chat-left-quote', '동향': 'bi-binoculars', '회의': 'bi-people', '결정': 'bi-check2-square',
     '진행': 'bi-arrow-right-circle',

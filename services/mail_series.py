@@ -5,6 +5,7 @@
   (회신은 보통 다른 사람이 보내므로 보낸 사람 조건은 보지 않음). 회신은 할 일이 있을 수 있어 처리 완료로 두지 않는다.
 - 새 메일을 받으면 assign() 이 맞는 모음에 넣는다. file_away 면 AI 처리 없이 '처리 완료'로 둔다 (확인 필요에 안 쌓임).
 - 모음을 만들거나 조건을 바꾸면 지난 메일도 다시 모은다 (refill).
+- 업무(task_id, 보통 '추적' 업무)를 걸어 두면 모인 메일을 그 업무에 자동으로 연결한다 — 원문이 업무 기록으로 남는다.
 - 잘못 모인 메일은 '모음에서 빼기'(exclude) — 메일은 그대로 두고, 다시 모을 때도 넣지 않는다.
 """
 import io
@@ -55,7 +56,7 @@ def _dict(x: MailSeries, count: int = 0, latest: str = '') -> dict:
     return {'id': x.id, 'name': x.name, 'sender_pattern': x.sender_pattern or '',
             'subject_pattern': x.subject_pattern or '', 'file_away': bool(x.file_away), 'count': count,
             'latest': latest or '', 'excluded': sorted(_ids(x.excluded)),
-            'include_replies': bool(x.include_replies)}
+            'include_replies': bool(x.include_replies), 'task_id': x.task_id}
 
 
 def list_series() -> list[dict]:
@@ -77,6 +78,8 @@ def _clean(values: dict) -> dict:
            'sender_pattern': str(values.get('sender_pattern') or '').strip()[:300],
            'subject_pattern': str(values.get('subject_pattern') or '').strip()[:300],
            'file_away': bool(values.get('file_away')), 'include_replies': bool(values.get('include_replies'))}
+    task_id = values.get('task_id')
+    out['task_id'] = int(task_id) if str(task_id or '').isdigit() else None
     if not out['name']:
         raise ValueError('모음 이름을 적으세요.')
     if not out['sender_pattern'].strip('* ') and not out['subject_pattern'].strip('* '):
@@ -94,7 +97,14 @@ def preview_count(values: dict) -> int:
 
 
 def save(values: dict, series_id: int | None = None, by: str = '') -> dict:
+    """values['new_task'] 가 참이면 모음 이름으로 '추적' 업무를 새로 만들어 건다."""
+    from services import store
     data = _clean(values)
+    if values.get('new_task'):
+        data['task_id'] = store.create_task(data['name'], status=store.TRACKING,
+                                            description='주기적으로 받는 자료를 모아 업데이트를 추적합니다.')['id']
+    elif data['task_id'] and store.get_task(data['task_id']) is None:
+        raise ValueError('연결할 업무를 찾을 수 없습니다.')
     with db.transaction() as s:
         if series_id:
             x = s.get(MailSeries, series_id)
@@ -108,7 +118,40 @@ def save(values: dict, series_id: int | None = None, by: str = '') -> dict:
         s.flush()
         sid = x.id
     refill(sid)
+    link_collected(sid, by)
     return get(sid)
+
+
+def _link(mail_id: int, series: dict, by: str) -> bool:
+    """모음의 메일 한 통을 모음에 건 업무에 연결 (원문이 업무 기록으로). 새로 연결했으면 True."""
+    from services import mailbox
+    if not series.get('task_id'):
+        return False
+    try:
+        return mailbox.link_task(mail_id, series['task_id'], by or FILED_BY)
+    except ValueError:  # 업무가 지워졌으면 연결하지 않는다
+        return False
+
+
+def link_collected(series_id: int, by: str = '') -> int:
+    """모음에 든 메일을 모두 모음의 업무에 연결 — 업무를 새로 걸었을 때 지난 회차도 업무 기록으로.
+    확인 필요로 남아 있던 원래 메일은 모음이 처리 완료로 두는 설정이면 처리 완료로. 새로 연결한 수."""
+    from datetime import datetime
+    series = get(series_id)
+    if series is None or not series['task_id']:
+        return 0
+    with db.SessionLocal() as s:
+        rows = list(s.execute(select(InboundMail.id, InboundMail.subject, InboundMail.status)
+                              .where(InboundMail.series_id == series_id).order_by(InboundMail.mail_date)))
+    n = sum(_link(mid, series, by) for mid, _subj, _st in rows)
+    if series['file_away']:
+        done = [mid for mid, subj, st in rows if st in ('review', 'failed') and not reply_kind(subj)]
+        if done:
+            with db.transaction() as s:
+                s.execute(update(InboundMail).where(InboundMail.id.in_(done)).values(
+                    status='done', handled_at=datetime.now().replace(microsecond=0), handled_by=FILED_BY,
+                    reason=f"정기 메일 모음: {series['name']} — 업무에 연결"))
+    return n
 
 
 def delete(series_id: int) -> None:
@@ -152,6 +195,7 @@ def assign(mail_id: int) -> dict | None:
         if found['file_away'] and m.status in ('review', 'failed', None, '') and not reply_kind(m.subject):
             m.status, m.reason = 'done', f"정기 메일 모음: {found['name']}"
             m.handled_at, m.handled_by = datetime.now().replace(microsecond=0), FILED_BY
+    _link(mail_id, found, FILED_BY)  # 업무를 걸어 둔 모음이면 그 업무에 바로 연결
     return found
 
 

@@ -8,7 +8,7 @@ from datetime import date, timedelta
 
 from dash import html
 
-_STATUS_CLASS = {'예정': 'plan', '진행중': 'doing', '보류': 'hold', '완료': 'done'}
+_STATUS_CLASS = {'예정': 'plan', '진행중': 'doing', '보류': 'hold', '추적': 'hold', '완료': 'done'}
 MIN_DAYS = 28
 MAX_PAST_DAYS = 365  # 오래된 업무가 많아도 한 해 전부터만 (그 앞은 잘린 막대로)
 

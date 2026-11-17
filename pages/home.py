@@ -247,7 +247,7 @@ def render_mine(view, show_done, _, _r, q, statuses):
     if not sections:
         sections = [html.Div('내가 담당인 업무가 없습니다.', className='text-muted small mt-2')]
     task_opts = [{'label': f"#{t['id']} {t['title']}", 'value': t['id']}
-                 for t in store.list_tasks(status=['예정', '진행중', '보류'])]
+                 for t in store.list_tasks(status=store.ACTIVE_STATUSES)]
     # 새 업무의 담당자 기본값은 나
     return sections, todo_ui.assignee_options(), task_opts, [f'u:{me}'] if me else []
 
