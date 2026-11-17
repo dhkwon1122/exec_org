@@ -57,3 +57,34 @@ def rules(task_id: int) -> list[dict]:
 def tracking_tasks() -> list[dict]:
     """'추적' 업무 목록 — 정기 메일 모음 화면의 '연결할 업무' 고르기에 먼저 보인다."""
     return store.list_tasks(status=[store.TRACKING])
+
+
+def latest_entry(task_id: int) -> dict | None:
+    """가장 최근 업데이트 기록 (제목·날짜·id)."""
+    with db.SessionLocal() as s:
+        h = s.scalars(select(HistoryEntry).where(
+            store._history_of_task(task_id), HistoryEntry.entry_type.notin_(store.AUTO_ENTRY_TYPES))
+            .order_by(HistoryEntry.occurred_at.desc(), HistoryEntry.id.desc()).limit(1)).first()
+        if h is None:
+            return None
+        return {'id': h.id, 'title': h.title or (h.content or '')[:80],
+                'date': h.occurred_at.strftime('%Y-%m-%d') if h.occurred_at else ''}
+
+
+def overview(query: str = '', today: date | None = None) -> list[dict]:
+    """추적 자료 화면 — 추적 업무마다 상태·최근 업데이트·모으는 조건. 늦은 것 먼저, 그다음 최근 업데이트 순."""
+    rows = []
+    for t in store.list_tasks(query=query or '', status=[store.TRACKING]):
+        rows.append({'task': t, 'status': status(t['id'], today), 'latest': latest_entry(t['id']),
+                     'rules': rules(t['id'])})
+    rows.sort(key=lambda r: r['status']['last'], reverse=True)  # 최근 업데이트 순
+    rows.sort(key=lambda r: (not r['status']['late'], r['status']['last'] == ''))  # 늦은 것 먼저, 업데이트 없는 것 끝
+    return rows
+
+
+def create(title: str, by: str = '') -> dict:
+    """메일 없이 추적 업무만 만든다 (자료를 직접 기록으로 남기거나, 나중에 메일 조건을 건다)."""
+    if not (title or '').strip():
+        raise ValueError('추적할 자료 이름을 적으세요.')
+    return store.create_task(title.strip(), status=store.TRACKING,
+                             description='주기적으로 받는 자료를 모아 업데이트를 추적합니다.')

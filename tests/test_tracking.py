@@ -68,3 +68,32 @@ def test_status_without_enough_updates():
     store.add_history(t['id'], '첫 자료', '메모', occurred_at='2026-11-02 09:00')
     st = tracking.status(t['id'], today=date(2026, 11, 3))
     assert st['count'] == 1 and st['interval'] is None and not st['late']
+
+
+def test_make_task_from_existing_collection():
+    _fetch(_raw('[주간보고] 1주차', 'r@x.com', '본문', 'Mon, 2 Nov 2026', '<1@x>'))
+    s = mail_series.save({'name': '주간보고', 'subject_pattern': '[주간보고]', 'file_away': True})
+    assert s['task_id'] is None
+    task = mail_series.make_task(s['id'], '담당자')
+    assert task['status'] == store.TRACKING and mail_series.get(s['id'])['task_id'] == task['id']
+    assert len(_mail_records(task['id'])) == 1
+    with pytest.raises(ValueError, match='이미'):
+        mail_series.make_task(s['id'])
+
+
+def test_tracking_hidden_from_work_tree_and_listed_on_tracking_page():
+    work = store.create_task('일반 업무')
+    late = tracking.create('늦은 자료')
+    fresh = tracking.create('잘 오는 자료')
+    for tid, days in ((late['id'], ['2026-10-01', '2026-10-08', '2026-10-15']),
+                      (fresh['id'], ['2026-11-02', '2026-11-09', '2026-11-16'])):
+        for d in days:
+            store.add_history(tid, f'{d} 자료', '메모', occurred_at=f'{d} 09:00')
+    ids = [r['task']['id'] for r in store.task_tree(exclude=[store.TRACKING])]
+    assert work['id'] in ids and late['id'] not in ids
+    rows = tracking.overview(today=date(2026, 11, 17))
+    assert [r['task']['id'] for r in rows] == [late['id'], fresh['id']]  # 늦은 자료 먼저
+    assert rows[0]['status']['late'] and rows[1]['latest']['title'] == '2026-11-16 자료'
+    assert [r['task']['id'] for r in tracking.overview('잘 오는')] == [fresh['id']]
+    with pytest.raises(ValueError):
+        tracking.create(' ')

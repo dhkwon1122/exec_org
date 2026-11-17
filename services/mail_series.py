@@ -122,6 +122,22 @@ def save(values: dict, series_id: int | None = None, by: str = '') -> dict:
     return get(sid)
 
 
+def make_task(series_id: int, by: str = '') -> dict:
+    """모음 이름으로 '추적' 업무를 새로 만들어 걸고, 이미 모인 메일을 그 업무에 연결한다 → 업무."""
+    from services import store
+    series = get(series_id)
+    if series is None:
+        raise ValueError('모음을 찾을 수 없습니다.')
+    if series['task_id'] and store.get_task(series['task_id']):
+        raise ValueError('이미 업무가 연결된 모음입니다.')
+    task = store.create_task(series['name'], status=store.TRACKING,
+                             description='주기적으로 받는 자료를 모아 업데이트를 추적합니다.')
+    with db.transaction() as s:
+        s.get(MailSeries, series_id).task_id = task['id']
+    link_collected(series_id, by)
+    return task
+
+
 def _link(mail_id: int, series: dict, by: str) -> bool:
     """모음의 메일 한 통을 모음에 건 업무에 연결 (원문이 업무 기록으로). 새로 연결했으면 True."""
     from services import mailbox

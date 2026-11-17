@@ -168,10 +168,13 @@ def render_list(q, statuses, tag, _, depth, _t, show_done=True, view='list', sca
     if view == 'mine':  # 내 업무 보기는 render_mine 이 그린다 — 최근 이력·태그 목록만
         return None, _recent_view(), store.all_tags()
     hide_done = not show_done and '완료' not in (statuses or [])  # 상태에서 '완료'를 고르면 그대로 보인다
+    # '추적' 업무(주기 자료)는 검색·자료 > 추적 자료 화면에서 본다 — 상태에서 '추적'을 고르면 여기서도 보인다
+    hidden = [] if store.TRACKING in (statuses or []) else [store.TRACKING]
     if q or tag:  # 검색·태그는 하위 업무까지 찾아 평평하게
         tasks = store.list_tasks(query=q or '', status=statuses or None, tag=tag or '')
         if hide_done:
             tasks = [t for t in tasks if t['status'] != '완료']
+        tasks = [t for t in tasks if t['status'] not in hidden]
         titles = {t['id']: t['title'] for t in store.list_tasks()}
         progress = store.child_progress([t['id'] for t in tasks])
         rows = [_task_row(t, 0, progress.get(t['id'], (0, 0))[1], progress.get(t['id'], (0, 0))[0],
@@ -179,7 +182,8 @@ def render_list(q, statuses, tag, _, depth, _t, show_done=True, view='list', sca
         tree = [{'task': t, 'level': 0, 'n_children': progress.get(t['id'], (0, 0))[1],
                  'n_done': progress.get(t['id'], (0, 0))[0]} for t in tasks]
     else:  # 최상위 업무 아래로 고른 단계만큼 하위 업무를 펼친다
-        tree = store.task_tree(statuses or None, depth if depth is not None else 1, hide_done=hide_done)
+        tree = store.task_tree(statuses or None, depth if depth is not None else 1, hide_done=hide_done,
+                               exclude=hidden)
         rows = [_task_row(r['task'], r['level'], r['n_children'], r['n_done'], r['n_hidden']) for r in tree]
     if view == 'gantt' and tree:  # 같은 트리를 기간 막대로
         task_view = gantt.chart(tree, scale=scale or 'month', offset=offset or 0,
@@ -235,6 +239,8 @@ def render_mine(view, show_done, _, _r, q, statuses):
         todos = [t for t in todos if all(x in f"{t['title']} {t['task_title']}".lower() for x in words)]
     if statuses:
         todos = [t for t in todos if t['status'] in statuses or (t['done'] and show_done)]
+    else:  # 추적 업무는 마감이 없는 주기 자료 — 내 업무 목록에 쌓이지 않게 (추적 자료 화면에서 본다)
+        todos = [t for t in todos if t['status'] != store.TRACKING]
     sections = []
     for label, cls, pred in _MINE_GROUPS:
         items = [t for t in todos if pred(t, d, w)]

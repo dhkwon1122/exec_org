@@ -110,6 +110,9 @@ def _detail():
                        id='ms2-trend', size='sm', color='primary', outline=True, className='me-1'),
             dbc.Button([html.I(className='bi bi-file-earmark-excel me-1'), '엑셀'], id='ms2-export', size='sm',
                        color='secondary', outline=True, className='me-1'),
+            dbc.Button([html.I(className='bi bi-arrow-repeat me-1'), '추적 업무 만들기'], id='ms2-make-task', size='sm',
+                       color='info', outline=True, className='me-1', style={'display': 'none'},
+                       title="모음 이름으로 '추적' 업무를 만들고 모인 메일을 모두 그 업무 기록으로 연결합니다"),
             dbc.Button([html.I(className='bi bi-pencil me-1'), '조건'], id='ms2-edit-open', size='sm',
                        color='secondary', outline=True, className='me-1'),
             dcc.ConfirmDialogProvider(
@@ -137,12 +140,12 @@ def _detail():
 @callback(Output('ms2-detail-box', 'style'), Output('ms2-empty', 'style'), Output('ms2-name', 'children'),
           Output('ms2-cond', 'children'), Output('ms2-trend', 'disabled'), Output('ms2-trend', 'title'),
           Output('ms2-trend-out', 'children', allow_duplicate=True),
-          Output('ms2-include', 'children'), Output('ms2-include', 'style'),
+          Output('ms2-include', 'children'), Output('ms2-include', 'style'), Output('ms2-make-task', 'style'),
           Input('ms2-sel', 'data'), Input('ms2-changed', 'data'), prevent_initial_call='initial_duplicate')
 def render_detail(sel, _):
     series = mail_series.get(sel)
     if series is None:
-        return {'display': 'none'}, {}, None, None, True, None, None, None, {'display': 'none'}
+        return {'display': 'none'}, {}, None, None, True, None, None, None, {'display': 'none'}, {'display': 'none'}
     cond = ' · '.join(x for x in (f"제목에 '{series['subject_pattern']}'" if series['subject_pattern'] else '',
                                   f"보낸 사람에 '{series['sender_pattern']}'" if series['sender_pattern'] else '') if x)
     cond += ' · 새 메일은 바로 처리 완료' if series['file_away'] else ' · 새 메일도 확인 필요로'
@@ -154,7 +157,8 @@ def render_detail(sel, _):
     ok = llm.is_configured()
     n_out = len(series['excluded'])
     return {}, {'display': 'none'}, series['name'], cond, not ok, None if ok else 'LLM 이 설정돼 있어야 합니다', None, \
-        f'뺀 메일 {n_out}통 다시 넣기', {} if n_out else {'display': 'none'}
+        f'뺀 메일 {n_out}통 다시 넣기', {} if n_out else {'display': 'none'}, \
+        {'display': 'none'} if task else {}
 
 
 @callback(Output('ms2-mails', 'children'), Output('ms2-page', 'max_value'), Output('ms2-page', 'style'),
@@ -299,3 +303,19 @@ def remove(n, sel, changed):
         return no_update, no_update
     mail_series.delete(sel)
     return None, (changed or 0) + 1
+
+
+@callback(Output('ms2-changed', 'data', allow_duplicate=True), Output('ms2-msg', 'children', allow_duplicate=True),
+          Output('ms2-msg', 'is_open', allow_duplicate=True), Output('ms2-msg', 'color', allow_duplicate=True),
+          Input('ms2-make-task', 'n_clicks'), State('ms2-sel', 'data'), State('ms2-changed', 'data'),
+          prevent_initial_call=True)
+def make_task(n, sel, changed):
+    """이미 만들어 둔 모음에서 '추적' 업무 만들기 — 모인 메일이 그 업무 기록으로 연결된다."""
+    if not n or not sel:
+        return no_update, no_update, no_update, no_update
+    try:
+        task = mail_series.make_task(sel, auth.current_name())
+    except ValueError as e:
+        return no_update, str(e), True, 'warning'
+    return ((changed or 0) + 1, ["'추적' 업무를 만들고 모인 메일을 연결했습니다 — ", ui.task_link(task),
+                                 ' · 검색·자료 > ', dcc.Link('추적 자료', href='/tracking'), '에서 봅니다.'], True, 'success')

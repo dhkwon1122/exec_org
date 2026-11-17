@@ -24,7 +24,8 @@ def status_badge(status: str):
 
 # 사이드바 '검색·자료' 메뉴 하나로 묶은 화면들 — 화면 위 탭으로 오간다 (app.py _NAV)
 FIND_TABS = [('이력 검색', '/search', 'bi-search'), ('참고자료', '/references', 'bi-folder2'),
-             ('컨플루언스', '/confluence', 'bi-journal-text'), ('북마크', '/bookmarks', 'bi-bookmark')]
+             ('컨플루언스', '/confluence', 'bi-journal-text'), ('추적 자료', '/tracking', 'bi-arrow-repeat'),
+             ('북마크', '/bookmarks', 'bi-bookmark')]
 FIND_PATHS = tuple(href for _, href, _ in FIND_TABS)
 
 
