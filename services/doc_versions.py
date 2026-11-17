@@ -125,6 +125,15 @@ def _rows(s, keys: set[str]) -> dict[str, list[dict]]:
     return {k: _number(v) for k, v in out.items()}
 
 
+def _existing_copy(s, digest: str, size: int) -> str | None:
+    """같은 내용(sha256·크기)의 첨부가 이미 저장돼 있으면 그 파일 경로. 메일 첨부 파일은 지우지 않으므로 함께 써도 된다."""
+    for rel in s.scalars(select(MailAttachment.file_path).where(MailAttachment.sha256 == digest,
+                                                                 MailAttachment.size == size).limit(5)):
+        if rel and os.path.isfile(os.path.join(db.UPLOAD_DIR, rel)):
+            return rel
+    return None
+
+
 def save(mail_id: int, files: list[tuple[str, bytes]]) -> int:
     """메일 첨부를 UPLOAD_DIR/mail/<메일 id>/ 에 저장하고 기록한다. 저장한 개수."""
     if not files:
@@ -134,12 +143,15 @@ def save(mail_id: int, files: list[tuple[str, bytes]]) -> int:
     n = 0
     with db.SessionLocal() as s:
         for i, (name, data) in enumerate(files):
-            safe = re.sub(r'[^\w.\-가-힣()]+', '_', os.path.basename(name or 'file'))[:120] or 'file'
-            rel = os.path.join('mail', str(mail_id), f'{i + 1}_{safe}')
-            with open(os.path.join(db.UPLOAD_DIR, rel), 'wb') as f:
-                f.write(data)
+            digest = hashlib.sha256(data).hexdigest()
+            rel = _existing_copy(s, digest, len(data))  # 회신·전달로 다시 온 같은 파일은 한 벌만 둔다
+            if rel is None:
+                safe = re.sub(r'[^\w.\-가-힣()]+', '_', os.path.basename(name or 'file'))[:120] or 'file'
+                rel = os.path.join('mail', str(mail_id), f'{i + 1}_{safe}')
+                with open(os.path.join(db.UPLOAD_DIR, rel), 'wb') as f:
+                    f.write(data)
             s.add(MailAttachment(mail_id=mail_id, filename=name[:300], file_path=rel, size=len(data),
-                                 sha256=hashlib.sha256(data).hexdigest(), doc_key=key_for(s, name)))
+                                 sha256=digest, doc_key=key_for(s, name)))
             n += 1
         s.commit()
     return n

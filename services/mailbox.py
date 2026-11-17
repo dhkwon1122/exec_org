@@ -170,6 +170,23 @@ def _update(mail_id: int, *, session=None, **fields):
         s.flush()
 
 
+HANDLED_BY_PERSON = ('done', 'ignored')
+
+
+def _save_result(mail_id: int, **fields):
+    """메일 처리(규칙·AI) 결과 저장 — 처리하는 동안 사람이 이미 '처리 완료'·'무시'로 둔 메일이면 그 상태는 그대로 두고
+    추천·분류 같은 결과만 남긴다. 새 메일은 받자마자 '확인 필요'로 목록에 보이고 AI 처리는 뒤에서 이어지므로,
+    그 사이에 처리 완료한 메일이 다시 '확인 필요'로 돌아오지 않게."""
+    with db.transaction() as s:
+        m = s.get(InboundMail, mail_id)
+        if m is None:
+            return
+        if m.status in HANDLED_BY_PERSON and m.handled_by != MAIL_AUTHOR:
+            for k in ('status', 'handled_at', 'handled_by'):
+                fields.pop(k, None)
+        _update(mail_id, session=s, **fields)
+
+
 def sender_name(sender: str) -> str:
     name, addr = parseaddr(sender or '')
     return name or addr or (sender or '')
@@ -560,7 +577,7 @@ def process_as_category(m: dict, cat: dict, reason: str = '', source: str = 'ai'
         kind = 'task'
     if action:
         why += f" → {mail_categories.CATEGORY_ACTIONS[action]}"
-    _update(m['id'], status='review', kind=kind, reason=why[:500], suggestion=sug, schedule_import_id=iid,
+    _save_result(m['id'], status='review', kind=kind, reason=why[:500], suggestion=sug, schedule_import_id=iid,
             category_id=cat['id'], category_source=source)
 
 
@@ -622,17 +639,17 @@ def process(mail_id: int) -> None:
             sug['absences'], sug['absence_note'] = absences.extract(m['body'], m['mail_date'], m['subject'])
         if c['kind'] in ('task', 'both') and c['tasks']:
             sug.update(suggest_parent(m['subject'], m['body'], c['tasks'], mail_id))
-        _update(mail_id, status='review', kind=c['kind'], reason=reason[:500], suggestion=sug,
+        _save_result(mail_id, status='review', kind=c['kind'], reason=reason[:500], suggestion=sug,
                 schedule_import_id=iid)
     except Exception as e:  # noqa: BLE001
         log.exception('메일 처리 실패 %s', mail_id)
-        _update(mail_id, status='failed', error=str(e)[:500])
+        _save_result(mail_id, status='failed', error=str(e)[:500])
 
 
 def _apply_rule(m: dict, rule: dict) -> None:
     reason = f"규칙: {rule['name']}"
     if rule['action'] == 'ignore':
-        _update(m['id'], status='ignored', kind='ignore', rule_id=rule['id'], reason=reason,
+        _save_result(m['id'], status='ignored', kind='ignore', rule_id=rule['id'], reason=reason,
                 handled_at=datetime.now().replace(microsecond=0), handled_by=MAIL_AUTHOR)
         return
     if rule['action'] in RULE_OWNER:
@@ -640,11 +657,11 @@ def _apply_rule(m: dict, rule: dict) -> None:
         imp = schedules.get_import(iid)
         if rule['auto'] and imp['status'] == 'done':
             r = schedules.apply_events(imp['events'], iid, MAIL_AUTHOR)
-            _update(m['id'], status='auto', kind='schedule', rule_id=rule['id'], schedule_import_id=iid,
+            _save_result(m['id'], status='auto', kind='schedule', rule_id=rule['id'], schedule_import_id=iid,
                     reason=f"{reason} — 새 일정 {r['added']}건, 바뀐 일정 {r['updated']}건",
                     handled_at=datetime.now().replace(microsecond=0), handled_by=MAIL_AUTHOR)
         else:
-            _update(m['id'], status='review', kind='schedule', rule_id=rule['id'], schedule_import_id=iid,
+            _save_result(m['id'], status='review', kind='schedule', rule_id=rule['id'], schedule_import_id=iid,
                     reason=reason + ('' if imp['status'] == 'done' else f" — 일정 정리 실패: {imp['error']}"))
         return
     if rule['action'] == 'absence':
@@ -653,14 +670,14 @@ def _apply_rule(m: dict, rule: dict) -> None:
         states = {r['state'] for r in absences.preview(rows)}
         if rule['auto'] and rows and states <= {'new', 'same'}:  # 임원을 다 찾았고 겹치는 부재가 없을 때만 자동
             r = absences.apply_rows(rows, MAIL_AUTHOR, m['id'])
-            _update(m['id'], status='auto', kind='absence', rule_id=rule['id'], suggestion=sug,
+            _save_result(m['id'], status='auto', kind='absence', rule_id=rule['id'], suggestion=sug,
                     reason=f"{reason} — 임원 부재 {r['added']}건 (이미 있음 {r['same']}건)",
                     handled_at=datetime.now().replace(microsecond=0), handled_by=MAIL_AUTHOR)
         else:
             why = '' if rows else ' — 부재를 찾지 못함'
             if rows and not states <= {'new', 'same'}:
                 why = ' — 임원을 못 찾았거나 겹치는 부재가 있어 확인 필요'
-            _update(m['id'], status='review', kind='absence', rule_id=rule['id'], suggestion=sug, reason=reason + why)
+            _save_result(m['id'], status='review', kind='absence', rule_id=rule['id'], suggestion=sug, reason=reason + why)
         return
     tasks = task_candidates(m['subject'], m['mail_date'], m['body'])
     sug = {'tasks': tasks}
@@ -670,13 +687,13 @@ def _apply_rule(m: dict, rule: dict) -> None:
         thread = sug.get('parent_reason', '').startswith('같은 메일 스레드')
         ids = create_tasks(m, tasks, rule['parent_task_id'] or (sug.get('parent_task_id') if thread else None),
                            MAIL_AUTHOR)
-        _update(m['id'], status='auto', kind='task', rule_id=rule['id'], reason=f'{reason} — 업무 {len(ids)}건',
+        _save_result(m['id'], status='auto', kind='task', rule_id=rule['id'], reason=f'{reason} — 업무 {len(ids)}건',
                 suggestion=sug,
                 handled_at=datetime.now().replace(microsecond=0), handled_by=MAIL_AUTHOR)
     else:
         if rule['parent_task_id']:
             sug['parent_task_id'] = rule['parent_task_id']
-        _update(m['id'], status='review', kind='task', rule_id=rule['id'], reason=reason, suggestion=sug)
+        _save_result(m['id'], status='review', kind='task', rule_id=rule['id'], reason=reason, suggestion=sug)
 
 
 def apply_review(mail_id: int, tasks: list[dict], parent_id: int | None, schedule_rows: list[dict] | None,
@@ -1077,9 +1094,28 @@ def apply_person_updates(mail_id: int, rows: list[dict], by: str) -> dict:
     return {'changed': changed, 'skipped': skipped}
 
 
-def complete(mail_id: int, by: str) -> None:
-    """처리 완료 — '확인 필요'에서 빠진다."""
-    _update(mail_id, status='done', handled_at=datetime.now().replace(microsecond=0), handled_by=by)
+def _close(mail_id: int, status: str, by: str) -> int:
+    """메일과, 같은 스레드에서 그보다 먼저 받은 아직 확인 전('확인 필요'·'실패') 메일을 함께 닫는다 —
+    목록은 스레드의 최근 메일 한 줄로 보이므로 하나만 닫으면 같은 제목의 이전 메일이 다시 떠 있는 것처럼 보였다.
+    → 함께 닫은 다른 메일 수."""
+    now = datetime.now().replace(microsecond=0)
+    with db.transaction() as s:
+        try:
+            ids = [i for i in mail_threads.mail_ids(s, mail_id) if i < mail_id]
+        except Exception:  # noqa: BLE001 — 스레드를 못 정해도 이 메일은 닫는다
+            log.exception('스레드 찾기 실패 %s', mail_id)
+            ids = []
+        others = list(s.scalars(select(InboundMail).where(InboundMail.id.in_(ids or [0]),
+                                                          InboundMail.status.in_(('review', 'failed')))))
+        for o in others:
+            o.status, o.handled_at, o.handled_by = status, now, by
+        _update(mail_id, session=s, status=status, handled_at=now, handled_by=by)
+    return len(others)
+
+
+def complete(mail_id: int, by: str) -> int:
+    """처리 완료 — '확인 필요'에서 빠진다 (같은 스레드의 이전 확인 전 메일도 함께). → 함께 닫은 다른 메일 수."""
+    return _close(mail_id, 'done', by)
 
 
 def pending_items(m: dict) -> list[str]:
@@ -1112,8 +1148,9 @@ def apply_absences(mail_id: int, rows: list[dict], by: str) -> dict:
     return r
 
 
-def ignore(mail_id: int, by: str) -> None:
-    _update(mail_id, status='ignored', handled_at=datetime.now().replace(microsecond=0), handled_by=by)
+def ignore(mail_id: int, by: str) -> int:
+    """무시 (같은 스레드의 이전 확인 전 메일도 함께). → 함께 무시한 다른 메일 수."""
+    return _close(mail_id, 'ignored', by)
 
 
 def reopen(mail_id: int) -> None:
