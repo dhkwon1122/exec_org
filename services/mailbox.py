@@ -328,7 +328,7 @@ def _scored_candidates(subject: str, body: str, limit: int = 15) -> list[dict]:
     """진행 중인 업무별 점수 — 업무의 낱말이 메일 제목에 나오면 3배, 업무 제목의 낱말이면 2배, 긴 낱말일수록 더."""
     subj, text = (subject or '').lower(), f'{subject}\n{body}'.lower()
     out = []
-    for t in store.list_tasks(status=['예정', '진행중', '보류']):
+    for t in store.list_tasks(status=store.ACTIVE_STATUSES):
         title_toks = _tokens(t['title'])
         extra = _tokens(' '.join(t['tags']) + ' ' + t['description'][:300])
         for k, _ in store.keyword_stats(10, task_id=t['id']):
@@ -432,6 +432,7 @@ def _mail_history(mail: dict, task_id: int, by: str, *, session=None) -> None:
     content = (f"[받은 메일] {mail['subject']}\n보낸 사람: {mail['sender']}\n날짜: {mail['mail_date']}\n\n"
                f"{mail['body'][:20000]}")
     store.add_history(task_id, content, '요청', author=sender_name(mail['sender']) or by,
+                      occurred_at=f"{mail['mail_date']} 09:00" if mail.get('mail_date') else None,  # 메일 날짜로
                       title=mail['subject'][:200], session=session)
 
 

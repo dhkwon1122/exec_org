@@ -19,7 +19,10 @@ from sqlalchemy.orm import aliased, object_session
 from services import db, records
 from services.db import HistoryBookmark, HistoryEntry, HistoryPerson, HistoryReference, HistoryTask, InboundMail, TaskAssignee, Person, PersonCareer, Reference, Task, TaskLink
 
-STATUSES = ['예정', '진행중', '보류', '완료']
+STATUSES = ['예정', '진행중', '보류', '추적', '완료']
+# '추적' — 끝내는 일이 아니라 주기적으로 오는 자료(주간보고 등)를 받아 쌓고 업데이트를 지켜보는 업무 (services/tracking.py)
+TRACKING = '추적'
+ACTIVE_STATUSES = ['예정', '진행중', '보류', TRACKING]  # 끝나지 않은 업무 — 메일·기록을 연결할 수 있는 업무
 ENTRY_TYPES = ['메모', '피드백', '동향', '회의', '결정', '진행', '이슈', '요청']
 AUTO_ENTRY_TYPES = ['상태변경', '연결', '자료', '할일']  # 시스템이 자동으로 남기는 유형
 RELATIONS = ['관련', '선행', '후속', '파생']

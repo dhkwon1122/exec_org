@@ -5,7 +5,7 @@ import dash
 import dash_bootstrap_components as dbc
 from dash import ALL, Input, Output, State, callback, ctx, dcc, html, no_update
 
-from components import doc_ui, task_summary_ui, todo_ui, ui
+from components import doc_ui, task_summary_ui, todo_ui, tracking_ui, ui
 from services import auth, confluence, documents, mailbox, outbox, store
 
 dash.register_page(__name__, path_template='/task/<task_id>', name='업무 상세', title='업무 기록 · 상세')
@@ -263,6 +263,7 @@ def render(_, _t, _h, _d, tid):
         ], className='task-heading d-flex align-items-center flex-wrap gap-2 mb-2'),
         html.Div([ui.status_badge(t['status']), *ui.tag_badges(t['tags'])], className='mb-2'),
         ui.multiline(t['description']) if t['description'] else html.Div('설명 없음', className='text-muted small'),
+        tracking_ui.card(tid) if t['status'] == store.TRACKING else None,  # 주기 자료를 받아 쌓는 업무
     ]))
     header = html.Div([header, html.Div(task_summary_ui.card(tid), className='mt-3')])  # 하위 업무·이력·자료 AI 요약
 

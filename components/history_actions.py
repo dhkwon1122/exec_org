@@ -206,7 +206,7 @@ def review_todos(_one, _all, _c, _s, rows, parent, meta, n, hn):
                  'assignee': h['ai_todos'][i].get('assignee', '')} for i in idxs
                 if i < len(h['ai_todos']) and (trig['type'] == 'h-todo' or h['ai_todos'][i]['title'] not in done)]
         opts = [{'label': f"#{t['id']} {t['title']}", 'value': t['id']}
-                for t in store.list_tasks(status=['예정', '진행중', '보류'])]
+                for t in store.list_tasks(status=store.ACTIVE_STATUSES)]
         default = trig.get('task') or h['task_id']
         if default and default not in {o['value'] for o in opts}:
             t = store.get_task(default)

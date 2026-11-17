@@ -17,8 +17,21 @@ FILTERS = [('review', '확인 필요'), ('auto', '자동 처리'), ('done', '처
 
 
 def _task_options():
-    return [{'label': f"#{t['id']} {t['title']}", 'value': t['id']}
-            for t in store.list_tasks(status=['예정', '진행중', '보류'])]
+    return [{'label': ('[추적] ' if t['status'] == store.TRACKING else '') + f"#{t['id']} {t['title']}", 'value': t['id']}
+            for t in store.list_tasks(status=store.ACTIVE_STATUSES)]
+
+
+def _tracking_hint(mail_id: int, task_id) -> list:
+    """'추적' 업무에 연결했으면 — 앞으로 같은 메일은 자동으로 이 업무에 연결하도록 권한다."""
+    t = store.get_task(int(task_id)) if task_id else None
+    if not t or t['status'] != store.TRACKING:
+        return []
+    m = mailbox.get_mail(mail_id) or {}
+    series = mail_series.get(m.get('series_id'))
+    if series and series['task_id'] == t['id']:
+        return []
+    return [' ', dcc.Link([html.I(className='bi bi-arrow-repeat me-1'), '앞으로 오는 같은 메일도 자동으로 이 업무에 연결'],
+                          href=f"/mail-series?new={mail_id}&task={t['id']}")]
 
 
 def layout(mail=None, **_):
@@ -487,10 +500,12 @@ def _series_line(m: dict):
     """정기 메일 모음에 든 메일이면 그 모음으로, 아니면 이 메일로 모음 만들기."""
     series = mail_series.get(m['series_id']) if m.get('series_id') else None
     if series:
+        task = store.get_task(series['task_id']) if series['task_id'] else None
         return html.Div([html.I(className='bi bi-collection me-1'), '정기 메일 모음: ',
-                         dcc.Link(f"{series['name']} ({series['count']}통)", href=f"/mail-series?series={series['id']}")],
-                        className='small mt-1')
-    return html.Div(dcc.Link([html.I(className='bi bi-collection me-1'), '정기 메일 모음 만들기 (주간보고처럼 매번 오는 메일)'],
+                         dcc.Link(f"{series['name']} ({series['count']}통)", href=f"/mail-series?series={series['id']}"),
+                         *([' → 업무 ', ui.task_link(task)] if task else [])], className='small mt-1')
+    return html.Div(dcc.Link([html.I(className='bi bi-arrow-repeat me-1'),
+                              '주기적으로 오는 자료로 추적하기 (주간보고처럼 매번 오는 메일 → 추적 업무에 자동 연결)'],
                              href=f"/mail-series?new={m['id']}", className='small'), className='mt-1')
 
 
@@ -664,10 +679,12 @@ def link_actions(_l, _ld, _u, sel, task_id, n):
             if trig == 'ib-link-done':  # 업무 이력에 연결만 하고 이 메일은 끝
                 mailbox.complete(sel, by)
                 return ((n or 0) + 1, ['업무에 연결하고 처리 완료했습니다. ',
-                                       dcc.Link('업무 열기', href=f'/task/{task_id}')], True, 'success')
+                                       dcc.Link('업무 열기', href=f'/task/{task_id}'),
+                                       *_tracking_hint(sel, task_id)], True, 'success')
             return ((n or 0) + 1, ['연결했습니다 — 메일 원문을 업무 기록으로 남겼습니다'
                                    + _thread_note(sel) + '. ',
-                                   dcc.Link('업무 열기', href=f'/task/{task_id}')] if done else '이미 연결된 업무입니다.',
+                                   dcc.Link('업무 열기', href=f'/task/{task_id}'), *_tracking_hint(sel, task_id)]
+                    if done else '이미 연결된 업무입니다.',
                     True, 'success' if done else 'info')
     except ValueError as e:
         return no_update, str(e), True, 'danger'
