@@ -565,16 +565,16 @@ def act(_a, _i, _r, _f, sel, n):
     if not sel:
         return no_update, no_update, no_update, no_update
     if trig == 'ib-ignore':
-        mailbox.ignore(sel, by)
-        return (n or 0) + 1, '무시했습니다.', True, 'secondary'
+        more = mailbox.ignore(sel, by)
+        return (n or 0) + 1, '무시했습니다.' + (f' (같은 스레드의 이전 메일 {more}통도 함께)' if more else ''), True, 'secondary'
     if trig == 'ib-reopen':
         mailbox.reopen(sel)
         return (n or 0) + 1, no_update, False, no_update
     m = mailbox.get_mail(sel)
     left = mailbox.pending_items(m) if m else []
-    mailbox.complete(sel, by)
-    return ((n or 0) + 1, '처리 완료했습니다.' + (f" (처리하지 않고 둔 추천: {', '.join(left)})" if left else ''),
-            True, 'success')
+    more = mailbox.complete(sel, by)
+    return ((n or 0) + 1, '처리 완료했습니다.' + (f' 같은 스레드의 이전 메일 {more}통도 함께 처리 완료.' if more else '')
+            + (f" (처리하지 않고 둔 추천: {', '.join(left)})" if left else ''), True, 'success')
 
 
 # ── 업무 직접 연결·만들기 ─────────────────────────────────────────────

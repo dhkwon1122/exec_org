@@ -760,3 +760,34 @@ def test_edited_schedule_table_is_shown_as_edited_not_ai_corrected():
     assert imp['edited']
     assert schedules.preview(imp['events'], imp['owner'])[0]['category'] == '회의'  # AI 값 바로잡기는 기존 값으로
     assert sched_edit.table_rows(imp)[0]['category'] == '보고'  # 사람이 고친 표는 고친 값 그대로
+
+
+def test_processing_does_not_reopen_a_mail_completed_meanwhile():
+    """새 메일은 '확인 필요'로 먼저 보이고 AI 처리가 뒤에 끝난다 — 그 사이 처리 완료한 메일은 그대로 둔다."""
+    mailbox.fetch_new(connect=lambda cfg: FakePOP([_mail('보고 자료 요청', 'a@x', text='보고서 준비')]),
+                      process_now=False)
+    m = mailbox.list_mails(['review'])[0]
+    mailbox.complete(m['id'], '담당자')
+    mailbox.process(m['id'])  # 늦게 끝난 처리
+    after = mailbox.get_mail(m['id'])
+    assert after['status'] == 'done' and after['handled_by'] == '담당자'
+    assert after['kind']  # 처리 결과(종류·추천)는 남는다
+    mailbox.reopen(m['id'])
+    mailbox.process(m['id'])
+    assert mailbox.get_mail(m['id'])['status'] == 'review'  # 확인 전이면 평소대로
+
+
+def test_complete_closes_earlier_unhandled_mails_in_the_same_thread():
+    mailbox.fetch_new(connect=lambda cfg: FakePOP([
+        _mail('예산 요청', 'a@x', text='1', mid='<a1@x>'),
+        _mail('RE: 예산 요청', 'b@x', text='2', mid='<a2@x>'),
+        _mail('다른 메일', 'c@x', text='3', mid='<b1@x>')]))
+    rows = {m['subject']: m for m in mailbox.list_mails()}
+    first, reply, other = rows['예산 요청'], rows['RE: 예산 요청'], rows['다른 메일']
+    assert first['thread_key'] == reply['thread_key']
+    assert mailbox.complete(reply['id'], '담당자') == 1
+    assert mailbox.get_mail(first['id'])['status'] == 'done'
+    assert mailbox.get_mail(other['id'])['status'] == 'review'  # 다른 스레드는 그대로
+    mailbox.reopen(first['id'])
+    assert mailbox.ignore(first['id'], '담당자') == 0  # 먼저 받은 메일을 닫을 때 나중 메일은 건드리지 않음
+    assert mailbox.get_mail(reply['id'])['status'] == 'done'
