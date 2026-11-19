@@ -4,13 +4,15 @@
 검색어를 공백으로 여러 개 넣으면 모두 포함된 이력만(AND), "따옴표"로 묶으면 한 덩어리로 찾는다.
 키워드 칩(#키워드)을 누르면 /search?q=키워드 로 바로 검색된다.
 """
+from urllib.parse import urlencode
+
 import dash
 import dash_bootstrap_components as dbc
 from dash import Input, Output, State, callback, dcc, html
 
 from components import doc_ui, ui
 from components.history_form import people_options
-from services import doc_summary, embed, glossary, graph, store
+from services import doc_summary, embed, glossary, graph, mailbox, store
 
 dash.register_page(__name__, path='/search', name='이력 검색', title='업무 기록 · 이력 검색')
 
@@ -119,6 +121,9 @@ def search(q, types, person_id, author, date_from, date_to, include_auto, semant
                    date_from=date_from or '', date_to=date_to or '', include_auto=bool(include_auto))
     rows = store.search_history(q or '', **filters)
     docs = doc_summary.search(q or '', limit=20) if terms else []
+    # 받은 메일 — 업무에 연결하지 않았거나 처리 완료한 메일도 (제목·보낸 사람·본문)
+    mails = mailbox.list_mails(query=q or '', limit=MAIL_LIMIT + 1, date_from=date_from or '',
+                               date_to=date_to or '') if terms else []
     similar, sim_docs, sim_refs, sem_note = [], [], [], None
     used_sem = bool(terms and semantic and embed.is_configured())
     if used_sem:
@@ -128,6 +133,9 @@ def search(q, types, person_id, author, date_from, date_to, include_auto, semant
         except embed.EmbedError as e:
             sem_note = dbc.Alert(f'의미 검색을 하지 못했습니다 — {e}', color='warning', className='small py-1 px-2')
     if not rows and not docs and not similar and not sim_docs and not sim_refs:
+        if mails:  # 기록은 없고 메일만 찾았을 때
+            return ([sem_note, _mails_card(mails, terms + extra)], f'메일 {min(len(mails), MAIL_LIMIT)}건'
+                    + ('+' if len(mails) > MAIL_LIMIT else ''), *ui.pager_state(0), None, None, None)
         return [sem_note, dbc.Alert('조건에 맞는 이력이 없습니다.', color='light')], '', *ui.pager_state(0), None, None, None
     terms = terms + extra
     g = None
@@ -142,6 +150,8 @@ def search(q, types, person_id, author, date_from, date_to, include_auto, semant
     label += ui.page_note(len(combined), page)
     if docs or sim_docs or sim_refs:
         label += f' · 문서·자료 {len(docs) + len(sim_docs) + len(sim_refs)}건'
+    if mails:
+        label += f" · 메일 {min(len(mails), MAIL_LIMIT)}건" + ('+' if len(mails) > MAIL_LIMIT else '')
     if extra:
         label += f" · 용어집의 같은 말: {', '.join(extra)}"
     cards = dbc.ListGroup([html.Div([
@@ -150,7 +160,8 @@ def search(q, types, person_id, author, date_from, date_to, include_auto, semant
                     for reason in h['match_reasons']], className='small mb-1'),
         ui.history_card(h, terms=terms, show_task=True, actions=False),
     ], className='mb-2') for h in shown])
-    return ([sem_note, _docs_card(docs) if docs else None, cards], label, *ui.pager_state(len(combined)),
+    return ([sem_note, _mails_card(mails, terms) if mails and page == 1 else None, _docs_card(docs) if docs else None,
+             cards], label, *ui.pager_state(len(combined)),
             _similar_section([], sim_docs, sim_refs), None, _graph_side(g))
 
 
@@ -246,6 +257,31 @@ def _similar_section(similar: list[dict], sim_docs: list[dict], sim_refs: list[d
     if items:
         parts += [html.Div('문서·자료', className='small fw-semibold text-muted mt-3 mb-1'), dbc.ListGroup(items)]
     return html.Div(parts)
+
+
+MAIL_LIMIT = 10  # 이력 검색에 함께 보일 메일 수 — 더 많으면 받은 메일 화면의 검색으로
+
+
+def _mails_card(mails: list[dict], terms: list[str]):
+    """검색어가 들어 있는 받은 메일 (최근 것부터) — 누르면 받은 메일 화면에서 그 메일을 연다."""
+    shown = mails[:MAIL_LIMIT]
+    q = ' '.join(f'"{t}"' if ' ' in t else t for t in terms)
+    return dbc.Card(dbc.CardBody([
+        html.Div([html.I(className='bi bi-envelope me-1'), f'받은 메일 {len(shown)}건',
+                  dcc.Link(' · 더 보기 (받은 메일에서 검색)', href='/inbox?' + urlencode({'q': q}), className='small ms-1')
+                  if len(mails) > MAIL_LIMIT else None], className='fw-semibold mb-2'),
+        dbc.ListGroup([dbc.ListGroupItem([
+            html.Div([
+                dcc.Link(m['subject'], href=f"/inbox?mail={m['id']}", className='fw-semibold me-2 text-break'),
+                html.Span(f"{m['mail_date']} · {mailbox.sender_name(m['sender'])}", className='text-muted'),
+                dbc.Badge(mailbox.STATUS.get(m['status'], m['status']), color='light', text_color='dark',
+                          className='border ms-2'),
+                dbc.Badge(f"업무 {len(m['task_ids'])}", color='light', text_color='dark', className='border ms-1')
+                if m['task_ids'] else None,
+            ]),
+            html.Div(mailbox.snippet(m['body'], terms), className='text-muted mt-1'),
+        ], className='small') for m in shown], flush=True),
+    ]), className='mb-3')
 
 
 def _docs_card(docs: list[dict]):
