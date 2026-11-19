@@ -139,11 +139,14 @@ def _mail_dict(m: InboundMail) -> dict:
 
 
 def list_mails(status: list[str] | None = None, limit: int = 200, category: int | str | None = None,
-               query: str = '', date_from: str = '', date_to: str = '') -> list[dict]:
+               query: str = '', date_from: str = '', date_to: str = '', ids: list[int] | None = None) -> list[dict]:
     """category: 분류 id, 'none' 이면 미분류만, None 이면 모두 (services/mail_categories.py).
-    query: 제목·보낸 사람·본문 글자 검색 (공백으로 나눈 낱말이 모두 들어 있는 메일, "따옴표"는 한 덩어리)."""
+    query: 제목·보낸 사람·본문 글자 검색 (공백으로 나눈 낱말이 모두 들어 있는 메일, "따옴표"는 한 덩어리).
+    ids: 이 메일들만."""
     with db.SessionLocal() as s:
         stmt = select(InboundMail).where(InboundMail.status != 'skipped')
+        if ids is not None:  # 이 메일들만 (의미 검색 결과)
+            stmt = stmt.where(InboundMail.id.in_(ids or [0]))
         for term in store.search_terms(query):
             like = f'%{term}%'
             stmt = stmt.where(or_(InboundMail.subject.ilike(like), InboundMail.sender.ilike(like),
@@ -159,6 +162,19 @@ def list_mails(status: list[str] | None = None, limit: int = 200, category: int 
         elif category is not None:
             stmt = stmt.where(InboundMail.category_id == int(category))
         return [_mail_dict(m) for m in s.scalars(stmt.order_by(InboundMail.id.desc()).limit(limit))]
+
+
+def similar_mails(query: str, exclude: set[int] | None = None, limit: int = 10, date_from: str = '',
+                  date_to: str = '', status: list[str] | None = None) -> list[dict]:
+    """검색어와 뜻이 비슷한 받은 메일 (의미 검색, services/embed.py) — 글자가 같지 않아도. 유사도 'score' 높은 순.
+    임베딩 서버가 없으면 []. 연결 실패는 embed.EmbedError 그대로."""
+    from services import embed
+    hits = [h for h in embed.search(query, kinds=('inbox',), limit=limit * 3) if h['id'] not in (exclude or set())]
+    if not hits:
+        return []
+    score = {h['id']: h['score'] for h in hits}
+    rows = list_mails(status, limit=len(hits), ids=list(score), date_from=date_from, date_to=date_to)
+    return sorted(({**m, 'score': score[m['id']]} for m in rows), key=lambda m: -m['score'])[:limit]
 
 
 def snippet(text: str, terms: list[str], width: int = 120) -> str:

@@ -1,4 +1,4 @@
-"""의미 검색 — 이력·메일 첨부 문서·참고자료를 임베딩(벡터)으로 바꿔 두고, 검색어와 뜻이 가까운 것을 찾는다.
+"""의미 검색 — 이력·받은 메일(본문)·메일 첨부 문서·참고자료를 임베딩(벡터)으로 바꿔 두고, 검색어와 뜻이 가까운 것을 찾는다.
 글자가 똑같지 않아도("인사 발령" → "보직 변경 통보") 찾을 수 있게 키워드 검색을 보완한다.
 
 임베딩 서버는 Researcher-board(People in SAIT)의 BGE-M3 서버(bge-embed, services/bge_server.py)를 같이 쓴다.
@@ -27,11 +27,11 @@ import requests
 from sqlalchemy import delete, func, or_, select
 
 from services import db
-from services.db import Embedding, HistoryEntry, MailAttachment, Reference, Task
+from services.db import Embedding, HistoryEntry, InboundMail, MailAttachment, Reference, Task
 
 log = logging.getLogger(__name__)
 
-KINDS = ('history', 'mail', 'ref')
+KINDS = ('history', 'mail', 'ref', 'inbox')  # inbox = 받은 메일 본문 (mail 은 메일 첨부 문서)
 MAX_CHARS = 3000          # 한 항목에서 임베딩할 글자 (앞부분 — 제목·요약·키워드가 먼저 온다)
 MAX_ITEMS = 32            # 한 번에 보내는 개수
 MAX_TOTAL_CHARS = 60000   # 한 번에 보내는 글자 (bge-embed 서버 한도 65536 안쪽)
@@ -128,6 +128,11 @@ def _mail_text(a: MailAttachment) -> str:
     return _join(a.filename, a.doc_type, a.summary, f"태그: {a.tags}" if a.tags else '', a.text)
 
 
+def _inbox_text(m: InboundMail) -> str:
+    """받은 메일 — 제목·보낸 사람이 먼저, 본문 앞부분."""
+    return _join(m.subject, f"보낸 사람: {m.sender}" if m.sender else '', m.body)
+
+
 def _ref_text(r: Reference, task_title: str) -> str:
     return _join(r.title, r.file_name if r.file_name != r.title else '', r.note, r.doc_type, r.summary,
                  f"태그: {r.tags}" if r.tags else '', r.content_summary,
@@ -147,6 +152,11 @@ def _sources(s, kind: str, ids: list[int] | None = None):
         if ids is not None:
             q = q.where(MailAttachment.id.in_(ids))
         return [(a.id, _mail_text(a)) for a in s.scalars(q)]
+    if kind == 'inbox':
+        q = select(InboundMail).where(*_inbox_cond())
+        if ids is not None:
+            q = q.where(InboundMail.id.in_(ids))
+        return [(m.id, _inbox_text(m)) for m in s.scalars(q)]
     q = select(Reference, Task.title).outerjoin(Task, Task.id == Reference.task_id)
     if ids is not None:
         q = q.where(Reference.id.in_(ids))
@@ -162,6 +172,11 @@ def _mail_cond():
     return or_(func.coalesce(MailAttachment.text, '') != '', func.coalesce(MailAttachment.summary, '') != '')
 
 
+def _inbox_cond():
+    """오래돼 건너뛴(본문 없음) 메일은 빼고."""
+    return (InboundMail.status != 'skipped', func.coalesce(InboundMail.body, '') != '')
+
+
 def _hash(text: str) -> str:
     return hashlib.sha256(text.encode('utf-8')).hexdigest()
 
@@ -169,12 +184,14 @@ def _hash(text: str) -> str:
 def _missing(s, kind: str, limit: int) -> list[int]:
     """아직 벡터가 없거나 다른 모델로 만든 항목 id — 최근 것부터."""
     have = select(Embedding.item_id).where(Embedding.kind == kind, Embedding.model == model_name())
-    model = {'history': HistoryEntry, 'mail': MailAttachment, 'ref': Reference}[kind]
+    model = {'history': HistoryEntry, 'mail': MailAttachment, 'ref': Reference, 'inbox': InboundMail}[kind]
     q = select(model.id).where(model.id.notin_(have))
     if kind == 'history':
         q = q.where(*_hist_cond())
     elif kind == 'mail':
         q = q.where(_mail_cond())
+    elif kind == 'inbox':
+        q = q.where(*_inbox_cond())
     return list(s.scalars(q.order_by(model.id.desc()).limit(limit)))
 
 
@@ -236,7 +253,8 @@ def status() -> dict:
         indexed = s.scalar(select(func.count()).select_from(Embedding).where(Embedding.model == model_name())) or 0
         total = (s.scalar(select(func.count()).select_from(HistoryEntry).where(*_hist_cond())) or 0) + \
                 (s.scalar(select(func.count()).select_from(MailAttachment).where(_mail_cond())) or 0) + \
-                (s.scalar(select(func.count()).select_from(Reference)) or 0)
+                (s.scalar(select(func.count()).select_from(Reference)) or 0) + \
+                (s.scalar(select(func.count()).select_from(InboundMail).where(*_inbox_cond())) or 0)
     return {'indexed': indexed, 'total': total}
 
 

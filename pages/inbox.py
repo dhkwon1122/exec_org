@@ -5,8 +5,8 @@ import dash_bootstrap_components as dbc
 from dash import ALL, Input, Output, State, callback, clientside_callback, ctx, dash_table, dcc, html, no_update
 
 from components import absence_ui, doc_ui, sched_edit, ui
-from services import (absences, auth, db, doc_versions, doc_worker, llm, mail_categories, mail_series, mail_threads,
-                      mailbox, outbox, schedules, store)
+from services import (absences, auth, db, doc_versions, doc_worker, embed, llm, mail_categories, mail_series,
+                      mail_threads, mailbox, outbox, schedules, store)
 
 dash.register_page(__name__, path='/inbox', name='받은 메일', title='업무 기록 · 받은 메일')
 
@@ -319,9 +319,17 @@ def render_list(flt, _, cat='all', threaded=True, limit=PAGE, q='', sel=None, ch
               + (f" · 대기 {ds['pending']}개" if ds['pending'] else ' · 대기 없음')
               + (f" · 마지막 {last['at']} " + (last.get('filename', '') if last.get('ok') else f"(실패: {last.get('error', '')[:60]})")
                  if last else '')]
-    if not mails:
-        return html.Div(f"'{q}' 이(가) 들어 있는 메일이 없습니다." if terms else '메일이 없습니다.',
-                        className='small text-muted'), opts, st, cat_opts, *run, *more
+    similar, sem_note = [], None
+    if terms and embed.is_configured():  # 글자가 같지 않아도 뜻이 비슷한 메일 (services/embed.py)
+        try:
+            similar = mailbox.similar_mails(q, exclude={m['id'] for m in mails}, limit=10)
+            if cat != 'all':
+                similar = [m for m in similar if str(m['category_id'] or 'none') == cat]
+        except embed.EmbedError as e:
+            sem_note = html.Div(f'뜻이 비슷한 메일은 찾지 못했습니다 — {e}', className='small text-warning mb-1')
+    if not mails and not similar:
+        return html.Div([sem_note, html.Div(f"'{q}' 이(가) 들어 있는 메일이 없습니다." if terms else '메일이 없습니다.',
+                                            className='small text-muted')]), opts, st, cat_opts, *run, *more
 
     sizes = mail_threads.sizes([m['thread_key'] for m in mails]) if threaded else {}
 
@@ -329,6 +337,7 @@ def render_list(flt, _, cat='all', threaded=True, limit=PAGE, q='', sel=None, ch
         kind = KIND.get(m['kind'])
         row = dbc.ListGroupItem([
             html.Div([
+                ui.score_badge(m['score']) if 'score' in m else None,
                 dbc.Badge(mailbox.STATUS.get(m['status'], m['status']), color=STATUS_COLOR.get(m['status'], 'light'),
                           className='me-1'),
                 dbc.Badge(kind[0], color=kind[1], className='me-1') if kind else None,
@@ -362,10 +371,15 @@ def render_list(flt, _, cat='all', threaded=True, limit=PAGE, q='', sel=None, ch
                 ], open=open_, className='list-group-item p-0 inbox-thread-more'))
         return out
 
-    if terms:  # 검색 결과는 분류로 나누지 않고 최근 순으로
+    if terms:  # 검색 결과는 분류로 나누지 않고 최근 순으로 + 뜻이 비슷한 메일
         head = html.Div(f"'{q}' 검색 결과 {len(mails)}통{' 이상' if more[1] == {} else ''} · 모든 상태",
                         className='small text-muted mb-1')
-        return html.Div([head, dbc.ListGroup(items(mails))]), opts, st, cat_opts, *run, *more
+        sim = [html.Div([html.I(className='bi bi-stars me-1'), f'뜻이 비슷한 메일 {len(similar)}통',
+                         html.Span(' — 검색어가 그대로 들어 있지 않아도 내용이 가까운 메일', className='text-muted')],
+                        className='small fw-semibold mt-3 mb-1'),
+               dbc.ListGroup([item(m) for m in similar])] if similar else []
+        return (html.Div([sem_note, head, dbc.ListGroup(items(mails)) if mails else None, *sim]),
+                opts, st, cat_opts, *run, *more)
     if cat != 'all':
         return dbc.ListGroup(items(mails)), opts, st, cat_opts, *run, *more
     groups: dict = {}  # 전체 — 분류별로 모아서 (분류 순서대로, 미분류는 끝에)
