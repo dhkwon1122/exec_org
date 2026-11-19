@@ -34,7 +34,7 @@ def _tracking_hint(mail_id: int, task_id) -> list:
                           href=f"/mail-series?new={mail_id}&task={t['id']}")]
 
 
-def layout(mail=None, **_):
+def layout(mail=None, q=None, **_):
     try:
         mail = int(mail) if mail else None  # 업무의 '출처' 링크(/inbox?mail=…)로 들어오면 그 메일을 바로 연다
     except ValueError:
@@ -60,9 +60,11 @@ def layout(mail=None, **_):
                            inputClassName='btn-check', labelClassName='btn btn-sm btn-outline-primary me-1 mb-1',
                            labelCheckedClassName='active', options=[], persistence=True, persistence_type='local'),
             dbc.Button(id='ib-cat-run', size='sm', color='link', className='ms-1 p-0 small', style={'display': 'none'}),
+            dbc.Input(id='ib-q', type='search', debounce=True, size='sm', className='ms-auto me-3', value=q or '',
+                      placeholder='메일 검색 — 제목·보낸 사람·본문 (모든 상태)', style={'maxWidth': '300px'}),
             html.Span(dbc.Switch(id='ib-thread-view', value=True, label='스레드로 묶기', persistence=True,
                                  persistence_type='local', className='small mb-0'),
-                      title='RE:/FW: 로 이어진 메일을 한 줄로 모아 봅니다', className='ms-auto me-3'),
+                      title='RE:/FW: 로 이어진 메일을 한 줄로 모아 봅니다', className='me-3'),
         ], className='d-flex align-items-center flex-wrap mb-2'),
         dcc.Loading(dbc.Alert(id='ib-msg', is_open=False, dismissable=True, className='py-2 small'), type='dot'),
         dbc.Row([
@@ -260,8 +262,8 @@ PAGE = 50  # 목록은 한 번에 이만큼 — 많이 그리면 화면(Dash)이
 
 
 @callback(Output('ib-limit', 'data'), Input('ib-filter', 'value'), Input('ib-cat', 'value'),
-          Input('ib-more', 'n_clicks'), State('ib-limit', 'data'), prevent_initial_call=True)
-def page_limit(_f, _c, _m, limit):
+          Input('ib-more', 'n_clicks'), Input('ib-q', 'value'), State('ib-limit', 'data'), prevent_initial_call=True)
+def page_limit(_f, _c, _m, _q, limit):
     return (limit or PAGE) + PAGE if ctx.triggered_id == 'ib-more' else PAGE
 
 
@@ -275,10 +277,11 @@ clientside_callback(
           Output('ib-cat', 'options'), Output('ib-cat-run', 'children'), Output('ib-cat-run', 'style'),
           Output('ib-more', 'children'), Output('ib-more', 'style'),
           Input('ib-filter', 'value'), Input('ib-refresh', 'data'), Input('ib-cat', 'value'),
-          Input('ib-thread-view', 'value'), Input('ib-limit', 'data'), State('ib-sel', 'data'),
+          Input('ib-thread-view', 'value'), Input('ib-limit', 'data'), Input('ib-q', 'value'), State('ib-sel', 'data'),
           State('ib-checked', 'data'))
-def render_list(flt, _, cat='all', threaded=True, limit=PAGE, sel=None, checked=None):
+def render_list(flt, _, cat='all', threaded=True, limit=PAGE, q='', sel=None, checked=None):
     checked = set(checked or [])
+    terms = store.search_terms(q or '')
     if threaded:
         try:  # 이전 버전에서 받은 메일도 스레드로 — 다른 화면 갱신이 하고 있으면 기다리지 않는다
             mail_threads.ensure_all(wait=False)
@@ -286,7 +289,7 @@ def render_list(flt, _, cat='all', threaded=True, limit=PAGE, sel=None, checked=
             pass
     c = mailbox.counts()
     opts = [{'label': f'{label} {c.get(k, 0)}' if k != 'all' else label, 'value': k} for k, label in FILTERS]
-    statuses = None if flt == 'all' else [flt]
+    statuses = None if flt == 'all' or terms else [flt]  # 검색은 처리 완료·무시한 메일까지
     cats = mail_categories.list_categories()
     names = {x['id']: x['name'] for x in cats}
     cc = mail_categories.counts(statuses)
@@ -298,7 +301,7 @@ def render_list(flt, _, cat='all', threaded=True, limit=PAGE, sel=None, checked=
     waiting = mail_categories.pending_count()
     run = (f'미분류 {waiting}통 지금 분류', {}) if waiting else ('', {'display': 'none'})
     limit = limit or PAGE
-    mails = mailbox.list_mails(statuses, limit=limit + 1,
+    mails = mailbox.list_mails(statuses, limit=limit + 1, query=q or '',
                                category=None if cat == 'all' else (cat if cat == 'none' else int(cat)))
     more = ([html.I(className='bi bi-chevron-down me-1'), f'더 보기 ({PAGE}통 더)'], {}) if len(mails) > limit else ('', {'display': 'none'})
     mails = mails[:limit]
@@ -317,7 +320,8 @@ def render_list(flt, _, cat='all', threaded=True, limit=PAGE, sel=None, checked=
               + (f" · 마지막 {last['at']} " + (last.get('filename', '') if last.get('ok') else f"(실패: {last.get('error', '')[:60]})")
                  if last else '')]
     if not mails:
-        return html.Div('메일이 없습니다.', className='small text-muted'), opts, st, cat_opts, *run, *more
+        return html.Div(f"'{q}' 이(가) 들어 있는 메일이 없습니다." if terms else '메일이 없습니다.',
+                        className='small text-muted'), opts, st, cat_opts, *run, *more
 
     sizes = mail_threads.sizes([m['thread_key'] for m in mails]) if threaded else {}
 
@@ -335,6 +339,8 @@ def render_list(flt, _, cat='all', threaded=True, limit=PAGE, sel=None, checked=
             ], className='d-flex align-items-center mb-1'),
             html.Div(m['subject'], className='fw-semibold text-truncate'),
             html.Div(mailbox.sender_name(m['sender']), className='small text-muted text-truncate'),
+            html.Div(mailbox.snippet(m['body'], terms), className='small text-muted text-truncate')
+            if terms else None,
         ], id={'type': 'ib-mail', 'id': m['id']}, n_clicks=0, action=True, active=m['id'] == sel,
             className='py-2 flex-grow-1 min-w-0 border-0')
         # 체크박스는 메일 줄 밖에 — 누를 때 메일이 열리지 않게
@@ -356,6 +362,10 @@ def render_list(flt, _, cat='all', threaded=True, limit=PAGE, sel=None, checked=
                 ], open=open_, className='list-group-item p-0 inbox-thread-more'))
         return out
 
+    if terms:  # 검색 결과는 분류로 나누지 않고 최근 순으로
+        head = html.Div(f"'{q}' 검색 결과 {len(mails)}통{' 이상' if more[1] == {} else ''} · 모든 상태",
+                        className='small text-muted mb-1')
+        return html.Div([head, dbc.ListGroup(items(mails))]), opts, st, cat_opts, *run, *more
     if cat != 'all':
         return dbc.ListGroup(items(mails)), opts, st, cat_opts, *run, *more
     groups: dict = {}  # 전체 — 분류별로 모아서 (분류 순서대로, 미분류는 끝에)

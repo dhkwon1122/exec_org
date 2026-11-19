@@ -138,10 +138,20 @@ def _mail_dict(m: InboundMail) -> dict:
             'series_id': m.series_id}
 
 
-def list_mails(status: list[str] | None = None, limit: int = 200, category: int | str | None = None) -> list[dict]:
-    """category: 분류 id, 'none' 이면 미분류만, None 이면 모두 (services/mail_categories.py)."""
+def list_mails(status: list[str] | None = None, limit: int = 200, category: int | str | None = None,
+               query: str = '', date_from: str = '', date_to: str = '') -> list[dict]:
+    """category: 분류 id, 'none' 이면 미분류만, None 이면 모두 (services/mail_categories.py).
+    query: 제목·보낸 사람·본문 글자 검색 (공백으로 나눈 낱말이 모두 들어 있는 메일, "따옴표"는 한 덩어리)."""
     with db.SessionLocal() as s:
         stmt = select(InboundMail).where(InboundMail.status != 'skipped')
+        for term in store.search_terms(query):
+            like = f'%{term}%'
+            stmt = stmt.where(or_(InboundMail.subject.ilike(like), InboundMail.sender.ilike(like),
+                                  InboundMail.body.ilike(like)))
+        if date_from:
+            stmt = stmt.where(InboundMail.mail_date >= date_from)
+        if date_to:
+            stmt = stmt.where(InboundMail.mail_date <= date_to)
         if status:
             stmt = stmt.where(InboundMail.status.in_(status))
         if category == 'none':
@@ -149,6 +159,17 @@ def list_mails(status: list[str] | None = None, limit: int = 200, category: int 
         elif category is not None:
             stmt = stmt.where(InboundMail.category_id == int(category))
         return [_mail_dict(m) for m in s.scalars(stmt.order_by(InboundMail.id.desc()).limit(limit))]
+
+
+def snippet(text: str, terms: list[str], width: int = 120) -> str:
+    """본문에서 검색어 둘레 한 토막 (검색 결과에 보일 글)."""
+    flat = re.sub(r'\s+', ' ', text or '').strip()
+    low = flat.lower()
+    pos = min((p for p in (low.find(t.lower()) for t in terms) if p >= 0), default=-1)
+    if pos < 0:
+        return flat[:width]
+    start = max(0, pos - width // 3)
+    return ('…' if start else '') + flat[start:start + width] + ('…' if start + width < len(flat) else '')
 
 
 def get_mail(mail_id: int) -> dict | None:
