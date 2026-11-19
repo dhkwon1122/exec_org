@@ -135,7 +135,8 @@ def _mail_dict(m: InboundMail) -> dict:
             'handled_at': m.handled_at.strftime('%Y-%m-%d %H:%M') if m.handled_at else '',
             'handled_by': m.handled_by or '', 'category_id': m.category_id,
             'category_source': m.category_source or '', 'thread_key': m.thread_key or '',
-            'series_id': m.series_id}
+            'series_id': m.series_id,
+            'mail_at': m.mail_at.strftime('%Y-%m-%d %H:%M') if m.mail_at else ''}
 
 
 def list_mails(status: list[str] | None = None, limit: int = 200, category: int | str | None = None,
@@ -481,12 +482,23 @@ def create_tasks(mail: dict, items: list[dict], parent_id: int | None, by: str, 
         return ids
 
 
+def mail_time(m: dict) -> str | None:
+    """메일을 받은 시각 — 업무 기록으로 옮길 때의 기록 시각. 메일 머리의 시각(mail_at)이 있으면 그것,
+    없으면(예전에 받은 메일) 가져온 시각이 메일 날짜와 같은 날일 때 그 시각, 그것도 아니면 메일 날짜 09:00."""
+    if m.get('mail_at'):
+        return m['mail_at']
+    got, day = m.get('received_at') or '', m.get('mail_date') or ''
+    if got and (not day or got[:10] == day):
+        return got
+    return f'{day} 09:00' if day else None
+
+
 def _mail_history(mail: dict, task_id: int, by: str, *, session=None) -> None:
     """메일 원문을 업무의 '요청' 기록으로."""
     content = (f"[받은 메일] {mail['subject']}\n보낸 사람: {mail['sender']}\n날짜: {mail['mail_date']}\n\n"
                f"{mail['body'][:20000]}")
     store.add_history(task_id, content, '요청', author=sender_name(mail['sender']) or by,
-                      occurred_at=f"{mail['mail_date']} 09:00" if mail.get('mail_date') else None,  # 메일 날짜로
+                      occurred_at=mail_time(mail),  # 메일을 받은 시각으로 (기록에 연결한 시각이 아니라)
                       title=mail['subject'][:200], session=session)
 
 
@@ -1046,7 +1058,7 @@ def record_trend(mail_id: int, person_ids: list[int], by: str, task_id: int | No
     content = (f"[받은 메일] {m['subject']}\n보낸 사람: {m['sender']}\n날짜: {m['mail_date']}\n\n"
                f"{m['body'][:20000]}")
     h = store.add_history(task_id or None, content, '동향', author=sender_name(m['sender']) or by,
-                          occurred_at=f"{m['mail_date']} 09:00" if m['mail_date'] else None,
+                          occurred_at=mail_time(m),
                           title=m['subject'][:200], person_ids=person_ids)
     enrich.submit(h['id'])
     _mark(mail_id, 'trend', 1, by, trend_history_id=h['id'])
@@ -1233,6 +1245,8 @@ def fetch_new(connect=None, process_now: bool = True) -> dict:
                               in_reply_to=' '.join(mail_threads.parse_ids(parsed.get('in_reply_to', '')))[:1000],
                               references_hdr=' '.join(mail_threads.parse_ids(parsed.get('references', ''))),
                               sender=parsed['sender'][:300], mail_date=parsed['mail_date'],
+                              mail_at=datetime.strptime(parsed['mail_at'], '%Y-%m-%d %H:%M')
+                              if parsed.get('mail_at') else None,
                               body='' if old else parsed['text'], status='skipped' if old else 'review')
                 if uid in deferred:
                     mid = deferred[uid]
@@ -1365,3 +1379,36 @@ def start_poller() -> bool:
 
 
 lock_holder: list = []
+
+
+# ── 예전에 만든 메일 기록의 시각 바로잡기 (scripts/fix_mail_record_times.py) ──────────
+
+def fix_record_times(apply: bool = False) -> dict:
+    """메일을 업무 기록('요청')·임원 동향('동향')으로 옮길 때 연결한 시각이나 메일 날짜 09:00 으로 남은 기록을
+    메일을 받은 시각(mail_time)으로 맞춘다. 기록 내용 머리(메일 제목·보낸 사람·날짜)로 그 메일의 기록만 찾는다.
+    apply=False 면 바꿀 수만 센다. → {'checked', 'changed'}"""
+    from services.db import HistoryEntry
+    checked = changed = 0
+    with db.transaction() as s:
+        for row in s.scalars(select(InboundMail).where(InboundMail.status != 'skipped')):
+            m = _mail_dict(row)
+            when = mail_time(m)
+            trend = m['suggestion'].get('trend_history_id')
+            if not when or not (m['task_ids'] or trend):
+                continue
+            head = f"[받은 메일] {m['subject']}\n보낸 사람: {m['sender']}\n날짜: {m['mail_date']}\n"
+            cond = [HistoryEntry.task_id.in_(m['task_ids'])] if m['task_ids'] else []
+            if trend:
+                cond.append(HistoryEntry.id == trend)
+            target = datetime.strptime(when, '%Y-%m-%d %H:%M')
+            for h in s.scalars(select(HistoryEntry).where(or_(*cond), HistoryEntry.entry_type.in_(('요청', '동향')))):
+                if not (h.content or '').startswith(head):
+                    continue
+                checked += 1
+                if h.occurred_at != target:
+                    changed += 1
+                    if apply:
+                        h.occurred_at = target
+        if not apply:
+            s.rollback()
+    return {'checked': checked, 'changed': changed}

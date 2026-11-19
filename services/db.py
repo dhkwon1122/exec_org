@@ -509,6 +509,7 @@ class InboundMail(Base):
     subject = Column(String(500), default='')
     sender = Column(String(300), default='')
     mail_date = Column(String(10), default='')
+    mail_at = Column(DateTime, nullable=True)  # 메일을 보낸(받은) 시각 — Date 머리, 서버 시간대 (예전 메일은 없음)
     body = Column(Text, default='')
     # skipped(오래돼 건너뜀) / auto(규칙으로 자동 반영) / review(확인 필요) / done(사람이 반영) / ignored(무시) / failed
     status = Column(String(20), default='review', index=True)

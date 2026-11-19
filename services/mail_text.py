@@ -133,6 +133,19 @@ def html_to_text(html: str) -> str:
     return '\n'.join(out).strip()
 
 
+def datetime_of(v) -> str:
+    """Date 머리 → 이 서버 시간대의 'YYYY-MM-DD HH:MM' (다른 기관에서 보낸 시각도 우리 시각으로). 못 읽으면 ''."""
+    try:
+        dt = parsedate_to_datetime(v) if v else None
+    except (TypeError, ValueError, IndexError):
+        return ''
+    if dt is None:
+        return ''
+    if dt.tzinfo is not None:
+        dt = dt.astimezone().replace(tzinfo=None)
+    return dt.strftime('%Y-%m-%d %H:%M')
+
+
 def _date_of(v) -> str:
     try:
         return parsedate_to_datetime(v).date().isoformat() if v else ''
@@ -230,7 +243,7 @@ def _eml(data: bytes) -> dict:
             return ''
     # Date 머리가 없으면(저장 방식에 따라) 본문에 붙은 '보낸 날짜:' 줄로
     return {'name': subject, 'mail_date': _date_of(msg.get('date')) or _header_date(body), 'text': body,
-            'sender': header('from'), 'message_id': header('message-id'),
+            'sender': header('from'), 'message_id': header('message-id'), 'mail_at': datetime_of(msg.get('date')),
             'in_reply_to': header('in-reply-to'), 'references': header('references')}
 
 
