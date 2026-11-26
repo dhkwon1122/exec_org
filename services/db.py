@@ -60,6 +60,9 @@ class Task(Base):
     parent_id = Column(Integer, ForeignKey('tasks.id', ondelete='SET NULL'), nullable=True)
     start_date = Column(String(10), default='')  # YYYY-MM-DD
     due_date = Column(String(10), default='')
+    # 보고가 목표인 업무 (services/reporting.py) — 목표 단계(어디까지 보고해야 하나)와 단계별 보고한 날 JSON {단계: 날짜}
+    report_target = Column(String(30), default='')
+    report_log = Column(Text, default='')
     # 예전 '할 일'을 업무로 합치며 들어온 칸 — 담당자(사용자 DB user_id, 이름은 owner), 완료 시각,
     # 이 업무를 만든 사람, AI 가 이 업무를 제안한 이력(메모)
     assignee_id = Column(String(100), default='')
@@ -509,6 +512,7 @@ class InboundMail(Base):
     subject = Column(String(500), default='')
     sender = Column(String(300), default='')
     mail_date = Column(String(10), default='')
+    mail_at = Column(DateTime, nullable=True)  # 메일을 보낸(받은) 시각 — Date 머리, 서버 시간대 (예전 메일은 없음)
     body = Column(Text, default='')
     # skipped(오래돼 건너뜀) / auto(규칙으로 자동 반영) / review(확인 필요) / done(사람이 반영) / ignored(무시) / failed
     status = Column(String(20), default='review', index=True)

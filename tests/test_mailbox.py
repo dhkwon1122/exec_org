@@ -1,4 +1,5 @@
 import json
+from datetime import datetime
 from email.message import EmailMessage
 
 import pytest
@@ -791,3 +792,46 @@ def test_complete_closes_earlier_unhandled_mails_in_the_same_thread():
     mailbox.reopen(first['id'])
     assert mailbox.ignore(first['id'], '담당자') == 0  # 먼저 받은 메일을 닫을 때 나중 메일은 건드리지 않음
     assert mailbox.get_mail(reply['id'])['status'] == 'done'
+
+
+def test_mail_records_use_the_time_the_mail_was_received():
+    from email.utils import parsedate_to_datetime
+    from services import mail_text
+    local = parsedate_to_datetime('Fri, 23 Oct 2026 08:10:00 +0000').astimezone().strftime('%Y-%m-%d %H:%M')
+    assert mail_text.datetime_of('Fri, 23 Oct 2026 08:10:00 +0000') == local  # 서버 시간대로 (서울이면 17:10)
+    assert mail_text.datetime_of('엉터리') == ''
+    mailbox.fetch_new(connect=lambda cfg: FakePOP([_mail('보고 자료 요청', 'a@x', text='보고서 준비')]))
+    m = mailbox.list_mails()[0]
+    sent = parsedate_to_datetime('Fri, 23 Oct 2026 17:10:00 +0900').astimezone().strftime('%Y-%m-%d %H:%M')
+    assert m['mail_at'] == sent
+    t = store.create_task('보고서')
+    mailbox.link_task(m['id'], t['id'], '담당자')
+    rec = [h for h in store.list_history(t['id']) if h['entry_type'] == '요청'][0]
+    assert rec['occurred_at'].startswith(sent)  # 연결한 시각이 아니라 메일을 받은 시각
+    # 예전 메일(시각 없음) — 같은 날 가져왔으면 가져온 시각, 아니면 메일 날짜 09:00
+    assert mailbox.mail_time({'mail_at': '', 'received_at': '2026-10-23 18:02', 'mail_date': '2026-10-23'}) \
+        == '2026-10-23 18:02'
+    assert mailbox.mail_time({'mail_at': '', 'received_at': '2026-11-02 10:00', 'mail_date': '2026-10-23'}) \
+        == '2026-10-23 09:00'
+    assert mailbox.mail_time({'mail_at': '', 'received_at': '', 'mail_date': ''}) is None
+
+
+def test_fix_record_times_moves_old_mail_records():
+    from services.db import HistoryEntry
+    mailbox.fetch_new(connect=lambda cfg: FakePOP([_mail('보고 자료 요청', 'a@x', text='보고서 준비')]))
+    m = mailbox.list_mails()[0]
+    t = store.create_task('보고서')
+    mailbox.link_task(m['id'], t['id'], '담당자')
+    other = store.add_history(t['id'], '직접 쓴 메모', '요청', occurred_at='2026-11-01 10:00')
+    with db.transaction() as s:  # 예전 방식처럼 연결한 시각으로 남은 기록
+        for h in s.query(HistoryEntry).filter(HistoryEntry.entry_type == '요청'):
+            if h.id != other['id']:
+                h.occurred_at = datetime(2026, 11, 5, 14, 0)
+    assert mailbox.fix_record_times() == {'checked': 1, 'changed': 1}
+    rec = [h for h in store.list_history(t['id']) if h['entry_type'] == '요청' and h['id'] != other['id']][0]
+    assert rec['occurred_at'].startswith('2026-11-05 14:00')  # 보기만 하면 그대로
+    assert mailbox.fix_record_times(apply=True)['changed'] == 1
+    rec = [h for h in store.list_history(t['id']) if h['id'] == rec['id']][0]
+    assert rec['occurred_at'].startswith(m['mail_at'])
+    assert store.get_history(other['id'])['occurred_at'].startswith('2026-11-01 10:00')  # 사람이 쓴 기록은 그대로
+    assert mailbox.fix_record_times()['changed'] == 0

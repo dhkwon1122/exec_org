@@ -12,7 +12,7 @@ STATUS_COLOR = {'예정': 'secondary', '진행중': 'primary', '보류': 'warnin
 ENTRY_ICON = {
     '메모': 'bi-sticky', '피드백': 'bi-chat-left-quote', '동향': 'bi-binoculars', '회의': 'bi-people', '결정': 'bi-check2-square',
     '진행': 'bi-arrow-right-circle',
-    '이슈': 'bi-exclamation-triangle', '요청': 'bi-envelope', '상태변경': 'bi-flag',
+    '이슈': 'bi-exclamation-triangle', '요청': 'bi-envelope', '보고': 'bi-megaphone', '상태변경': 'bi-flag',
     '연결': 'bi-link-45deg', '자료': 'bi-paperclip', '할일': 'bi-check2-circle',
 }
 REF_ICON = {'link': 'bi-link-45deg', 'file': 'bi-file-earmark', 'note': 'bi-card-text'}
@@ -43,7 +43,7 @@ def section_tabs(items, active):
 
 def work_tabs(active='all'):
     return section_tabs([('all', '전체 업무', '/'), ('mine', '내 업무', '/?view=mine'),
-                         ('followups', '후속조치', '/followups')], active)
+                         ('reporting', '보고 진행', '/reporting'), ('followups', '후속조치', '/followups')], active)
 
 
 def people_tabs(active):

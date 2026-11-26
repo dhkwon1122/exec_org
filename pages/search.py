@@ -130,12 +130,15 @@ def search(q, types, person_id, author, date_from, date_to, include_auto, semant
         try:
             sem_q = f"{q} ({', '.join(extra)})" if extra else q  # 같은 말도 함께 넣어 뜻을 찾는다
             similar, sim_docs, sim_refs = _semantic(sem_q, filters, {h['id'] for h in rows}, docs)
+            # 뜻이 비슷한 받은 메일 — 글자로 찾은 메일 뒤에
+            mails = mails + mailbox.similar_mails(
+                sem_q, exclude={m['id'] for m in mails}, limit=5, date_from=date_from or '', date_to=date_to or '')
         except embed.EmbedError as e:
             sem_note = dbc.Alert(f'의미 검색을 하지 못했습니다 — {e}', color='warning', className='small py-1 px-2')
     if not rows and not docs and not similar and not sim_docs and not sim_refs:
         if mails:  # 기록은 없고 메일만 찾았을 때
-            return ([sem_note, _mails_card(mails, terms + extra)], f'메일 {min(len(mails), MAIL_LIMIT)}건'
-                    + ('+' if len(mails) > MAIL_LIMIT else ''), *ui.pager_state(0), None, None, None)
+            return ([sem_note, _mails_card(mails, terms + extra)], _mail_label(mails),
+                    *ui.pager_state(0), None, None, None)
         return [sem_note, dbc.Alert('조건에 맞는 이력이 없습니다.', color='light')], '', *ui.pager_state(0), None, None, None
     terms = terms + extra
     g = None
@@ -151,7 +154,7 @@ def search(q, types, person_id, author, date_from, date_to, include_auto, semant
     if docs or sim_docs or sim_refs:
         label += f' · 문서·자료 {len(docs) + len(sim_docs) + len(sim_refs)}건'
     if mails:
-        label += f" · 메일 {min(len(mails), MAIL_LIMIT)}건" + ('+' if len(mails) > MAIL_LIMIT else '')
+        label += ' · ' + _mail_label(mails)
     if extra:
         label += f" · 용어집의 같은 말: {', '.join(extra)}"
     cards = dbc.ListGroup([html.Div([
@@ -262,16 +265,25 @@ def _similar_section(similar: list[dict], sim_docs: list[dict], sim_refs: list[d
 MAIL_LIMIT = 10  # 이력 검색에 함께 보일 메일 수 — 더 많으면 받은 메일 화면의 검색으로
 
 
+def _mail_label(mails: list[dict]) -> str:
+    direct = [m for m in mails if 'score' not in m]
+    sim = len(mails) - len(direct)
+    return (f"메일 {min(len(direct), MAIL_LIMIT)}건" + ('+' if len(direct) > MAIL_LIMIT else '')
+            + (f' (뜻이 비슷한 메일 {sim}건 포함)' if sim else ''))
+
+
 def _mails_card(mails: list[dict], terms: list[str]):
     """검색어가 들어 있는 받은 메일 (최근 것부터) — 누르면 받은 메일 화면에서 그 메일을 연다."""
-    shown = mails[:MAIL_LIMIT]
+    direct = [m for m in mails if 'score' not in m]
+    shown = direct[:MAIL_LIMIT] + [m for m in mails if 'score' in m]  # 글자로 찾은 것 + 뜻이 비슷한 것
     q = ' '.join(f'"{t}"' if ' ' in t else t for t in terms)
     return dbc.Card(dbc.CardBody([
         html.Div([html.I(className='bi bi-envelope me-1'), f'받은 메일 {len(shown)}건',
                   dcc.Link(' · 더 보기 (받은 메일에서 검색)', href='/inbox?' + urlencode({'q': q}), className='small ms-1')
-                  if len(mails) > MAIL_LIMIT else None], className='fw-semibold mb-2'),
+                  if len(direct) > MAIL_LIMIT else None], className='fw-semibold mb-2'),
         dbc.ListGroup([dbc.ListGroupItem([
             html.Div([
+                ui.score_badge(m['score']) if 'score' in m else None,
                 dcc.Link(m['subject'], href=f"/inbox?mail={m['id']}", className='fw-semibold me-2 text-break'),
                 html.Span(f"{m['mail_date']} · {mailbox.sender_name(m['sender'])}", className='text-muted'),
                 dbc.Badge(mailbox.STATUS.get(m['status'], m['status']), color='light', text_color='dark',

@@ -212,3 +212,46 @@ def test_references_page_adds_similar_section(fresh_db, monkeypatch):
     assert '의미 검색을 하지 못했습니다' in _page_text(out[5]) and '참고자료가 없습니다' in _page_text(out[0])
     monkeypatch.delenv('EMBED_BASE_URL')
     assert page.search('예산', '')[5] is None
+
+
+def _inbound(subject, body, status='review', mail_date='2026-11-10'):
+    from services.db import InboundMail
+    with db.SessionLocal() as s:
+        m = InboundMail(uidl=subject, subject=subject, sender='a@x.com', body=body, status=status,
+                        mail_date=mail_date, suggestion='{}')
+        s.add(m)
+        s.commit()
+        return m.id
+
+
+def test_mail_bodies_are_indexed_and_found_by_meaning(fresh_db):
+    from services import mailbox
+    a = _inbound('인사 안내', '김 상무 보직 변경을 알려 드립니다', status='done')
+    b = _inbound('출장 계획', '다음 주 해외 방문 일정입니다')
+    _inbound('예전 메일', '', status='skipped')  # 본문 없이 건너뛴 메일은 색인하지 않음
+    assert _index_all() == 2
+    assert embed.status()['total'] == 2
+    found = mailbox.similar_mails('인사 발령')  # 글자는 '발령' 이 없지만 뜻이 가까움
+    assert [m['id'] for m in found] == [a] and 0 < found[0]['score'] <= 1
+    assert mailbox.similar_mails('인사 발령', exclude={a}) == []
+    assert [m['id'] for m in mailbox.similar_mails('해외 출장', date_from='2026-11-01')] == [b]
+    assert mailbox.similar_mails('해외 출장', date_from='2026-11-11') == []
+
+
+def test_inbox_and_history_search_show_similar_mails(fresh_db, monkeypatch):
+    monkeypatch.setattr(embed, '_started', True)
+    import app  # noqa: F401
+    from unittest import mock
+    from pages import inbox, search as page
+    a = _inbound('인사 안내', '김 상무 보직 변경을 알려 드립니다')
+    _inbound('발령 공지', '인사 발령 공지')  # 글자로 찾히는 메일
+    _index_all()
+    with mock.patch.object(inbox, 'ctx', mock.Mock(triggered_id=None)):
+        out = inbox.render_list('review', 0, 'all', False, 50, '발령', None, [])
+    text = json.dumps(out[0], default=lambda o: o.to_plurality_json() if hasattr(o, 'to_plurality_json') else str(o),
+                      ensure_ascii=False)
+    assert '발령 공지' in text and '뜻이 비슷한 메일 1통' in text and '인사 안내' in text
+    out, label, *_ = page.search('발령', None, None, None, None, None, False, True, False)
+    text = json.dumps(out, default=lambda o: o.to_plurality_json() if hasattr(o, 'to_plurality_json') else str(o),
+                      ensure_ascii=False)
+    assert '뜻이 비슷한 메일 1건 포함' in label and f'/inbox?mail={a}' in text

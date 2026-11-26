@@ -23,7 +23,7 @@ STATUSES = ['예정', '진행중', '보류', '추적', '완료']
 # '추적' — 끝내는 일이 아니라 주기적으로 오는 자료(주간보고 등)를 받아 쌓고 업데이트를 지켜보는 업무 (services/tracking.py)
 TRACKING = '추적'
 ACTIVE_STATUSES = ['예정', '진행중', '보류', TRACKING]  # 끝나지 않은 업무 — 메일·기록을 연결할 수 있는 업무
-ENTRY_TYPES = ['메모', '피드백', '동향', '회의', '결정', '진행', '이슈', '요청']
+ENTRY_TYPES = ['메모', '피드백', '동향', '회의', '결정', '진행', '이슈', '요청', '보고']
 AUTO_ENTRY_TYPES = ['상태변경', '연결', '자료', '할일']  # 시스템이 자동으로 남기는 유형
 RELATIONS = ['관련', '선행', '후속', '파생']
 # A→B 를 "선행"으로 연결하면 B 쪽에서 A 는 "후속" 관계로 보인다
@@ -57,7 +57,17 @@ def _task_dict(t: Task) -> dict:
         'assignee_id': t.assignee_id or '', 'assignees': _assignee_list(t), 'done_at': _dt(t.done_at),
         'source_history_id': t.source_history_id, 'source_mail_id': t.source_mail_id,
         'created_at': _dt(t.created_at), 'updated_at': _dt(t.updated_at),
+        'report_target': t.report_target or '', 'report_log': _report_log(t.report_log),
     }
+
+
+def _report_log(raw: str | None) -> dict:
+    """보고 단계별 보고한 날 {단계: 'YYYY-MM-DD'} (services/reporting.py)."""
+    try:
+        v = json.loads(raw) if raw else {}
+    except ValueError:
+        return {}
+    return v if isinstance(v, dict) else {}
 
 
 def _assignee_list(t: Task) -> list[dict]:

@@ -7,7 +7,7 @@ from dash import ALL, Input, Output, State, callback, ctx, dcc, html, no_update
 from datetime import date, timedelta
 
 from components import gantt, task_summary_ui, todo_ui, ui
-from services import auth, store
+from services import auth, reporting, store
 
 dash.register_page(__name__, path='/', name='업무', title='업무 기록 · 업무')
 
@@ -146,6 +146,8 @@ def _task_row(t: dict, level: int = 0, n_children: int = 0, n_done: int = 0, n_h
                      className='small text-muted') if t['description'] and level == 0 else None,
             html.Div([
                 todo_ui.due_badge(t['due_date'], done) if t['due_date'] else None,
+                dbc.Badge([html.I(className='bi bi-megaphone me-1'), reporting.label(t)], color='light',
+                          text_color='primary', className='border me-1') if t.get('report_target') else None,
                 *ui.tag_badges(t['tags']),
                 html.Span(' · '.join(meta), className='small text-muted me-2'),
                 dcc.Link(f'하위 {n_hidden}개 더 ▸', href=f"/task/{t['id']}", className='small')
