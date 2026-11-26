@@ -60,6 +60,9 @@ class Task(Base):
     parent_id = Column(Integer, ForeignKey('tasks.id', ondelete='SET NULL'), nullable=True)
     start_date = Column(String(10), default='')  # YYYY-MM-DD
     due_date = Column(String(10), default='')
+    # 보고가 목표인 업무 (services/reporting.py) — 목표 단계(어디까지 보고해야 하나)와 단계별 보고한 날 JSON {단계: 날짜}
+    report_target = Column(String(30), default='')
+    report_log = Column(Text, default='')
     # 예전 '할 일'을 업무로 합치며 들어온 칸 — 담당자(사용자 DB user_id, 이름은 owner), 완료 시각,
     # 이 업무를 만든 사람, AI 가 이 업무를 제안한 이력(메모)
     assignee_id = Column(String(100), default='')

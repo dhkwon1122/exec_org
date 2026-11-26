@@ -5,7 +5,7 @@ import dash
 import dash_bootstrap_components as dbc
 from dash import ALL, Input, Output, State, callback, ctx, dcc, html, no_update
 
-from components import doc_ui, task_summary_ui, todo_ui, tracking_ui, ui
+from components import doc_ui, report_ui, task_summary_ui, todo_ui, tracking_ui, ui
 from services import auth, confluence, documents, mailbox, outbox, store
 
 dash.register_page(__name__, path_template='/task/<task_id>', name='업무 상세', title='업무 기록 · 상세')
@@ -264,6 +264,7 @@ def render(_, _t, _h, _d, tid):
         html.Div([ui.status_badge(t['status']), *ui.tag_badges(t['tags'])], className='mb-2'),
         ui.multiline(t['description']) if t['description'] else html.Div('설명 없음', className='text-muted small'),
         tracking_ui.card(tid) if t['status'] == store.TRACKING else None,  # 주기 자료를 받아 쌓는 업무
+        report_ui.card(t) if t['status'] != store.TRACKING else None,  # 보고가 목표인 업무 — 어디까지 보고했나
     ]))
     header = html.Div([header, html.Div(task_summary_ui.card(tid), className='mt-3')])  # 하위 업무·이력·자료 AI 요약
 
@@ -647,3 +648,6 @@ def merge_task(n_open, _c, n_go, tid, target, direction, n):
     if dst == tid:  # 이 업무가 남음 — 같은 화면을 다시 그린다
         return False, nu, nu, '', False, nu, (n or 0) + 1
     return False, nu, nu, '', False, f'/task/{dst}', nu
+
+
+report_ui.register('td-refresh', 'td-id')  # 보고 단계 — 목표·보고 남기기 (components/report_ui.py)
