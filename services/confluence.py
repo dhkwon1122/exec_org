@@ -336,10 +336,52 @@ def _parse(resp) -> dict:
         raise ConfluenceError(f'컨플루언스 응답이 JSON 이 아닙니다: {resp.text[:200]}') from e
 
 
+# 화면에 글자로 보이지 않는 매크로 설정값 — 글로 옮기면 칸 내용에 섞인다 (상태 표시의 색 'Green휴가' 등)
+_HIDDEN_PARAMS = ('colour', 'color', 'subtle', 'align', 'width', 'height', 'border', 'class', 'style', 'icon',
+                  'macroid', 'atlassian-macro-output-type', 'server', 'serverid', 'columns', 'maximumissues', 'jqlquery')
+_users: dict[str, str] = {}  # 사용자 열쇠 → 이름 (한 번 물어본 것은 다시 묻지 않는다)
+
+
+def _user_name(attrs: str) -> str:
+    """@멘션(<ri:user ri:userkey|ri:account-id|ri:username=…/>) → 사람 이름. 못 찾으면 '@사용자'."""
+    m = re.search(r'ri:(userkey|account-id|username)="([^"]+)"', attrs)
+    if not m:
+        return '@사용자'
+    kind, val = m.groups()
+    if kind == 'username':
+        return _users.setdefault(val, val)
+    if val not in _users:
+        try:
+            data = _get('user', {'key': val} if kind == 'userkey' else {'accountId': val})
+            _users[val] = (data.get('displayName') or data.get('publicName') or data.get('username') or '').strip() \
+                or '@사용자'
+        except Exception:  # noqa: BLE001 — 이름을 못 찾아도 페이지는 읽는다
+            _users[val] = '@사용자'
+    return _users[val]
+
+
+def _users_and_links(s: str) -> str:
+    """@멘션 링크 — 링크에 보이는 글이 있으면 그것, 없으면 사용자 이름."""
+    def link(m):
+        inner = m.group(1)
+        user = re.search(r'<ri:user\b([^>]*)/?>', inner)
+        if not user:
+            return m.group(0)
+        body = re.search(r'<ac:(?:plain-text-)?link-body>(.*?)</ac:(?:plain-text-)?link-body>', inner, flags=re.S)
+        return f' {body.group(1)} ' if body and body.group(1).strip() else f' {_user_name(user.group(1))} '
+    s = re.sub(r'<ac:link\b[^>]*>(.*?)</ac:link>', link, s, flags=re.S)
+    return re.sub(r'<ri:user\b([^>]*)/?>', lambda m: f' {_user_name(m.group(1))} ', s)
+
+
 def storage_to_text(storage: str) -> str:
-    """페이지 본문(storage XHTML) → 글. 표는 ' | ' 줄로, 코드 블록·다른 페이지 링크 제목은 글로 남긴다."""
+    """페이지 본문(storage XHTML) → 글. 표는 ' | ' 줄로, 코드 블록·다른 페이지 링크 제목은 글로 남긴다.
+    날짜 고르기(<time datetime>)는 날짜 글로, @멘션은 사람 이름으로, 상태 표시는 글자만 (색 같은 설정값은 뺀다)."""
     s = storage or ''
     s = re.sub(r'<!\[CDATA\[(.*?)\]\]>', lambda m: m.group(1).replace('&', '&amp;').replace('<', '&lt;'), s, flags=re.S)
+    s = re.sub(r'<time\b[^>]*datetime="([^"]+)"[^>]*?(?:/>|>.*?</time>)', r' \1 ', s, flags=re.S)
+    s = re.sub(r'<ac:parameter\b[^>]*ac:name="([^"]*)"[^>]*>.*?</ac:parameter>',
+               lambda m: '' if m.group(1).lower() in _HIDDEN_PARAMS else m.group(0), s, flags=re.S)
+    s = _users_and_links(s)
     s = re.sub(r'<ri:page\b[^>]*ri:content-title="([^"]*)"[^>]*/?>', r' \1 ', s)
     s = re.sub(r'<ri:attachment\b[^>]*ri:filename="([^"]*)"[^>]*/?>', r' [첨부: \1] ', s)
     return mail_text.html_to_text(s)

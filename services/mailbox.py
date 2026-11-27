@@ -606,6 +606,16 @@ def unlink_task(mail_id: int, task_id: int) -> int:
     return n
 
 
+def _absence_text(m: dict) -> str:
+    """임원 부재를 읽을 글 — 메일 본문 + 본문에 링크된 컨플루언스 페이지 (부재 표가 페이지에 있는 경우가 많다)."""
+    try:
+        extra, _ = confluence.text_for_ai(m['body'])
+    except Exception:  # noqa: BLE001 — 페이지를 못 읽어도 메일 본문으로는 읽는다
+        log.exception('컨플루언스 읽기 실패 %s', m.get('id'))
+        extra = ''
+    return (m['body'] or '') + extra
+
+
 def process_as_category(m: dict, cat: dict, reason: str = '', source: str = 'ai') -> None:
     """1차 분류에 맞는 일만 AI 에게 — 원장님·피플팀장 일정이면 일정 정리, 임원 부재면 부재 추출, 업무 이력이면 할 일
     추출 + 상위 업무 추천, 처리가 없는 분류면 분류만. 결과는 '확인 필요' 추천으로 (화면에서 확인 후 반영)."""
@@ -618,7 +628,7 @@ def process_as_category(m: dict, cat: dict, reason: str = '', source: str = 'ai'
         iid = _make_schedule_import(m, RULE_OWNER[action])
         kind = 'schedule'
     elif action == 'absence':
-        sug['absences'], sug['absence_note'] = absences.extract(m['body'], m['mail_date'], m['subject'])
+        sug['absences'], sug['absence_note'] = absences.extract(_absence_text(m), m['mail_date'], m['subject'])
         kind = 'absence'
     elif action == 'task':
         sug['tasks'] = task_candidates(m['subject'], m['mail_date'], m['body'])
@@ -683,9 +693,9 @@ def process(mail_id: int) -> None:
                 reason = f"{reason} · {schedules.OWNERS[owner]} 일정({why})"
         sug = {'tasks': c['tasks']}
         if c.get('also_absence'):
-            sug['absences'], sug['absence_note'] = absences.extract(m['body'], m['mail_date'], m['subject'])
+            sug['absences'], sug['absence_note'] = absences.extract(_absence_text(m), m['mail_date'], m['subject'])
         if c['kind'] == 'absence':
-            sug['absences'], sug['absence_note'] = absences.extract(m['body'], m['mail_date'], m['subject'])
+            sug['absences'], sug['absence_note'] = absences.extract(_absence_text(m), m['mail_date'], m['subject'])
         if c['kind'] in ('task', 'both') and c['tasks']:
             sug.update(suggest_parent(m['subject'], m['body'], c['tasks'], mail_id))
         _save_result(mail_id, status='review', kind=c['kind'], reason=reason[:500], suggestion=sug,
@@ -714,7 +724,7 @@ def _apply_rule(m: dict, rule: dict) -> None:
                     reason=reason + ('' if imp['status'] == 'done' else f" — 일정 정리 실패: {imp['error']}"))
         return
     if rule['action'] == 'absence':
-        rows, how = absences.extract(m['body'], m['mail_date'], m['subject'])
+        rows, how = absences.extract(_absence_text(m), m['mail_date'], m['subject'])
         sug = {'tasks': [], 'absences': rows, 'absence_note': how}
         states = {r['state'] for r in absences.preview(rows)}
         if rule['auto'] and rows and states <= {'new', 'same'}:  # 임원을 다 찾았고 겹치는 부재가 없을 때만 자동
@@ -1015,7 +1025,7 @@ def set_schedule_owner(mail_id: int, owner: str) -> bool:
         rows = absences.from_schedule_events(imp['events'] if imp else [], m['subject'])
         how = f"{schedules.OWNERS[imp['owner']] if imp else ''} 일정으로 정리된 {len(rows)}건을 임원 부재로 옮겼습니다"
         if not any(r['person'] for r in rows):  # 일정 표에서 임원을 못 찾으면 메일에서 부재를 다시 읽는다
-            found, note = absences.extract(m['body'], m['mail_date'], m['subject'])
+            found, note = absences.extract(_absence_text(m), m['mail_date'], m['subject'])
             if found:
                 rows, how = found, f'일정 표에서 임원을 찾지 못해 메일에서 부재를 다시 읽었습니다 — {note}'
         sug.update({'schedule_as_absence': True, 'absences': rows,
@@ -1181,7 +1191,7 @@ def extract_absences(mail_id: int) -> list[dict]:
     m = get_mail(mail_id)
     if m is None:
         raise ValueError('메일을 찾을 수 없습니다.')
-    rows, how = absences.extract(m['body'], m['mail_date'], m['subject'])
+    rows, how = absences.extract(_absence_text(m), m['mail_date'], m['subject'])
     _update(mail_id, suggestion={**m['suggestion'], 'absences': rows, 'absence_note': how})
     return rows
 
