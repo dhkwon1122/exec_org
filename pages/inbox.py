@@ -6,7 +6,7 @@ from dash import ALL, Input, Output, State, callback, clientside_callback, ctx, 
 
 from components import absence_ui, doc_ui, sched_edit, ui
 from services import (absences, auth, db, doc_versions, doc_worker, embed, llm, mail_categories, mail_series,
-                      mail_threads, mailbox, outbox, schedules, store)
+                      mail_threads, mailbox, outbox, schedule_records, schedules, store)
 
 dash.register_page(__name__, path='/inbox', name='받은 메일', title='업무 기록 · 받은 메일')
 
@@ -125,6 +125,19 @@ def layout(mail=None, q=None, **_):
                         dbc.Button('새 업무로 등록', id='ib-start-new', color='primary', size='sm'),
                         html.Div('연결하거나 만든 업무에는 메일 원문이 "요청" 기록으로 남고, 업무 화면의 출처에 이 메일이 보입니다.',
                                  className='small text-muted mt-2'),
+                        html.Hr(className='my-2'),
+                        html.Div([html.I(className='bi bi-calendar-event me-1'), '캘린더 일정에 기록으로 연결'],
+                                 className='fw-semibold small mb-1'),
+                        html.Div(id='ib-sched-linked', className='mb-1'),
+                        dbc.Row([
+                            dbc.Col(dcc.Dropdown(id='ib-link-sched', placeholder='원장님·피플팀장 일정 (메일 날짜 앞뒤 2주)'),
+                                    md=8),
+                            dbc.Col(dbc.Button('일정에 연결', id='ib-link-sched-go', color='secondary', outline=True,
+                                               className='w-100'), md=4),
+                        ], className='g-2'),
+                        html.Div('보고 자료·피드백 메일을 그 일정의 기록으로 남깁니다. 이미 업무에 연결한 메일이면 그 기록이 일정에도 '
+                                 '묶이고, 아니면 위에서 고른 업무(또는 일정·메일에 나온 임원)에 기록이 남습니다.',
+                                 className='small text-muted mt-1'),
                         html.Hr(className='my-2'),
                         html.Div([html.I(className='bi bi-binoculars me-1'), '임원 동향으로 기록',
                                   html.Span(id='ib-trend-done', className='ms-2')], className='fw-semibold small mb-1'),
@@ -632,6 +645,39 @@ def render_links(sel, _):
                  className='small text-muted mt-2'),
     ]), className='mt-2') if docs else None
     return {}, view, opts, None, attach, _thread_card(m['id'], tasks)
+
+
+@callback(Output('ib-link-sched', 'options'), Output('ib-link-sched', 'value'), Output('ib-sched-linked', 'children'),
+          Input('ib-sel', 'data'), Input('ib-refresh', 'data'))
+def render_sched_links(sel, _):
+    m = mailbox.get_mail(sel) if sel else None
+    if m is None:
+        return [], None, None
+    linked = schedule_records.linked_schedules(m)
+    opts = [{'label': schedule_records.schedule_label(e), 'value': e['id']}
+            for e in schedule_records.schedules_near(m['mail_date']) if e['id'] not in {x['id'] for x in linked}]
+    view = html.Div([html.Div([html.I(className='bi bi-calendar-check me-1 text-success'),
+                               dcc.Link(schedule_records.schedule_label(e),
+                                        href=f"/calendar?tab={'director' if e['owner'] == 'director' else 'people'}")],
+                              className='small') for e in linked]) if linked else None
+    return opts, None, view
+
+
+@callback(Output('ib-refresh', 'data', allow_duplicate=True), Output('ib-msg', 'children', allow_duplicate=True),
+          Output('ib-msg', 'is_open', allow_duplicate=True), Output('ib-msg', 'color', allow_duplicate=True),
+          Input('ib-link-sched-go', 'n_clicks'), State('ib-sel', 'data'), State('ib-link-sched', 'value'),
+          State('ib-link-task', 'value'), State('ib-refresh', 'data'), prevent_initial_call=True)
+def link_schedule(n, sel, sid, task_id, r):
+    if not n or not sel:
+        return no_update, no_update, no_update, no_update
+    if not sid:
+        return no_update, '연결할 일정을 고르세요.', True, 'warning'
+    try:
+        res = schedule_records.link_mail(int(sid), sel, auth.current_name(), task_id=task_id)
+    except ValueError as e:
+        return no_update, str(e), True, 'warning'
+    how = '메일 원문으로 새 기록을 남겨' if res['created'] else '이미 업무에 남긴 메일 기록을'
+    return (r or 0) + 1, f'{how} 일정에 연결했습니다 — 캘린더에서 일정을 열면 보입니다.', True, 'success'
 
 
 def _thread_note(mail_id: int) -> str:

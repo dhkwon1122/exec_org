@@ -50,3 +50,46 @@ def test_people_schedule_does_not_mark_director_stage():
     t = reporting.set_target(store.create_task('인사 제도')['id'], '원장')
     h = schedule_records.add(e['id'], '내용', task_id=t['id'], mark_stage=True)
     assert h['title'].startswith('피플팀장 보고:') and store.get_task(t['id'])['report_log'] == {}
+
+
+def _mail(subject, body, mail_date='2026-11-26'):
+    from services.db import InboundMail
+    with db.SessionLocal() as s:
+        m = InboundMail(uidl=subject, subject=subject, sender='비서실 <sec@x.com>', body=body, status='review',
+                        mail_date=mail_date, suggestion='{}')
+        s.add(m)
+        s.commit()
+        return m.id
+
+
+def test_link_mail_reuses_task_record_or_creates_one():
+    from services import mailbox
+    e = schedules.save({'date': '2026-11-27', 'start_time': '14:00', 'title': '2027 사업계획 보고'})
+    other = schedules.save({'date': '2026-12-30', 'title': '먼 일정'})
+    t = store.create_task('2027 사업계획')
+    mid = _mail('사업계획 보고 자료', '첨부 보고 자료입니다')
+    near = schedule_records.schedules_near('2026-11-26')
+    assert [x['id'] for x in near] == [e['id']]  # 2주 밖 일정은 빠짐
+    assert schedule_records.schedule_label(near[0]) == '원장님 · 11-27 14:00 2027 사업계획 보고'
+    mailbox.link_task(mid, t['id'], '담당자')  # 이미 업무 기록으로 옮긴 메일
+    res = schedule_records.link_mail(e['id'], mid, '담당자')
+    assert not res['created'] and len(res['history_ids']) == 1
+    recs = schedule_records.for_schedule(e['id'])
+    assert [r['id'] for r in recs] == res['history_ids'] and recs[0]['task_id'] == t['id']
+    assert len([h for h in store.list_history(t['id']) if h['entry_type'] == '요청']) == 1  # 기록이 겹치지 않음
+    assert [x['id'] for x in schedule_records.linked_schedules(mailbox.get_mail(mid))] == [e['id']]
+    # 업무에 연결하지 않은 메일 — 고른 업무에 새 기록
+    mid2 = _mail('원장님 피드백 정리', '예산 10% 조정')
+    res = schedule_records.link_mail(e['id'], mid2, '담당자', task_id=t['id'])
+    assert res['created']
+    h = store.get_history(res['history_ids'][0])
+    assert h['task_id'] == t['id'] and h['title'] == '원장님 일정 · 원장님 피드백 정리'
+    assert h['occurred_at'].startswith('2026-11-26')  # 메일 받은 날
+    assert len(schedule_records.for_schedule(e['id'])) == 2
+    assert other['id'] not in [x['id'] for x in schedule_records.linked_schedules(mailbox.get_mail(mid2))]
+    # 업무도 임원도 없으면 안내
+    mid3 = _mail('일반 공지', '내용')
+    with pytest.raises(ValueError, match='업무나 임원'):
+        schedule_records.link_mail(e['id'], mid3)
+    with pytest.raises(ValueError):
+        schedule_records.link_mail(9999, mid3)
