@@ -57,7 +57,7 @@ class _HTMLText(HTMLParser):
         elif tag in ('td', 'th') and self.tables and self.tables[-1]['cell'] is not None:
             t = self.tables[-1]
             text = re.sub(r'[^\S\x1f]+', ' ', ''.join(t['cell'])).strip(' \x1f')
-            text = re.sub(r'\s*\x1f[\s\x1f]*', ' / ', text)
+            text = re.sub(r'\s*\x1f[\s\x1f]*', '\x1f', text)  # 칸 안 줄은 표를 다 읽은 뒤 나누거나 ' / ' 로
             t['row'].append((text, *t['span']))
             t['cell'] = None
         elif tag == 'tr' and self.tables and self.tables[-1]['row'] is not None:
@@ -68,7 +68,8 @@ class _HTMLText(HTMLParser):
             t = self.tables.pop()
             if t['row']:
                 t['rows'].append(t['row'])
-            lines = [' | '.join(r) for r in expand_spans(t['rows']) if any(r)]
+            lines = [' | '.join(c.replace('\x1f', ' / ') for c in r)
+                     for row in expand_spans(t['rows']) for r in split_multiline_row(row) if any(r)]
             outer = self._cell()
             if outer is not None:
                 outer.append('\x1f'.join(lines))
@@ -82,6 +83,29 @@ class _HTMLText(HTMLParser):
             return
         cell = self._cell()
         (cell if cell is not None else self.out).append(data)
+
+
+_DATE_LINE = re.compile(r'^\(?\s*(\d{4}\s*[./\-년]\s*)?\d{1,2}\s*[./월\-]\s*\d{1,2}\s*일?|^\d{1,2}\s*:\s*\d{2}|'
+                        r'^\d{1,2}\s*시|^(오전|오후)')
+_RANGE_EDGE = re.compile(r'(~|∼|-|부터)\s*$|^\s*(~|∼|-|까지)')
+
+
+def split_multiline_row(cells: list[str]) -> list[list[str]]:
+    """칸 안에서 줄을 바꿔 일정 여러 개를 한 행에 적은 표 → 일정마다 한 행.
+    예: '11. 3⏎11.5 | 휴가⏎교육' → '11. 3 | 휴가', '11.5 | 교육'.
+    날짜·시각 줄로만 된 칸이 있고, 줄이 여럿인 칸들의 줄 수가 같을 때만 나눈다 (한 줄 칸은 행마다 그대로).
+    '11.3 ~⏎11.5' 처럼 기간을 두 줄에 걸쳐 쓴 칸, 표 안의 표는 나누지 않는다."""
+    parts = [[x.strip() for x in c.split('\x1f') if x.strip()] or [''] for c in cells]
+    multi = [p for p in parts if len(p) > 1]
+    if not multi or len({len(p) for p in multi}) != 1:
+        return [cells]
+    if any(' | ' in x for p in multi for x in p):
+        return [cells]
+    dated = [p for p in multi if all(_DATE_LINE.search(x) for x in p)]
+    if not dated or any(_RANGE_EDGE.search(x) for p in dated for x in p):
+        return [cells]
+    n = len(multi[0])
+    return [[p[i] if len(p) == n else '\x1f'.join(p) for p in parts] for i in range(n)]
 
 
 def expand_spans(rows: list[list[tuple[str, int, int]]]) -> list[list[str]]:

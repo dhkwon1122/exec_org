@@ -365,3 +365,33 @@ def test_absences_read_from_linked_confluence_table(monkeypatch, env):
     rows, _ = absences.extract(text, m['mail_date'], m['subject'])
     assert [(r['person'], r['kind'], r['start_date'], r['end_date']) for r in rows] == \
         [('이전무', '휴가', '2026-12-01', '2026-12-03')]
+
+
+@pytest.mark.parametrize('html, expected', [
+    # 칸 안 줄바꿈으로 일정 두 개 — 일정마다 한 행으로
+    ('<table><tr><th>성명</th><th>일정</th><th>사유</th></tr><tr><td>이전무</td><td><p>11. 3</p><p>11.5</p></td>'
+     '<td>휴가<br/>교육</td></tr></table>',
+     '성명 | 일정 | 사유\n이전무 | 11. 3 | 휴가\n이전무 | 11.5 | 교육'),
+    # 날짜만 여러 줄 — 사유는 행마다 그대로
+    ('<table><tr><td>이전무</td><td>11.3<br/>11.5</td><td>휴가</td></tr></table>',
+     '이전무 | 11.3 | 휴가\n이전무 | 11.5 | 휴가'),
+    # 기간을 두 줄에 걸쳐 쓴 칸은 나누지 않는다
+    ('<table><tr><td>이전무</td><td>11.3 ~<br/>11.5</td><td>휴가</td></tr></table>', '이전무 | 11.3 ~ / 11.5 | 휴가'),
+    # 날짜·시각이 아닌 여러 줄 칸은 그대로
+    ('<table><tr><td>주간회의<br/>(본관)</td><td>김상무<br/>이전무</td></tr></table>', '주간회의 / (본관) | 김상무 / 이전무'),
+    # 일정표 — 시각이 여러 줄이면 일정마다 한 행 (병합된 날짜 칸도 채움)
+    ('<table><tr><td rowspan="2">11/27</td><td>09:00</td><td>회의</td></tr><tr><td>14:00<br/>16:00</td>'
+     '<td>보고<br/>면담</td></tr></table>', '11/27 | 09:00 | 회의\n11/27 | 14:00 | 보고\n11/27 | 16:00 | 면담'),
+])
+def test_multiline_cells_split_into_rows(html, expected):
+    from services import mail_text
+    assert mail_text.html_to_text(html) == expected
+
+
+def test_multiline_absence_cell_gives_two_absences():
+    from services import absences
+    store.create_person('이전무')
+    s = ('<table><tr><th>성명</th><th>일정</th><th>사유</th></tr><tr><td>이전무</td><td><p>11. 3</p><p>11.5</p></td>'
+         '<td>휴가<br/>교육</td></tr></table>')
+    rows, _ = absences.extract(confluence.storage_to_text(s), '2026-10-30', '부재')
+    assert [(r['kind'], r['start_date']) for r in rows] == [('휴가', '2026-11-03'), ('교육', '2026-11-05')]
