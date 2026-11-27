@@ -102,6 +102,8 @@ class HistoryEntry(Base):
     id = Column(Integer, primary_key=True)
     # 업무에 속한 이력이면 업무 id. 임원 동향처럼 업무 없이 임원에만 연결된 이력은 None
     task_id = Column(Integer, ForeignKey('tasks.id', ondelete='CASCADE'), nullable=True, index=True)
+    # 원장님·피플팀장 일정에서 남긴 보고 기록이면 그 일정 (services/schedule_records.py)
+    schedule_id = Column(Integer, ForeignKey('schedules.id', ondelete='SET NULL'), nullable=True, index=True)
     entry_type = Column(String(20), nullable=False, default='메모')
     content = Column(Text, nullable=False)  # 원문 (가공하지 않고 그대로 보존)
     author = Column(String(100), default='')

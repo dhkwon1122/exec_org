@@ -83,8 +83,9 @@ def set_target(task_id: int, target: str, by: str = '') -> dict:
     return _save(task_id, report_target=target)
 
 
-def mark(task_id: int, stage: str, day: str = '', by: str = '', note: str = '') -> dict:
-    """그 단계에 보고했다고 남긴다 (날짜 기본 오늘) — 업무 이력에 '보고' 기록도."""
+def mark(task_id: int, stage: str, day: str = '', by: str = '', note: str = '', record: bool = True) -> dict:
+    """그 단계에 보고했다고 남긴다 (날짜 기본 오늘) — 업무 이력에 '보고' 기록도 (record=False 면 기록은 부르는
+    쪽이 따로 남긴다 — 일정의 보고 기록)."""
     if stage not in STAGES:
         raise ValueError('보고 단계를 고르세요.')
     day = (day or date.today().isoformat())[:10]
@@ -100,8 +101,9 @@ def mark(task_id: int, stage: str, day: str = '', by: str = '', note: str = '') 
     fields = {'report_log': json.dumps(log, ensure_ascii=False)}
     if not t['report_target']:  # 목표 없이 보고부터 남기면 그 단계를 목표로
         fields['report_target'] = stage
-    content = f'{stage} 보고' + (f'\n\n{note.strip()}' if (note or '').strip() else '')
-    store.add_history(task_id, content, '보고', author=by, occurred_at=f'{day} 09:00', title=f'{stage} 보고')
+    if record:
+        content = f'{stage} 보고' + (f'\n\n{note.strip()}' if (note or '').strip() else '')
+        store.add_history(task_id, content, '보고', author=by, occurred_at=f'{day} 09:00', title=f'{stage} 보고')
     return _save(task_id, **fields)
 
 

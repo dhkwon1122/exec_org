@@ -12,8 +12,8 @@ from datetime import date, timedelta
 import dash_bootstrap_components as dbc
 from dash import ALL, Input, Output, State, callback, ctx, dash_table, dcc, html, no_update
 
-from components import sched_edit
-from services import auth, llm, mail_text, outbox, schedules, store
+from components import sched_edit, ui
+from services import auth, llm, mail_text, outbox, reporting, schedule_records, schedules, store
 
 WEEKDAYS = ['월', '화', '수', '목', '금', '토', '일']
 HOUR_PX = 44
@@ -43,6 +43,7 @@ def layout():
         dbc.Label('세부 사항·결과'), dbc.Textarea(id='dr-f-details', rows=5),
         html.Div(id='dr-f-meta', className='small text-muted mt-2'),
         dbc.Alert(id='dr-f-error', color='danger', is_open=False, className='mt-2 mb-0 py-2'),
+        _record_box(),
     ]
     return html.Div([
         dcc.Store(id='dr-owner', data=schedules.DEFAULT_OWNER),
@@ -140,6 +141,72 @@ def layout():
 
 # ── 보기 ──────────────────────────────────────────────────────────────
 
+def _record_box():
+    """일정의 보고 기록 — 주요 보고의 보고 내용·받은 피드백을 '보고' 이력으로 (services/schedule_records.py).
+    저장한 일정에서만 보인다."""
+    return html.Div([
+        html.Hr(),
+        html.H6([html.I(className='bi bi-megaphone me-1'), '보고 내용·피드백 기록'], className='mb-1'),
+        html.Div('주요 보고였다면 보고한 내용과 받은 피드백·지시를 남기세요. 업무 이력(보고)으로 남고 검색·요약에 쓰입니다.',
+                 className='small text-muted mb-2'),
+        html.Div(id='dr-rec-list', className='mb-2'),
+        dcc.Dropdown(id='dr-rec-task', placeholder='관련 업무 (선택 — 고르면 그 업무 이력으로)', className='mb-2'),
+        dbc.Textarea(id='dr-rec-content', rows=3, placeholder='보고 내용', className='mb-2'),
+        dbc.Textarea(id='dr-rec-feedback', rows=3, placeholder='받은 피드백·지시', className='mb-2'),
+        html.Div([
+            dbc.Checkbox(id='dr-rec-stage', value=True, className='small me-auto',
+                         label="관련 업무가 보고 업무면 '원장' 단계 보고로 표시"),
+            dbc.Button([html.I(className='bi bi-journal-plus me-1'), '보고 기록 남기기'], id='dr-rec-add',
+                       color='primary', size='sm'),
+        ], id='dr-rec-actions', className='d-flex align-items-center'),
+        dbc.Alert(id='dr-rec-msg', is_open=False, className='small py-1 px-2 mt-2 mb-0'),
+    ], id='dr-rec-box', style={'display': 'none'})
+
+
+def _record_list(sid: int | None):
+    rows = schedule_records.for_schedule(sid) if sid else []
+    if not rows:
+        return html.Div('아직 남긴 보고 기록이 없습니다.', className='small text-muted')
+    return dbc.ListGroup([dbc.ListGroupItem([
+        html.Div([dcc.Link(h['title'] or '보고', href=f"/history/{h['id']}", className='fw-semibold me-2'),
+                  html.Span(f"{h['author']} · {h['created_at'][:16]}", className='text-muted me-2'),
+                  ui.task_link({'id': h['task_id'], 'title': h.get('task_title') or f"#{h['task_id']}"})
+                  if h['task_id'] else None]),
+        html.Div(h['content'].split('\n\n', 1)[-1][:400], className='text-muted', style={'whiteSpace': 'pre-wrap'}),
+    ], className='small py-1') for h in rows], flush=True)
+
+
+@callback(Output('dr-rec-box', 'style'), Output('dr-rec-list', 'children'), Output('dr-rec-task', 'options'),
+          Output('dr-rec-stage', 'style'), Input('dr-edit-id', 'data'), Input('dr-modal', 'is_open'),
+          State('dr-owner', 'data'))
+def show_records(sid, is_open, owner):
+    if not sid or not is_open:
+        return {'display': 'none'}, None, [], None
+    opts = [{'label': f"#{t['id']} {t['title']}" + (f" · {reporting.label(t)}" if t.get('report_target') else ''),
+             'value': t['id']} for t in store.list_tasks(status=store.ACTIVE_STATUSES)]
+    stage_ok = schedules.owner_of(owner) in schedule_records.STAGE_FOR_OWNER
+    return {}, _record_list(sid), opts, None if stage_ok else {'display': 'none'}
+
+
+@callback(Output('dr-rec-list', 'children', allow_duplicate=True), Output('dr-rec-msg', 'children'),
+          Output('dr-rec-msg', 'is_open'), Output('dr-rec-msg', 'color'),
+          Output('dr-rec-content', 'value'), Output('dr-rec-feedback', 'value'),
+          Output('dr-refresh', 'data', allow_duplicate=True), Output('history-changed', 'data', allow_duplicate=True),
+          Input('dr-rec-add', 'n_clicks'), State('dr-edit-id', 'data'), State('dr-rec-task', 'value'),
+          State('dr-rec-content', 'value'), State('dr-rec-feedback', 'value'), State('dr-rec-stage', 'value'),
+          State('dr-refresh', 'data'), State('history-changed', 'data'), prevent_initial_call=True)
+def add_record(n, sid, task_id, content, feedback, stage, r, hn):
+    nu = no_update
+    if not n or not sid:
+        return (nu,) * 8
+    try:
+        h = schedule_records.add(sid, content, feedback, task_id, auth.current_name(), mark_stage=bool(stage))
+    except ValueError as e:
+        return nu, str(e), True, 'warning', nu, nu, nu, nu
+    return (_record_list(sid), ['보고 기록을 남겼습니다 — ', dcc.Link('기록 보기', href=f"/history/{h['id']}")],
+            True, 'success', '', '', (r or 0) + 1, (hn or 0) + 1)
+
+
 def _range(view: str, anchor: date) -> tuple[date, date]:
     if view == 'list':  # 그 달 1일 ~ 말일
         last = pycal.monthrange(anchor.year, anchor.month)[1]
@@ -172,6 +239,7 @@ def _ev_box(e: dict, style: dict | None = None, compact: bool = False, day: str 
     if e['end_date']:  # 여러 날 일정
         time = f"{_md(e['date'])}~{_md(e['end_date'])}" + (f" {e['start_time']}" if e['start_time'] else '')
     body = [html.Span(time, className='me-1 opacity-75') if not compact or not e['start_time'] else None,
+            html.I(className='bi bi-journal-text me-1', title=f"보고 기록 {e['records']}건") if e.get('records') else None,
             html.Span(e['title'], className='fw-semibold')]
     if not compact and e['location']:
         body += [html.Div(e['location'], className='opacity-75 text-truncate')]
@@ -366,6 +434,8 @@ def render(anchor, view, _, q, owner):
         return search_view(q.strip(), owner), f'검색: {q.strip()}'
     start, end = _range(view, a)
     events = schedules.list_range(start.isoformat(), end.isoformat(), owner)
+    recs = schedule_records.counts([e['id'] for e in events])  # 보고 기록이 있는 일정은 표시
+    events = [{**e, 'records': recs.get(e['id'], 0)} for e in events]
     if view == 'month':
         return month_view(a, events), f'{a.year}년 {a.month}월'
     if view == 'list':
