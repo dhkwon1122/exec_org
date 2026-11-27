@@ -319,3 +319,49 @@ def test_failed_reference_retried_with_backoff(env, monkeypatch):
         x.content_at = datetime.now() - timedelta(days=2)
         s.commit()
     assert confluence.retry_failed_references() == 0
+
+
+ABSENCE_STORAGE = (
+    '<p>12월 임원 부재 일정</p><table><tbody>'
+    '<tr><th>성명</th><th>구분</th><th>기간</th><th>비고</th></tr>'
+    '<tr><td><ac:link><ri:user ri:userkey="8a7f8081"/></ac:link></td>'
+    '<td><ac:structured-macro ac:name="status"><ac:parameter ac:name="colour">Green</ac:parameter>'
+    '<ac:parameter ac:name="title">휴가</ac:parameter></ac:structured-macro></td>'
+    '<td><time datetime="2026-12-01"/> ~ <time datetime="2026-12-03"/></td><td>가족 여행</td></tr>'
+    '<tr><td><ac:link><ri:user ri:userkey="x9"/><ac:plain-text-link-body><![CDATA[김상무]]></ac:plain-text-link-body>'
+    '</ac:link></td><td>출장</td><td><p><time datetime="2026-12-08"></time></p></td><td>-</td></tr>'
+    '</tbody></table>')
+
+
+def test_storage_keeps_dates_mentions_and_status_text(monkeypatch):
+    """컨플루언스 표의 날짜 고르기·@멘션·상태 표시가 빠지거나 섞이면 부재를 잘못 읽는다."""
+    asked = []
+
+    def fake_get(path, params=None):
+        asked.append(params)
+        return {'displayName': '이전무'}
+    monkeypatch.setattr(confluence, '_get', fake_get)
+    monkeypatch.setattr(confluence, '_users', {})
+    text = confluence.storage_to_text(ABSENCE_STORAGE)
+    assert '이전무 | 휴가 | 2026-12-01 ~ 2026-12-03 | 가족 여행' in text
+    assert '김상무 | 출장 | 2026-12-08 | -' in text  # 링크 글이 있으면 그 글
+    assert 'Green' not in text
+    confluence.storage_to_text(ABSENCE_STORAGE)
+    assert asked == [{'key': '8a7f8081'}]  # 같은 사람은 한 번만 묻는다
+    monkeypatch.setattr(confluence, '_get', lambda *a, **k: (_ for _ in ()).throw(confluence.ConfluenceError('x')))
+    monkeypatch.setattr(confluence, '_users', {})
+    assert '@사용자 | 휴가' in confluence.storage_to_text(ABSENCE_STORAGE)  # 이름을 못 찾아도 페이지는 읽는다
+
+
+def test_absences_read_from_linked_confluence_table(monkeypatch, env):
+    monkeypatch.setattr(confluence, 'read', lambda url, force=False: {
+        'title': '12월 부재', 'text': '성명 | 구분 | 기간\n이전무 | 휴가 | 2026-12-01 ~ 2026-12-03'})
+    store.create_person('이전무')
+    m = {'id': 1, 'body': f'12월 부재 일정 공유드립니다: {WIKI}/pages/555', 'mail_date': '2026-11-27',
+         'subject': '부재 공유'}
+    text = mailbox._absence_text(m)
+    assert '이전무 | 휴가 | 2026-12-01 ~ 2026-12-03' in text
+    from services import absences
+    rows, _ = absences.extract(text, m['mail_date'], m['subject'])
+    assert [(r['person'], r['kind'], r['start_date'], r['end_date']) for r in rows] == \
+        [('이전무', '휴가', '2026-12-01', '2026-12-03')]
