@@ -313,7 +313,7 @@ body {
   background: #252b38; color: white; border-radius: 10px; padding: 12px 18px; z-index: 1110; max-width: 90vw;
   animation: feedback-hide 5s forwards; pointer-events: none; }
 @keyframes feedback-hide { 0%,85% { opacity: 1; } 100% { opacity: 0; visibility: hidden; } }
-.mobile-nav-toggle, .mobile-record-action, .people-mobile { display: none; }
+.mobile-nav-toggle, .mobile-record-action, .mobile-quick-actions, .people-mobile { display: none; }
 .nav-collapse { display: block !important; }
 .app-sidebar .nav-collapse { flex: 1; }
 .people-table { min-width: 950px; }
@@ -331,6 +331,8 @@ body {
   .app-user .avatar { display: none; }
   .mobile-record-action { display: inline-flex; position: fixed; bottom: 18px; right: 18px; z-index: 1010;
     padding: 12px 18px; box-shadow: 0 4px 18px #3a6df044; }
+  .mobile-quick-actions { display: flex; position: fixed; bottom: 18px; right: 18px; z-index: 1010; }
+  .mobile-quick-actions .btn { padding: 12px 18px; box-shadow: 0 4px 18px #3a6df044; }
   .app-main { padding-bottom: 90px; }
 }
 @media (max-width: 767.98px) {

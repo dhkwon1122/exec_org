@@ -96,6 +96,15 @@ def _out(**values):
     return tuple(values.get(key, no_update) for key in OUTS)
 
 
+def _from_path(path: str | None) -> tuple[list[int], list[int]]:
+    """보고 있는 화면 → (업무, 임원) — /task/3 이면 업무 3, /people/5 이면 임원 5."""
+    import re
+    m = re.match(r'^/(task|people)/(\d+)', path or '')
+    if not m:
+        return [], []
+    return ([int(m.group(2))], []) if m.group(1) == 'task' else ([], [int(m.group(2))])
+
+
 def _merge(current, new):
     """작성 중인 초안의 대상에 새로 고른 대상을 덧붙인다 (기존 대상은 지우지 않음)."""
     current = list(current or [])
@@ -143,6 +152,7 @@ def _merge(current, new):
     State('history-changed', 'data'),
     State('todo-changed', 'data'),
     State('doc-changed', 'data'),
+    State('app-url', 'pathname'),
     prevent_initial_call=True,
 )
 def act(
@@ -162,6 +172,7 @@ def act(
     hn,
     tn,
     dn,
+    path=None,
 ):
     if not ctx.triggered or not ctx.triggered[0]['value']:
         return _out()
@@ -171,6 +182,9 @@ def act(
     if isinstance(trigger, dict):
         new_tasks = list(dict.fromkeys(t for t in (trigger['task'], trigger['other']) if t))
         new_people = [trigger['person']] if trigger['person'] else []
+        if trigger['context'] in ('global', 'float') and not (new_tasks or new_people or trigger['ref']):
+            page_task, page_person = _from_path(path)  # 사이드바·떠 있는 단추 — 보고 있는 업무·임원과 연결
+            new_tasks, new_people = page_task, page_person
         new_refs = [trigger['ref']] if trigger['ref'] else []
         options = {'task_opts': task_options(), 'people_opts': people_options(), 'ref_opts': reference_options()}
         if (content or '').strip():

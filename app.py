@@ -26,6 +26,7 @@ from components import doc_ui, ui  # doc_ui: 문서 합치기·나누기 창 (�
 from services import auth, confluence_watch, doc_versions, doc_worker, embed, morning_digest, sso, store, users
 from components.record_tools import layout as record_tools_layout
 from components.record_compose import layout as record_compose_layout
+from components import task_compose  # 어느 화면에서든 업무 추가 (사이드바·휴대폰 떠 있는 단추)
 from services.db import DATA_DIR
 
 
@@ -357,7 +358,10 @@ def _sidebar():
                href='/', className='app-brand'),
         html.Button([html.I(className='bi bi-list me-1'), '메뉴'], id='nav-toggle',
                    className='btn btn-outline-secondary mobile-nav-toggle', **{'aria-label': '전체 메뉴', 'aria-expanded': 'false'}),
-        dbc.Collapse([ui.record_button(context='global', className='mb-3 w-100'), dbc.Nav(links, vertical=True, className='app-nav'),
+        dbc.Collapse([html.Div([ui.record_button(context='global', className='w-100'),
+                                task_compose.open_button(context='global', className='w-100')],
+                               className='d-grid gap-2 mb-3'),
+                      dbc.Nav(links, vertical=True, className='app-nav'),
             dbc.Nav([dbc.NavLink([html.I(className='bi bi-gear me-2'), '설정'], href='/settings', id='nav-settings'),
                      dbc.NavLink([html.I(className='bi bi-trash3 me-2'), '휴지통'], href='/trash', active='exact')],
                     vertical=True, className='app-nav nav-utilities mt-4')], id='nav-collapse', className='nav-collapse'),
@@ -374,7 +378,7 @@ def serve_layout():
     return html.Div([
         dcc.Store(id='todo-changed', data=0),  # 업무 체크/추가/삭제 시 증가 (components/todo_ui.py)
         dcc.Store(id='history-changed', data=0),  # 이력 수정/삭제 시 증가 (components/history_actions.py)
-        history_edit_modal(), record_compose_layout(),
+        history_edit_modal(), record_compose_layout(), task_compose.layout(),
         todo_review_modal(),
         history_link_modal(),
         dcc.Store(id='mail-draft'),
@@ -389,6 +393,11 @@ def serve_layout():
             _sidebar(),
             html.Main(dbc.Container(dash.page_container, fluid=True), className='app-main'),
         ], className='app-shell'),
+        html.Div([  # 휴대폰 — 어느 화면에서든 기록·업무 추가 (사이드바가 접혀 있어서)
+            ui.record_button(context='float', label='기록', className='me-2'),
+            task_compose.open_button(context='float', label='업무', color='light', outline=False,
+                                     className='border'),
+        ], className='mobile-quick-actions'),
     ])
 
 

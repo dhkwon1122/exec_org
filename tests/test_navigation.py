@@ -163,3 +163,45 @@ def test_common_composer_keeps_context_options_with_values_and_preserves_draft(m
     assert len(saved)==21 and saved[0] is False and saved[12:15]==(1,1,1)
     assert saved[20] is True and '저장 완료' in _text(saved[19]) and f"/task/{task['id']}" in _text(saved[19])
     assert store.list_history(task['id'])[0]['content']=='새 기록'
+
+
+def test_task_compose_anywhere_prefills_parent_and_sets_report_target(monkeypatch):
+    from types import SimpleNamespace
+    import app  # noqa: F401
+    from components import task_compose as tc
+    parent = store.create_task('상위 업무')
+    monkeypatch.setattr(auth, 'current_user', lambda: {'user_id': 'kim', 'name': '김철수'})
+    monkeypatch.setattr(auth, 'current_name', lambda: '김철수')
+    monkeypatch.setattr(tc, 'ctx', SimpleNamespace(triggered=[{'value': 1}],
+                                                   triggered_id={'type': 'task-compose', 'context': 'global'}))
+    args = [None, '새 보고 업무', '설명', '진행중', [], '', None, '2026-12-10', '', None, '대표이사', 0]
+    out = tc.act([1], None, None, f"/task/{parent['id']}", *args[1:])
+    assert out[0] is True and out[2] == parent['id']  # 업무 화면에서 열면 그 업무가 상위 업무
+    out = tc.act([1], None, None, '/inbox', *args[1:])
+    assert out[2] is None
+    monkeypatch.setattr(tc, 'ctx', SimpleNamespace(triggered=[{'value': 1}], triggered_id='tc-save'))
+    save = list(args[1:])
+    save[8] = parent['id']
+    out = tc.act([], None, 1, '/inbox', *save)
+    assert out[0] is False and out[14] is True and out[15] == 1
+    t = [x for x in store.list_tasks() if x['title'] == '새 보고 업무'][0]
+    assert t['parent_id'] == parent['id'] and t['due_date'] == '2026-12-10' and t['report_target'] == '대표이사'
+    save[0] = ''
+    out = tc.act([], None, 1, '/inbox', *save)
+    assert out[12] is True  # 제목이 없으면 오류
+
+
+def test_global_record_button_uses_the_page_being_viewed(monkeypatch):
+    from types import SimpleNamespace
+    import app  # noqa: F401
+    from components import record_compose as compose
+    task = store.create_task('보고 있는 업무')
+    person = store.create_person('김임원')
+    values = ['', '메모', None, [], '', False, [], [], None, None, 0, 0, 0]
+    for context, path, want_task, want_person in [('global', f"/task/{task['id']}", [task['id']], []),
+                                                  ('float', f"/people/{person['id']}", [], [person['id']]),
+                                                  ('global', '/inbox', [], [])]:
+        trig = dict(type='record-compose', task=0, other=0, person=0, ref=0, context=context)
+        monkeypatch.setattr(compose, 'ctx', SimpleNamespace(triggered=[{'value': 1}], triggered_id=trig))
+        out = compose.act([1], None, None, *values, path)
+        assert out[1] == want_task and out[2] == want_person

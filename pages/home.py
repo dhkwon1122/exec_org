@@ -49,7 +49,6 @@ def layout(view: str = '', **_):
         dcc.Location(id='home-redirect', refresh='callback-nav'),
         _new_task_modal(),
         ui.page_head('업무', _today_label()), ui.work_tabs('mine' if view == 'mine' else 'all'),
-        ui.record_button(context='home-float', label='기록하기', className='mobile-record-action'),
         dbc.Row([
             dbc.Col([
                 dbc.Row([
